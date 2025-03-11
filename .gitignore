@@ -33,3 +33,7 @@ output/
 
 # env files
 .env.local
+
+# Task files and generation with tmp folders
+**/tmp
+**/.task

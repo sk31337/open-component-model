@@ -1,0 +1,35 @@
+name: Unit Test
+
+on:
+  pull_request:
+  push:
+    branches:
+    - main
+
+jobs:
+  build-bindings-go:
+
+    runs-on: large_runner
+    strategy:
+      matrix:
+        go-version: [ '1.24.x' ]
+        module: [ 'descriptor']
+
+    steps:
+      - name: Self Hosted Runner Post Job Cleanup Action
+        uses: TooMuch4U/actions-clean@v2.2
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: 'bindings/go/${{ matrix.module }}'
+      - name: Setup Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: '${{ github.workspace }}/bindings/go/${{ matrix.module }}/go.mod'
+      - name: Run Tests
+        run: task bindings/go/${{ matrix.module }}:test
