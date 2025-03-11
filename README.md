@@ -1,5 +1,7 @@
 # Open Component Model
 
+> Looking for the original OCM project before our start with the next Generation of OCM? Check out the [previous repository](https://github.com/open-component-model/ocm)
+
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/10065/badge)](https://www.bestpractices.dev/projects/10065)
 [![REUSE status](https://api.reuse.software/badge/github.com/open-component-model/open-component-model)](https://api.reuse.software/info/github.com/open-component-model/open-component-model)
 
@@ -14,6 +16,8 @@ OCM describes delivery [artifacts](https://github.com/open-component-model/ocm-s
 
 
 ## OCM Library
+
+> **WIP**: This OCM Library is a completely new take on interacting and working with OCM. As such, expect heavy changes, especially in the Library API. We are working on a stable API and will release it as soon as possible. Until then, please use the library at your own risk and reference the previous implementation [here](https://github.com/open-component-model/ocm)
 
 This project provides a Go library containing an API for interacting with the
 [Open Component Model (OCM)](https://github.com/open-component-model/ocm-spec) elements and mechanisms.
@@ -37,6 +41,8 @@ Additionally, OCM provides a generic solution for how to:
 
 ## [OCM CLI](docs/reference/cli/ocm.md)
 
+> **WIP**: This OCM CLI is a completely new take on interacting and working with OCM. As such, expect heavy changes, especially in the Commands available. We are working on a stable API and will release it as soon as possible. Until then, please use the library at your own risk and reference the previous implementation [here](https://github.com/open-component-model/ocm)
+
 The [`ocm` CLI](docs/reference/cli/ocm.md) may also be used to interact with OCM mechanisms. It makes it easy to create component versions and embed them in build processes.
 
 The code for the CLI can be found in [`cli`](cli).
@@ -46,7 +52,9 @@ The code for the CLI can be found in [`cli`](cli).
 
 We supply language bindings for:
 
-- [go](bindings/go)
+- [go](bindings/go). These Bindings are also used by the OCM CLI and are our primary Focus.
+
+> We are open to discussing and implementing bindings for other languages. If you are interested in a specific language, please open an issue or contact us directly. Contributions are always welcome!
 
 
 ## Licensing
