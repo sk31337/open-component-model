@@ -56,6 +56,11 @@ We supply language bindings for:
 
 > We are open to discussing and implementing bindings for other languages. If you are interested in a specific language, please open an issue or contact us directly. Contributions are always welcome!
 
+## Contributing
+
+Code contributions, feature requests, bug reports, and help requests are very welcome. Please refer to the [Contributing Guide in the Community repository](https://github.com/open-component-model/.github/blob/main/CONTRIBUTING.md) for more information on how to contribute to OCM.
+
+OCM follows the [CNCF Code of Conduct](https://github.com/cncf/foundation/blob/main/code-of-conduct.md).
 
 ## Licensing
 
