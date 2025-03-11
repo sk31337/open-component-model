@@ -29,3 +29,7 @@ Dockerfile.cross
 dist/
 output/
 /.project
+
+
+# env files
+.env.local
