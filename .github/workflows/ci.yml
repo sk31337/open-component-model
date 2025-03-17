@@ -97,7 +97,7 @@ jobs:
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
           working-directory: ${{ github.workspace }}/${{ matrix.module }}
-          args: --timeout 10m --config=${{ github.workspace }}/.github/config/golangci.yml --issues-exit-code=0
+          args: --timeout 10m --config=${{ github.workspace }}/.github/config/golangci.yml
   run_unit_tests:
     name: "Unit Tests"
     needs: discover_modules
@@ -152,3 +152,30 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:go"
+
+  generate:
+    runs-on: ubuntu-latest
+    name: "Code Generation"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Go (required by some generators)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - name: Initialize go.work
+        run: task init/go.work
+      - name: Run Code Generation
+        run: task generate
+      - name: Ensure Clean Target Repository
+        run: |
+          gitStatus="$(git status --porcelain)"
+          if [[ -z "${gitStatus}" ]]; then
+              exit 0
+          fi
+          echo "${gitStatus}"
+          exit 1
