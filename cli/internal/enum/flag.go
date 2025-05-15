@@ -3,6 +3,7 @@ package enum
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/spf13/pflag"
 )
@@ -26,7 +27,8 @@ func New(options ...string) *Flag {
 	if len(options) == 0 {
 		panic("options must not be empty")
 	}
-	return &Flag{target: &options[0], options: options}
+	target := strings.Clone(options[0]) // clone as flag value will be used by cobra and we don't want to change options
+	return &Flag{target: &target, options: slices.Clone(options)}
 }
 
 func (f *Flag) String() string {
@@ -54,6 +56,13 @@ func Var(f *pflag.FlagSet, name string, options []string, usage string) {
 	cloned := slices.Clone(options)
 	slices.Sort(cloned)
 	f.Var(flag, name, fmt.Sprintf("%s\n(must be one of %v)", usage, cloned))
+}
+
+func VarP(f *pflag.FlagSet, name string, shorthand string, options []string, usage string) {
+	flag := New(options...)
+	cloned := slices.Clone(options)
+	slices.Sort(cloned)
+	f.VarP(flag, name, shorthand, fmt.Sprintf("%s\n(must be one of %v)", usage, cloned))
 }
 
 func get[T any](f *pflag.FlagSet, name string, ftype string, convFunc func(sval string) (T, error)) (T, error) {
