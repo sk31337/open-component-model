@@ -92,6 +92,11 @@ func (m *TestPlugin) GetIdentity(ctx context.Context, typ repov1.GetIdentityRequ
 
 var _ repov1.ReadWriteOCMRepositoryPluginContract[*dummyv1.Repository] = &TestPlugin{}
 
+// Config defines a configuration that this plugin requires.
+type Config struct {
+	MaximumNumberOfPotatoes string `json:"maximumNumberOfPotatoes"`
+}
+
 func main() {
 	args := os.Args[1:]
 	// log messages are shared over stderr by convention established by the plugin manager.
@@ -109,6 +114,11 @@ func main() {
 	}
 
 	logger.Info("registered test plugin")
+
+	capabilities.AddConfigType(runtime.Type{
+		Name:    "custom.config",
+		Version: "v1",
+	})
 
 	// TODO(Skarlso): ConsumerIdentityTypesForConfig endpoint
 
@@ -147,6 +157,16 @@ func main() {
 	if conf.ID == "" {
 		logger.Error("plugin config has no ID")
 		os.Exit(1)
+	}
+
+	for _, raw := range conf.ConfigTypes {
+		pluginConfig := &Config{}
+		if err := json.Unmarshal(raw.Data, pluginConfig); err != nil {
+			logger.Error("failed to unmarshal plugin config", "error", err)
+			os.Exit(1)
+		}
+
+		logger.Info("configuration successfully marshaled", "maximumNumberOfPotatoes", pluginConfig.MaximumNumberOfPotatoes)
 	}
 
 	separateContext := context.Background()

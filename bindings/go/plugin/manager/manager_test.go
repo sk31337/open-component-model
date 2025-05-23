@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	v1 "ocm.software/open-component-model/bindings/go/configuration/v1"
 	"ocm.software/open-component-model/bindings/go/plugin/internal/dummytype"
 	dummyv1 "ocm.software/open-component-model/bindings/go/plugin/internal/dummytype/v1"
 	repov1 "ocm.software/open-component-model/bindings/go/plugin/manager/contracts/ocmrepository/v1"
@@ -21,11 +22,26 @@ import (
 )
 
 func TestPluginManager(t *testing.T) {
+	config := &v1.Config{
+		Type: runtime.Type{
+			Name:    "custom.config",
+			Version: "v1",
+		},
+		Configurations: []*runtime.Raw{
+			{
+				Type: runtime.Type{
+					Name:    "custom.config",
+					Version: "v1",
+				},
+				Data: []byte(`{}`),
+			},
+		},
+	}
 	slog.SetLogLoggerLevel(slog.LevelDebug)
 	ctx := t.Context()
 	baseContext := context.Background()
 	pm := NewPluginManager(baseContext)
-	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata")))
+	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata")), WithConfiguration(config))
 	scheme := runtime.NewScheme()
 	dummytype.MustAddToScheme(scheme)
 	typ, err := scheme.TypeForPrototype(&dummyv1.Repository{})
@@ -52,12 +68,91 @@ func TestPluginManager(t *testing.T) {
 	require.Equal(t, "test-component:1.0.0", desc.String())
 }
 
+func TestConfigurationPassedToPlugin(t *testing.T) {
+	config := &v1.Config{
+		Type: runtime.Type{
+			Version: "v1",
+			Name:    "generic.config.ocm.software",
+		},
+		Configurations: []*runtime.Raw{
+			{
+				Type: runtime.Type{
+					Name:    "custom.config",
+					Version: "v1",
+				},
+				Data: []byte(`{"maximumNumberOfPotatoes":"100"}`),
+			},
+		},
+	}
+	writer := bytes.NewBuffer(nil)
+	slog.SetDefault(slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+	ctx := t.Context()
+	baseContext := context.Background()
+	pm := NewPluginManager(baseContext)
+	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata"), WithConfiguration(config)))
+	scheme := runtime.NewScheme()
+	dummytype.MustAddToScheme(scheme)
+	typ, err := scheme.TypeForPrototype(&dummyv1.Repository{})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// make sure it's not there but during a proper shutdown now this is removed by the plugin
+		_ = os.Remove("/tmp/test-plugin-plugin.socket")
+	})
+	proto, err := scheme.NewObject(typ)
+	require.NoError(t, err)
+	plugin, err := pm.ComponentVersionRepositoryRegistry.GetPlugin(ctx, proto)
+	require.NoError(t, err)
+	require.NoError(t, pm.Shutdown(ctx))
+	// we need some time for the logs to be streamed back
+	require.Eventually(t, func() bool {
+		err := plugin.Ping(context.Background())
+		return err != nil
+	}, 1*time.Second, 100*time.Millisecond)
+
+	content, err := io.ReadAll(writer)
+	require.NoError(t, err)
+	require.Contains(t, string(content), `maximumNumberOfPotatoes=100`)
+}
+
+func TestConfigurationPassedToPluginNotFound(t *testing.T) {
+	config := &v1.Config{
+		Type: runtime.Type{
+			Version: "v1",
+			Name:    "generic.config.ocm.software",
+		},
+		Configurations: []*runtime.Raw{},
+	}
+	slog.SetLogLoggerLevel(slog.LevelDebug)
+	ctx := t.Context()
+	baseContext := context.Background()
+	pm := NewPluginManager(baseContext)
+	err := pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata"), WithConfiguration(config))
+	require.EqualError(t, err, "failed to add plugin test-plugin: no configuration found for plugin test-plugin; requested configuration types: [custom.config/v1]")
+}
+
 func TestPluginManagerCancelContext(t *testing.T) {
+	config := &v1.Config{
+		Type: runtime.Type{
+			Name:    "custom.config",
+			Version: "v1",
+		},
+		Configurations: []*runtime.Raw{
+			{
+				Type: runtime.Type{
+					Name:    "custom.config",
+					Version: "v1",
+				},
+				Data: []byte(`{}`),
+			},
+		},
+	}
 	slog.SetLogLoggerLevel(slog.LevelDebug)
 	ctx, cancel := context.WithCancel(context.Background())
 	baseContext, baseCancel := context.WithCancel(context.Background()) // a different context
 	pm := NewPluginManager(baseContext)
-	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata")))
+	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata"), WithConfiguration(config)))
 	t.Cleanup(func() {
 		require.NoError(t, pm.Shutdown(ctx))
 		require.NoError(t, os.Remove("/tmp/test-plugin-plugin.socket"))
@@ -87,11 +182,26 @@ func TestPluginManagerCancelContext(t *testing.T) {
 }
 
 func TestPluginManagerShutdownPlugin(t *testing.T) {
+	config := &v1.Config{
+		Type: runtime.Type{
+			Name:    "custom.config",
+			Version: "v1",
+		},
+		Configurations: []*runtime.Raw{
+			{
+				Type: runtime.Type{
+					Name:    "custom.config",
+					Version: "v1",
+				},
+				Data: []byte(`{}`),
+			},
+		},
+	}
 	slog.SetLogLoggerLevel(slog.LevelDebug)
 	ctx := context.Background()
 	baseContext := context.Background() // a different context
 	pm := NewPluginManager(baseContext)
-	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata")))
+	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata"), WithConfiguration(config)))
 	t.Cleanup(func() {
 		// make sure it's gone even if the test fails, but ignore the deletion error since it should be removed.
 		_ = os.Remove("/tmp/test-plugin-plugin.socket")
@@ -119,6 +229,21 @@ func TestPluginManagerShutdownPlugin(t *testing.T) {
 }
 
 func TestPluginManagerShutdownWithoutWait(t *testing.T) {
+	config := &v1.Config{
+		Type: runtime.Type{
+			Name:    "custom.config",
+			Version: "v1",
+		},
+		Configurations: []*runtime.Raw{
+			{
+				Type: runtime.Type{
+					Name:    "custom.config",
+					Version: "v1",
+				},
+				Data: []byte(`{}`),
+			},
+		},
+	}
 	writer := bytes.NewBuffer(nil)
 	slog.SetDefault(slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -126,7 +251,7 @@ func TestPluginManagerShutdownWithoutWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	baseContext := context.Background() // a different context
 	pm := NewPluginManager(baseContext)
-	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata")))
+	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata"), WithConfiguration(config)))
 	t.Cleanup(func() {
 		// make sure it's gone even if the test fails, but ignore the deletion error since it should be removed.
 		_ = os.Remove("/tmp/test-plugin-plugin.socket")
@@ -188,8 +313,13 @@ func TestPluginManagerMultiplePluginsForSameType(t *testing.T) {
 	}
 	serialized, err := json.Marshal(pluginTypes)
 	require.NoError(t, err)
-
-	require.NoError(t, pm.addPlugin(ctx, testPlugin, bytes.NewBuffer(serialized)))
+	config := &v1.Config{
+		Type: runtime.Type{
+			Name:    "custom.config",
+			Version: "v1",
+		},
+	}
+	require.NoError(t, pm.addPlugin(ctx, config, testPlugin, bytes.NewBuffer(serialized)))
 	// trying to add the same plugin again for the same type but with different id
 	// this way of testing actually showed a horrible flaw. We were passing around a pointer
 	// which meant if we weren't very careful and overwrote the plugin AFTER we added it,
@@ -199,7 +329,7 @@ func TestPluginManagerMultiplePluginsForSameType(t *testing.T) {
 	testPlugin.Config.ID = "test-other"
 	testPlugin.Config.Type = "tcp"
 	testPlugin.Types = nil
-	require.ErrorContains(t, pm.addPlugin(ctx, testPlugin, bytes.NewBuffer(serialized)), "failed to register plugin test-other: plugin for type OCIRepository/v1 already registered with ID: test-id")
+	require.ErrorContains(t, pm.addPlugin(ctx, config, testPlugin, bytes.NewBuffer(serialized)), "failed to register plugin test-other: plugin for type OCIRepository/v1 already registered with ID: test-id")
 }
 
 func TestPluginManagerWithNoPlugins(t *testing.T) {
