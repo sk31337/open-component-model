@@ -20,7 +20,7 @@ func NewResourceRegistry(ctx context.Context) *ResourceRegistry {
 		ctx:                ctx,
 		registry:           make(map[runtime.Type]types.Plugin),
 		scheme:             runtime.NewScheme(runtime.WithAllowUnknown()),
-		internalPlugins:    make(map[runtime.Type]v1.ReadWriteResourcePluginContract),
+		internalPlugins:    make(map[runtime.Type]Repository),
 		constructedPlugins: make(map[string]*constructedPlugin),
 	}
 }
@@ -30,7 +30,7 @@ type ResourceRegistry struct {
 	ctx                context.Context
 	mu                 sync.Mutex
 	registry           map[runtime.Type]types.Plugin
-	internalPlugins    map[runtime.Type]v1.ReadWriteResourcePluginContract
+	internalPlugins    map[runtime.Type]Repository
 	scheme             *runtime.Scheme
 	constructedPlugins map[string]*constructedPlugin // running plugins
 }
@@ -56,21 +56,10 @@ func (r *ResourceRegistry) AddPlugin(plugin types.Plugin, constructionType runti
 }
 
 // GetResourcePlugin returns Resource plugins for a specific type.
-func (r *ResourceRegistry) GetResourcePlugin(ctx context.Context, spec runtime.Typed) (v1.ReadWriteResourcePluginContract, error) {
+func (r *ResourceRegistry) GetResourcePlugin(ctx context.Context, spec runtime.Typed) (Repository, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	plugin, err := r.getPlugin(ctx, spec)
-	if err != nil {
-		return nil, err
-	}
-
-	return plugin, nil
-}
-
-// getPlugin returns a Resource plugin for a given type using a specific plugin storage map. It will also first look
-// for existing registered internal plugins based on the type and the same registry name.
-func (r *ResourceRegistry) getPlugin(ctx context.Context, spec runtime.Typed) (v1.ReadWriteResourcePluginContract, error) {
 	// look for an internal implementation that actually implements the interface
 	_, _ = r.scheme.DefaultType(spec)
 	typ := spec.GetType()
@@ -84,9 +73,20 @@ func (r *ResourceRegistry) getPlugin(ctx context.Context, spec runtime.Typed) (v
 		return p, nil
 	}
 
-	plugin, ok := r.registry[typ]
+	plugin, err := r.getPlugin(ctx, typ)
+	if err != nil {
+		return nil, err
+	}
+
+	return r.externalToResourcePluginConverter(plugin, r.scheme), nil
+}
+
+// getPlugin returns a Resource plugin for a given type using a specific plugin storage map. It will also first look
+// for existing registered internal plugins based on the type and the same registry name.
+func (r *ResourceRegistry) getPlugin(ctx context.Context, spec runtime.Type) (v1.ReadWriteResourcePluginContract, error) {
+	plugin, ok := r.registry[spec]
 	if !ok {
-		return nil, fmt.Errorf("failed to get plugin for typ %q", typ)
+		return nil, fmt.Errorf("failed to get plugin for typ %q", spec)
 	}
 
 	if existingPlugin, ok := r.constructedPlugins[plugin.ID]; ok {
@@ -100,7 +100,7 @@ func (r *ResourceRegistry) getPlugin(ctx context.Context, spec runtime.Typed) (v
 func RegisterInternalResourcePlugin(
 	scheme *runtime.Scheme,
 	r *ResourceRegistry,
-	plugin v1.ReadWriteResourcePluginContract,
+	plugin Repository,
 	proto runtime.Typed,
 ) error {
 	r.mu.Lock()
