@@ -35,5 +35,8 @@
         'ocm.software/open-component-model/**',
       ],
     },
+  ],
+  "allowedCommands": [
+    "^find\\s\\.\\s-name.+go\\.mod.+-path.+integration.+go\\smod\\stidy"
   ]
 }
