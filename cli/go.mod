@@ -11,7 +11,7 @@ require (
 	golang.org/x/sync v0.16.0
 	golang.org/x/sys v0.34.0
 	ocm.software/open-component-model/bindings/go/blob v0.0.3
-	ocm.software/open-component-model/bindings/go/configuration v0.0.2
+	ocm.software/open-component-model/bindings/go/configuration v0.0.3
 	ocm.software/open-component-model/bindings/go/constructor v0.0.0-20250718123610-c4fc9b2af637
 	ocm.software/open-component-model/bindings/go/credentials v0.0.1
 	ocm.software/open-component-model/bindings/go/ctf v0.2.0
@@ -21,8 +21,8 @@ require (
 	ocm.software/open-component-model/bindings/go/input/file v0.0.0-20250718123610-c4fc9b2af637
 	ocm.software/open-component-model/bindings/go/input/utf8 v0.0.0-20250718123610-c4fc9b2af637
 	ocm.software/open-component-model/bindings/go/oci v0.0.4
-	ocm.software/open-component-model/bindings/go/plugin v0.0.0-20250718123610-c4fc9b2af637
-	ocm.software/open-component-model/bindings/go/repository v0.0.0-20250718123610-c4fc9b2af637
+	ocm.software/open-component-model/bindings/go/plugin v0.0.0-20250725140937-53cd0a935ca2
+	ocm.software/open-component-model/bindings/go/repository v0.0.0-20250725133302-29604af67acc
 	ocm.software/open-component-model/bindings/go/runtime v0.0.2
 	oras.land/oras-go/v2 v2.6.0
 	sigs.k8s.io/yaml v1.6.0
