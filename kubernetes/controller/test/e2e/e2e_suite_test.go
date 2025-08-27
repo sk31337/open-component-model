@@ -61,14 +61,6 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func(ctx SpecContext) {
-	By("Creating manager namespace", func() {
-		err := utils.CreateNamespace(ctx, namespace)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) error {
-			return utils.DeleteNamespace(ctx, namespace)
-		})
-	})
-
 	timeout = os.Getenv("RESOURCE_TIMEOUT")
 	if timeout == "" {
 		timeout = "10m"
@@ -78,49 +70,11 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	Expect(imageRegistry).NotTo(BeEmpty(), "IMAGE_REGISTRY must be set")
 
 	By("Starting the operator", func() {
-		// projectimage stores the name of the image used in the example
-		var projectimage = strings.TrimLeft(imageRegistry, "http://") + "/ocm.software/ocm-controller:v0.0.1"
-
-		By("Building the manager(Operator) image " + projectimage)
-		cmd := exec.CommandContext(ctx, "task", "docker-build", "CONTROLLER_IMG="+projectimage)
-		_, err := utils.Run(cmd)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred())
-
-		cmd = exec.CommandContext(ctx, "task", "docker-push", "CONTROLLER_IMG="+projectimage)
-		_, err = utils.Run(cmd)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred())
-
-		By("Installing CRDs")
-		cmd = exec.CommandContext(ctx, "task", "install")
-		_, err = utils.Run(cmd)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) error {
-			By("uninstalling CRDs")
-			cmd = exec.CommandContext(ctx, "task", "uninstall")
-			// In case ´make undeploy` already uninstalled the CRDs
-			cmd.Env = append(os.Environ(), "IGNORE_NOT_FOUND=true")
-			_, err = utils.Run(cmd)
-
-			return err
-		})
-
-		By("Deploying the controller-manager")
-		cmd = exec.CommandContext(ctx, "task", "deploy", "CONTROLLER_IMG="+projectimage)
-		_, err = utils.Run(cmd)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) error {
-			By("Un-deploying the controller-manager")
-			cmd = exec.CommandContext(ctx, "task", "undeploy", "CONTROLLER_IMG="+projectimage)
-			_, err = utils.Run(cmd)
-
-			return err
-		})
-
 		By("Validating that the controller-manager pod is running as expected")
 		verifyControllerUp := func(ctx context.Context) error {
 			// Get pod name
 
-			cmd = exec.CommandContext(ctx, "kubectl", "get",
+			cmd := exec.CommandContext(ctx, "kubectl", "get",
 				"pods", "-l", "control-plane=controller-manager",
 				"-o", "go-template={{ range .items }}"+
 					"{{ if not .metadata.deletionTimestamp }}"+

@@ -40,7 +40,7 @@ jobs:
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
           go-version-file: kubernetes/controller/go.mod
-          cache-dependency-path: kuberneetes/controller/go.sum
+          cache-dependency-path: kubernetes/controller/go.sum
 
       - name: Install Task
         uses: arduino/setup-task@v2
@@ -89,13 +89,15 @@ jobs:
             kubernetes/controller
             .github/workflows/kubernetes-controller.yml
             Taskfile.yml
+      - name: Set up docker
+        uses: docker/setup-docker-action@v4
       - name: Docker Login
         uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
         with:
           registry: ghcr.io
           username: ocmbot[ocm]
           password: ${{ steps.generate_token.outputs.token }}
-      - name: Build and Push
+      - name: Build
         run: task kubernetes/controller:docker-buildx
-        env:
-          IMG: ghcr.io/${{ github.repository }}/kubernetes/controller:latest
+      - name: Push
+        run: task kubernetes/controller:docker-push
