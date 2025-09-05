@@ -34,6 +34,13 @@
       groupSlug: 'kubernetes-deps',
     },
     {
+      matchPackagePrefixes: [
+        'github.com/docker/'
+      ],
+      groupName: 'Docker dependencies',
+      groupSlug: 'docker-deps',
+    },
+    {
       matchCategories: [
         'golang',
       ],
