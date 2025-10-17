@@ -9,4 +9,4 @@ components:
         version: "1.0.0"
         input:
           type: file
-          path: ./podinfo.yaml
+          path: ./k8s-manifest.yaml
