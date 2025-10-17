@@ -15,8 +15,8 @@ require (
 	ocm.software/open-component-model/bindings/go/blob v0.0.9
 	ocm.software/open-component-model/bindings/go/descriptor/runtime v0.0.0-20251009073722-3db19b40ae7d
 	ocm.software/open-component-model/bindings/go/descriptor/v2 v2.0.1-alpha3
-	ocm.software/open-component-model/bindings/go/oci v0.0.9
-	ocm.software/open-component-model/bindings/go/repository v0.0.2
+	ocm.software/open-component-model/bindings/go/oci v0.0.10
+	ocm.software/open-component-model/bindings/go/repository v0.0.3
 	ocm.software/open-component-model/bindings/go/runtime v0.0.2
 	ocm.software/open-component-model/cli v0.0.0-20250929111900-08cb1b0e7343
 	oras.land/oras-go/v2 v2.6.0
@@ -49,6 +49,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
