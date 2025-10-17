@@ -1,6 +1,7 @@
-version: '3'
+# https://ocm.software/dev/docs/getting-started/prerequisites/
+version: "3"
 
-dotenv: ['.env', '.env.local']
+dotenv: [".env", ".env.local"]
 
 output: prefixed
 
@@ -108,7 +109,6 @@ vars:
   GO_MODULES:
     sh: find {{ .ROOT_DIR }} -name go.mod -exec dirname {} \; | sed 's|{{ .ROOT_DIR }}/||'
 
-
 tasks:
   default:
     deps: ["cli:build", "kubernetes/controller:build"]
@@ -122,18 +122,18 @@ tasks:
     desc: "Run all tests in the project"
     vars:
       TASKS:
-        sh: "task -aj | jq -r '.tasks[] | select(.name | endswith(\":test\")) | .name | rtrimstr(\":test\")'"
+        sh: 'task -aj | jq -r ''.tasks[] | select(.name | endswith(":test")) | .name | rtrimstr(":test")'''
     cmds:
       - for: { var: TASKS }
-        task: '{{.ITEM}}:test'
+        task: "{{.ITEM}}:test"
   test/integration:
     desc: "Run all integration tests in the project, possibly requiring external systems"
     vars:
       TASKS:
-        sh: "task -aj | jq -r '.tasks[] | select(.name | endswith(\":test/integration\")) | .name | rtrimstr(\":test/integration\")'"
+        sh: 'task -aj | jq -r ''.tasks[] | select(.name | endswith(":test/integration")) | .name | rtrimstr(":test/integration")'''
     cmds:
       - for: { var: TASKS }
-        task: '{{.ITEM}}:test/integration'
+        task: "{{.ITEM}}:test/integration"
 
   init/go.work:
     desc: "Initialize the workspace environment"
@@ -142,16 +142,16 @@ tasks:
     cmds:
       - go work init
       - for: { var: GO_MODULES }
-        cmd: 'go work use {{.ITEM}}'
+        cmd: "go work use {{.ITEM}}"
 
   generate:
     desc: "Run all Code Generators in the project"
     deps:
-      - task: 'bindings/go/generator:ocmtypegen/generate'
-      - task: 'tools:deepcopy-gen/generate-deepcopy'
-      - task: 'kubernetes/controller:manifests'
-      - task: 'kubernetes/controller:generate'
-      - task: 'cli:generate/docs'
+      - task: "bindings/go/generator:ocmtypegen/generate"
+      - task: "tools:deepcopy-gen/generate-deepcopy"
+      - task: "kubernetes/controller:manifests"
+      - task: "kubernetes/controller:generate"
+      - task: "cli:generate/docs"
         vars:
           CLI_DOCUMENTATION_MODE: "hugo"
-          CLI_DOCUMENTATION_DIRECTORY: '{{ .ROOT_DIR }}/cli/docs/reference'
+          CLI_DOCUMENTATION_DIRECTORY: "{{ .ROOT_DIR }}/cli/docs/reference"

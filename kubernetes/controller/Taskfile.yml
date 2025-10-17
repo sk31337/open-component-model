@@ -105,7 +105,7 @@ tasks:
       args=(
         --platform={{.PLATFORMS}}
         -t {{.CONTROLLER_IMG}}
-        -f {{.TASKFILE_DIR}}/Dockerfile {{.TASKFILE_DIR}}
+        -f "{{.TASKFILE_DIR}}/Dockerfile" "{{.TASKFILE_DIR}}"
       )
       
       # If LOAD is set, load single-arch image into local daemon
