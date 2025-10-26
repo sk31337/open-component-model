@@ -3,7 +3,7 @@ module ocm.software/open-component-model/bindings/go/signing
 go 1.25.0
 
 require (
-	ocm.software/open-component-model/bindings/go/descriptor/runtime v0.0.0-20251017132044-0548a0ad422b
+	ocm.software/open-component-model/bindings/go/descriptor/runtime v0.0.0-20251026002931-0acec39b7ba4
 	ocm.software/open-component-model/bindings/go/runtime v0.0.2
 )
 
