@@ -64,9 +64,12 @@ kubernetes/controller/
         nested-signed/                        # ships ocm.software signing keypair
         signing/                              # ships ocm.software signing keypair
         configuration-localization/
-    kustomize/
+    kustomize/                                # Flux variants sit flat
       simple/
       configuration-localization/
+      argocd/                                 # ArgoCD Application delivery
+        simple/
+        configuration-localization/
     k8s-manifest/
       simple/
   test/e2e/
@@ -551,8 +554,10 @@ Implementation lands in stages so the suite stays green throughout.
   flat `examples/helm-simple/` → first `examples/helm/simple/`, then per Q5b
   split per delivery tool into `examples/helm/fluxcd/simple/` (Flux only) and
   `examples/helm/argocd/simple/` (ArgoCD only). Same pattern for the other five
-  helm scenarios. `kustomize/` and `k8s-manifest/` are not split (they ship
-  only one delivery tool today).
+  helm scenarios. `k8s-manifest/` is not split (it ships only one delivery
+  tool today). `kustomize/` is split: Flux variants sit flat under
+  `kustomize/{simple,configuration-localization}/`; ArgoCD variants live
+  under `kustomize/argocd/{simple,configuration-localization}/`.
 - Each split scenario's `rgd.yaml` declares only the resources for *its*
   delivery tool (no `Application` in `helm/fluxcd/*`, no `OCIRepository`/
   `HelmRelease` in `helm/argocd/*`).

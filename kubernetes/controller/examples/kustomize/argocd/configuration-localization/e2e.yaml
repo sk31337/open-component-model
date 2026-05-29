@@ -1,0 +1,40 @@
+requires:
+  - kro
+  - argocd
+
+prepare:
+  components:
+    - constructor: component-constructor.yaml
+
+deploy:
+  - apply: bootstrap.yaml
+  - apply: rgd.yaml
+    waitFor:
+      kind: rgd
+      name: ${SCENARIO_SIMPLE_NAME}
+      conditions: [create, condition=Ready=true]
+  - apply: instance.yaml
+
+assert:
+  resources:
+    - kind: applications.argoproj.io
+      name: ${SCENARIO_SIMPLE_NAME}
+      namespace: argocd
+      waitFor:
+        - create
+        - jsonpath={.status.sync.status}=Synced
+        - jsonpath={.status.health.status}=Healthy
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo
+      namespace: default-argocd
+      waitFor: [create, condition=Available]
+      pods:
+        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+        condition: condition=Ready=true
+  fieldEquals:
+    - resource: pod -n default-argocd -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+      jsonPath: "'{.items[0].spec.containers[0].image}'"
+      value: ${IMAGE_REGISTRY_HOST}/stefanprodan/podinfo:6.9.1
+    - resource: pod -n default-argocd -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+      jsonPath: "'{.items[0].spec.containers[0].env[?(@.name==\"PODINFO_UI_MESSAGE\")].value}'"
+      value: ${SCENARIO_SIMPLE_NAME}

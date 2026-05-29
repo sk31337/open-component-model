@@ -36,9 +36,12 @@ examples/
 │       ├── nested-signed/
 │       ├── simple-nested-status/
 │       └── configuration-localization/
-├── kustomize/               # Flux Kustomization
-│   ├── simple/
-│   └── configuration-localization/
+├── kustomize/               # Kustomize delivery, split by delivery tool
+│   ├── simple/              # (flat = Flux Kustomization)
+│   ├── configuration-localization/
+│   └── argocd/              # ArgoCD Application
+│       ├── simple/
+│       └── configuration-localization/
 └── k8s-manifest/            # raw manifest delivery
     └── simple/
 ```
@@ -87,14 +90,32 @@ OCM resource → ArgoCD `Application` (Helm OCI source) → release in
 | `simple-nested-status/` | Same as `simple/` but uses the nested `oci:` status field shape (`additional.oci.{registry,repository,tag,digest}`) instead of flat fields. |
 | `configuration-localization/` | OCM configuration + localization applied via `Application.spec.source.helm.parameters` (the ArgoCD equivalent of `HelmRelease.spec.values`). |
 
-### `kustomize/` — Kustomize delivery via Flux
+### `kustomize/` — Kustomize delivery, split by delivery tool
 
-OCM resource → `OCIRepository` → Flux `Kustomization`.
+OCM publishes the kustomize tree (and any referenced image resources); the
+tree is then delivered into the cluster by a delivery tool. The Flux variants
+sit flat under `kustomize/` (legacy layout); the ArgoCD variants live under
+`kustomize/argocd/`.
+
+#### `kustomize/` (flat) — Flux Kustomization
+
+OCM resource → Flux `GitRepository` → Flux `Kustomization`.
 
 | Folder | Shows |
 |---|---|
 | `simple/` | Plain Kustomize delivery. |
-| `configuration-localization/` | Configuration + localization applied to a Kustomize tree. |
+| `configuration-localization/` | Configuration + localization applied to a Kustomize tree via Flux `Kustomization.spec.patches`. |
+
+#### `kustomize/argocd/` — ArgoCD Application
+
+OCM resource → ArgoCD `Application` (git source) → release in `default-argocd`.
+ArgoCD ≥ 2.10 supports `kustomize.patches` with the same JSON6902 /
+strategic-merge syntax as Flux, so the patch shape mirrors the Flux variant.
+
+| Folder | Shows |
+|---|---|
+| `simple/` | Plain Kustomize delivery via ArgoCD. |
+| `configuration-localization/` | Configuration + localization applied via `Application.spec.source.kustomize.patches`. |
 
 ### `k8s-manifest/` — Plain manifest delivery
 
@@ -132,8 +153,10 @@ full command surface.
 
 1. Decide on the family (`helm/`, `kustomize/`, `k8s-manifest/`) — or propose a
    new one in your PR description if none fit. For `helm/`, also pick the
-   delivery tool sub-folder (`fluxcd/` or `argocd/`); add the scenario under
-   both if it should exist for each delivery tool.
+   delivery tool sub-folder (`fluxcd/` or `argocd/`). For `kustomize/`, ArgoCD
+   variants live under `kustomize/argocd/`; the Flux variants currently sit
+   flat under `kustomize/`. Add the scenario under both if it should exist for
+   each delivery tool.
 2. Create `examples/<family>[/<tool>]/<scenario>/` with at minimum:
    - `component-constructor.yaml`
    - `bootstrap.yaml`
