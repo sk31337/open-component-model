@@ -20,9 +20,12 @@ const (
 
 var _ = Describe("ApplySet Pruning Tests", func() {
 	Context("when testing pruning with OCM deployer", func() {
-		examplesDir := legacyExamplesDir()
+		// applyset-pruning is a test-only fixture, not a user-facing demo, so
+		// it lives under test/e2e/scenarios/applyset/pruning rather than
+		// examples/. The exampleName is still applyset-pruning because it is
+		// used as the OCM component name and resource label across the spec.
 		exampleName := "applyset-pruning"
-		exampleDir := filepath.Join(examplesDir, exampleName)
+		exampleDir := filepath.Join(legacyScenariosDir(), "applyset", "pruning")
 
 		reqFiles := []string{ComponentConstructor, Bootstrap, BootstrapDeployer}
 

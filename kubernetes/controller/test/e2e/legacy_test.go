@@ -33,3 +33,15 @@ func legacyExamplesDir() string {
 	}
 	return filepath.Join(projectDir(), "examples")
 }
+
+// legacyScenariosDir resolves the test/e2e/scenarios folder, which holds
+// test-only fixtures (corner cases not meant as user-facing demos). Honors
+// SCENARIOS_DIR so tests can be invoked from anywhere. Like
+// legacyExamplesDir, this helper exists only until Stage 4 of the runner
+// migration lands.
+func legacyScenariosDir() string {
+	if dir := os.Getenv("SCENARIOS_DIR"); dir != "" {
+		return dir
+	}
+	return filepath.Join(projectDir(), "test", "e2e", "scenarios")
+}

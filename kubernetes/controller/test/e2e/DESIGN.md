@@ -571,9 +571,11 @@ Implementation lands in stages so the suite stays green throughout.
 
 - Move `test/e2e/testdata/basic-auth/` → `test/e2e/scenarios/credentials/basic-auth/`,
   same for docker-config-json. Author `e2e.yaml` for each.
-- Move `examples/applyset-pruning/` → `test/e2e/scenarios/applyset/pruning/`.
-  Author `e2e.yaml` plus the `applyset*` hooks in `test/e2e/hooks/applyset.go`,
-  registered in `Registry`.
+- ~~Move `examples/applyset-pruning/` → `test/e2e/scenarios/applyset/pruning/`~~
+  (done — the folder now lives under `test/e2e/scenarios/applyset/pruning/`;
+  `e2e_applyset_test.go` resolves it via `legacyScenariosDir()`).
+  Still pending: author `e2e.yaml` plus the `applyset*` hooks in
+  `test/e2e/hooks/applyset.go`, registered in `Registry`.
 - Delete `e2e_credentials_test.go` and `e2e_applyset_test.go`.
 
 ### Stage 5 — wire CI sharding
