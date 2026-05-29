@@ -1,5 +1,5 @@
 components:
-  - name: ocm.software/ocm-k8s-toolkit/examples/kustomize-simple
+  - name: ocm.software/ocm-k8s-toolkit/examples/kustomize-fluxcd-simple
     version: "1.0.0"
     provider:
       name: ocm.software

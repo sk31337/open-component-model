@@ -37,8 +37,9 @@ examples/
 │       ├── simple-nested-status/
 │       └── configuration-localization/
 ├── kustomize/               # Kustomize delivery, split by delivery tool
-│   ├── simple/              # (flat = Flux Kustomization)
-│   ├── configuration-localization/
+│   ├── fluxcd/              # Flux Kustomization
+│   │   ├── simple/
+│   │   └── configuration-localization/
 │   └── argocd/              # ArgoCD Application
 │       ├── simple/
 │       └── configuration-localization/
@@ -93,11 +94,12 @@ OCM resource → ArgoCD `Application` (Helm OCI source) → release in
 ### `kustomize/` — Kustomize delivery, split by delivery tool
 
 OCM publishes the kustomize tree (and any referenced image resources); the
-tree is then delivered into the cluster by a delivery tool. The Flux variants
-sit flat under `kustomize/` (legacy layout); the ArgoCD variants live under
-`kustomize/argocd/`.
+tree is then delivered into the cluster by a delivery tool. Each scenario
+exists in two parallel variants — one under `kustomize/fluxcd/` using a Flux
+`Kustomization`, and one under `kustomize/argocd/` using an ArgoCD
+`Application`. Pick the variant that matches your delivery tool.
 
-#### `kustomize/` (flat) — Flux Kustomization
+#### `kustomize/fluxcd/` — Flux Kustomization
 
 OCM resource → Flux `GitRepository` → Flux `Kustomization`.
 
@@ -152,11 +154,9 @@ full command surface.
 ## Adding a new example
 
 1. Decide on the family (`helm/`, `kustomize/`, `k8s-manifest/`) — or propose a
-   new one in your PR description if none fit. For `helm/`, also pick the
-   delivery tool sub-folder (`fluxcd/` or `argocd/`). For `kustomize/`, ArgoCD
-   variants live under `kustomize/argocd/`; the Flux variants currently sit
-   flat under `kustomize/`. Add the scenario under both if it should exist for
-   each delivery tool.
+   new one in your PR description if none fit. For `helm/` and `kustomize/`,
+   also pick the delivery tool sub-folder (`fluxcd/` or `argocd/`). Add the
+   scenario under both if it should exist for each delivery tool.
 2. Create `examples/<family>[/<tool>]/<scenario>/` with at minimum:
    - `component-constructor.yaml`
    - `bootstrap.yaml`

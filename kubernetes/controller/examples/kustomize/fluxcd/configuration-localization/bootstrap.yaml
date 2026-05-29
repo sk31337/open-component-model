@@ -1,7 +1,7 @@
 apiVersion: delivery.ocm.software/v1alpha1
 kind: Repository
 metadata:
-  name: kustomize-simple-repository
+  name: kustomize-fluxcd-configuration-localization-repository
 spec:
   repositorySpec:
     # Adjust to your OCM repository
@@ -12,21 +12,21 @@ spec:
 apiVersion: delivery.ocm.software/v1alpha1
 kind: Component
 metadata:
-  name: kustomize-simple-component
+  name: kustomize-fluxcd-configuration-localization-component
 spec:
-  component: ocm.software/ocm-k8s-toolkit/examples/kustomize-simple
+  component: ocm.software/ocm-k8s-toolkit/examples/kustomize-fluxcd-configuration-localization
   repositoryRef:
-    name: kustomize-simple-repository
+    name: kustomize-fluxcd-configuration-localization-repository
   semver: 1.0.0
   interval: 10m
 ---
 apiVersion: delivery.ocm.software/v1alpha1
 kind: Resource
 metadata:
-  name: kustomize-simple-resource-rgd
+  name: kustomize-fluxcd-configuration-localization-resource-rgd
 spec:
   componentRef:
-    name: kustomize-simple-component
+    name: kustomize-fluxcd-configuration-localization-component
   resource:
     byReference:
       resource:
@@ -35,8 +35,8 @@ spec:
 apiVersion: delivery.ocm.software/v1alpha1
 kind: Deployer
 metadata:
-  name: kustomize-simple-deployer
+  name: kustomize-fluxcd-configuration-localization-deployer
 spec:
   resourceRef:
-    name: kustomize-simple-resource-rgd
+    name: kustomize-fluxcd-configuration-localization-resource-rgd
     namespace: default

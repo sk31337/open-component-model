@@ -24,11 +24,11 @@ Pick the location based on **who the scenario is for**:
 `applyset/`, `credentials/`. Within `helm/`, examples are split a second
 level by delivery tool: `helm/fluxcd/<scenario>/` for Flux-only and
 `helm/argocd/<scenario>/` for ArgoCD-only (each scenario uses one tool, not
-both — see DESIGN.md Q5b). `kustomize/` follows the same per-tool split: the
-Flux variants currently sit flat at `kustomize/<scenario>/` (legacy layout)
-and the ArgoCD variants live under `kustomize/argocd/<scenario>/`. The
-runner walks both trees and stops descending at the first `e2e.yaml` it
-finds. Anything below that file is treated as scenario-private content.
+both — see DESIGN.md Q5b). `kustomize/` follows the same per-tool split:
+Flux variants live under `kustomize/fluxcd/<scenario>/` and ArgoCD variants
+under `kustomize/argocd/<scenario>/`. The runner walks both trees and stops
+descending at the first `e2e.yaml` it finds. Anything below that file is
+treated as scenario-private content.
 
 If you cannot decide: ask yourself "would a user reading the examples folder
 benefit from seeing this?" If no, it belongs under `test/e2e/scenarios/`.
