@@ -50,12 +50,20 @@ kubernetes/controller/
   examples/                                   # user-facing demos (also tested)
     README.md
     helm/
-      simple/
-      simple-nested-status/
-      nested/
-      nested-signed/                          # ships ocm.software signing keypair
-      signing/                                # ships ocm.software signing keypair
-      configuration-localization/
+      fluxcd/                                 # Flux HelmRelease delivery
+        simple/
+        simple-nested-status/
+        nested/
+        nested-signed/                        # ships ocm.software signing keypair
+        signing/                              # ships ocm.software signing keypair
+        configuration-localization/
+      argocd/                                 # ArgoCD Application delivery
+        simple/
+        simple-nested-status/
+        nested/
+        nested-signed/                        # ships ocm.software signing keypair
+        signing/                              # ships ocm.software signing keypair
+        configuration-localization/
     kustomize/
       simple/
       configuration-localization/
@@ -96,10 +104,10 @@ references (bootstrap, component-constructor, rgd, instance, k8s-manifest, signi
 ### Naming
 
 Scenarios are identified by their **slash-separated path relative to their root**.
-`${SCENARIO_FOLDER}` exposes that name verbatim (`helm/simple`,
+`${SCENARIO_FOLDER}` exposes that name verbatim (`helm/fluxcd/simple`,
 `credentials/basic-auth`); `${SCENARIO_SIMPLE_NAME}` is the dashed form
-(`helm-simple`, `credentials-basic-auth`) for embedding in Kubernetes resource names,
-where `/` is invalid.
+(`helm-fluxcd-simple`, `credentials-basic-auth`) for embedding in Kubernetes
+resource names, where `/` is invalid.
 
 ### Discovery rule
 
@@ -107,7 +115,7 @@ The walker descends each root recursively. **The first directory containing an
 `e2e.yaml` is treated as a scenario; the walker does not descend into it further.**
 Nested scenarios are illegal and cause a load-time error. Directories without an
 `e2e.yaml` are walked through, allowing intermediate grouping folders (`helm/`,
-`credentials/`) and incidental files (`README.md`).
+`helm/fluxcd/`, `credentials/`) and incidental files (`README.md`).
 
 ## The `e2e.yaml` schema
 
@@ -201,9 +209,9 @@ references cause a load-time error.
 
 | Variable | Value | Example |
 |---|---|---|
-| `${SCENARIO_FOLDER}` | path relative to root, slash-separated | `helm/simple` |
-| `${SCENARIO_SIMPLE_NAME}` | scenario folder with `/` → `-` (k8s-safe) | `helm-simple` |
-| `${SCENARIO_DIR}` | absolute path to scenario folder | `/.../examples/helm/simple` |
+| `${SCENARIO_FOLDER}` | path relative to root, slash-separated | `helm/fluxcd/simple` |
+| `${SCENARIO_SIMPLE_NAME}` | scenario folder with `/` → `-` (k8s-safe) | `helm-fluxcd-simple` |
+| `${SCENARIO_DIR}` | absolute path to scenario folder | `/.../examples/helm/fluxcd/simple` |
 | `${IMAGE_REGISTRY}` | full URL incl. scheme | `http://image-registry:5000` |
 | `${IMAGE_REGISTRY_HOST}` | host:port, no scheme | `image-registry:5000` |
 | `${PROTECTED_REGISTRY_BASIC_AUTH}` | basic-auth registry URL | `http://localhost:31002` |
@@ -332,11 +340,13 @@ Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
 
 | Command | Effect |
 |---|---|
-| `task test/e2e` | run all 12 scenarios |
-| `task test/e2e -- helm/simple` | run one scenario |
-| `task test/e2e -- helm/` | run all six helm scenarios |
+| `task test/e2e` | run all 18 scenarios |
+| `task test/e2e -- helm/fluxcd/simple` | run one scenario |
+| `task test/e2e -- helm/fluxcd/` | run all six Flux helm scenarios |
+| `task test/e2e -- helm/argocd/` | run all six ArgoCD helm scenarios |
+| `task test/e2e -- helm/` | run all twelve helm scenarios |
 | `task test/e2e -- credentials/` | run both credentials scenarios |
-| `task test/e2e -- examples` | run only the `Context("examples")` block (9 demos) |
+| `task test/e2e -- examples` | run only the `Context("examples")` block (15 demos) |
 | `task test/e2e/setup/local` | provision kind cluster + all components |
 | `E2E_TIMEOUT=10m task test/e2e` | bump global timeout |
 
@@ -344,10 +354,10 @@ The retired `task test/e2e/example NAME=foo` is replaced by `task test/e2e -- fo
 
 ## Worked examples
 
-### 1. Standard helm + ArgoCD demo (`examples/helm/simple/e2e.yaml`)
+### 1a. Flux-only helm demo (`examples/helm/fluxcd/simple/e2e.yaml`)
 
 ```yaml
-requires: [kro, flux-source, flux-helm, argocd]
+requires: [kro, flux-source, flux-helm]
 
 prepare:
   components:
@@ -361,10 +371,6 @@ deploy:
       name: ${SCENARIO_SIMPLE_NAME}
       conditions: [create, condition=Ready=true]
   - apply: instance.yaml
-    waitFor:
-      kind: helmsimple.kro.run
-      name: ${SCENARIO_SIMPLE_NAME}
-      conditions: [condition=Ready=true]
 
 assert:
   resources:
@@ -374,6 +380,31 @@ assert:
       pods:
         selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
         condition: Ready=true
+```
+
+The `rgd.yaml` declares only the OCM `Resource` → `OCIRepository` → `HelmRelease`
+chain. No ArgoCD `Application`. `argocd` is *not* in `requires:`.
+
+### 1b. ArgoCD-only helm demo (`examples/helm/argocd/simple/e2e.yaml`)
+
+```yaml
+requires: [kro, argocd]
+
+prepare:
+  components:
+    - constructor: component-constructor.yaml
+
+deploy:
+  - apply: bootstrap.yaml
+  - apply: rgd.yaml
+    waitFor:
+      kind: rgd
+      name: ${SCENARIO_SIMPLE_NAME}
+      conditions: [create, condition=Ready=true]
+  - apply: instance.yaml
+
+assert:
+  resources:
     - kind: applications.argoproj.io
       name: ${SCENARIO_SIMPLE_NAME}
       namespace: argocd
@@ -389,6 +420,17 @@ assert:
         selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-argocd-podinfo
         condition: Ready=true
 ```
+
+The `rgd.yaml` declares only the OCM `Resource` chain feeding an ArgoCD
+`Application`. No `OCIRepository` or `HelmRelease`. `flux-source`/`flux-helm`
+are *not* in `requires:`.
+
+This split — one delivery tool per scenario — is deliberate (Q5 / Q5b). It
+gives new readers an unambiguous reference for each tool, and lets the runner
+skip Flux setup for `helm/argocd/*` and ArgoCD setup for `helm/fluxcd/*`. A
+side-by-side parity demo is intentionally *not* in `examples/`; if such a
+scenario is needed for the test suite, place it under
+`test/e2e/scenarios/helm/parity/`.
 
 ### 2. Multi-stage test choreography (`test/e2e/scenarios/applyset/pruning/e2e.yaml`)
 
@@ -463,6 +505,7 @@ discussion that produced this doc.
 | Q3 | Component provisioning | Opaque scripts under `setup/components/<name>.sh` | New components = drop a script; harness has no taxonomy to migrate. |
 | Q4 | Cluster lifecycle | Persistent local, ephemeral CI shards | Optimises both audiences: dev iteration speed, CI hermeticity. |
 | Q5 | Folder layout | Audience-split: `examples/` (demos) vs `test/e2e/scenarios/` (test-only), family-grouped | Honors the audience split; one home per scenario, no duplication. |
+| Q5b | Helm sub-grouping | Within `examples/helm/`, split by delivery tool: `helm/fluxcd/<name>/` and `helm/argocd/<name>/`. Each scenario uses **only** its named tool. | Removes the implicit "Flux + ArgoCD always shipped together" coupling; gives readers an unambiguous reference for each tool; the runner can skip the unused stack via `requires:`. |
 | Q6 | Interpreter | Generic runner + named Go hooks (chainable arrays) | Imperative escape hatch without per-scenario Go file. |
 | Q7a | `requires:` shape | Opaque list, validated against script existence | Avoids schema lock-in as the component taxonomy evolves. |
 | Q7b | `prepare:` shape | Structured `components: []` block | The full preparation matrix is small and finite; structure beats hooks. |
@@ -505,9 +548,16 @@ Implementation lands in stages so the suite stays green throughout.
 ### Stage 3 — migrate examples scenarios
 
 - Move each user-facing example into the family-grouped layout under `examples/`:
-  `examples/helm-simple/` → `examples/helm/simple/`, etc.
-- Author `e2e.yaml` for each migrated scenario. The new runner picks them up via
-  `Context("examples")`.
+  flat `examples/helm-simple/` → first `examples/helm/simple/`, then per Q5b
+  split per delivery tool into `examples/helm/fluxcd/simple/` (Flux only) and
+  `examples/helm/argocd/simple/` (ArgoCD only). Same pattern for the other five
+  helm scenarios. `kustomize/` and `k8s-manifest/` are not split (they ship
+  only one delivery tool today).
+- Each split scenario's `rgd.yaml` declares only the resources for *its*
+  delivery tool (no `Application` in `helm/fluxcd/*`, no `OCIRepository`/
+  `HelmRelease` in `helm/argocd/*`).
+- Author `e2e.yaml` for each migrated scenario. The new runner picks them up
+  via `Context("examples")`.
 - Delete the corresponding entries from the legacy `e2e_examples_test.go`.
 - After all examples migrate, `e2e_examples_test.go` is deleted.
 

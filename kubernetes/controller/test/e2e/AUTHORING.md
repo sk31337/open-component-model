@@ -21,7 +21,10 @@ Pick the location based on **who the scenario is for**:
 | **Test-only fixture** — exercises a corner case, edge condition, or feature whose only consumer is the test suite | `kubernetes/controller/test/e2e/scenarios/<family>/<scenario>/` | Auto-discovered |
 
 `<family>` groups related scenarios: `helm/`, `kustomize/`, `k8s-manifest/`,
-`applyset/`, `credentials/`. The runner walks both trees and stops descending
+`applyset/`, `credentials/`. Within `helm/`, examples are split a second
+level by delivery tool: `helm/fluxcd/<scenario>/` for Flux-only and
+`helm/argocd/<scenario>/` for ArgoCD-only (each scenario uses one tool, not
+both — see DESIGN.md Q5b). The runner walks both trees and stops descending
 at the first `e2e.yaml` it finds. Anything below that file is treated as
 scenario-private content.
 
@@ -54,10 +57,11 @@ referenced from inside it.
 
 Two variables are exposed to your `e2e.yaml`:
 
-- `${SCENARIO_FOLDER}` — slash-joined family + folder, e.g. `helm/simple`.
+- `${SCENARIO_FOLDER}` — slash-joined family + folder, e.g. `helm/fluxcd/simple`.
   Used for log lines and Ginkgo spec descriptions.
-- `${SCENARIO_SIMPLE_NAME}` — leaf folder name, e.g. `simple`. Safe to use in
-  Kubernetes resource names. Use this anywhere a name lands on the cluster.
+- `${SCENARIO_SIMPLE_NAME}` — full path with `/` replaced by `-`, e.g.
+  `helm-fluxcd-simple`. Safe to use in Kubernetes resource names. Use this
+  anywhere a name lands on the cluster.
 
 Plus everything in the **fixed variable list** (see DESIGN.md §"Templated
 variables"): `${IMAGE_REGISTRY}`, `${SIGNING_KEY}`, `${SIGNING_PUBKEY}`,
@@ -129,16 +133,31 @@ duplicate something `assert.resources` or `assert.fieldEquals` could express.
 
 ---
 
-## When you need an ArgoCD branch
+## Picking a delivery tool for helm scenarios
 
-If your `rgd.yaml` declares an `argoproj.io/v1alpha1/Application`, list the
-ArgoCD-managed deployment in `assert.resources`:
+Helm scenarios pick exactly one delivery tool — Flux or ArgoCD — based on
+their folder:
+
+| Folder | Delivery tool | `requires:` | rgd.yaml resources |
+|---|---|---|---|
+| `examples/helm/fluxcd/<name>/` | Flux | `kro`, `flux-source`, `flux-helm` | `Resource` → `OCIRepository` → `HelmRelease` |
+| `examples/helm/argocd/<name>/` | ArgoCD | `kro`, `argocd` | `Resource` → `Application` |
+
+A Flux scenario asserts the Flux-managed deployment:
 
 ```yaml
 assert:
   resources:
     - target: deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo
       condition: Available
+```
+
+An ArgoCD scenario asserts both the `Application`'s sync/health status and
+the ArgoCD-managed deployment in `default-argocd`:
+
+```yaml
+assert:
+  resources:
     - target: applications.argoproj.io/${SCENARIO_SIMPLE_NAME}
       namespace: argocd
       condition: jsonpath={.status.health.status}=Healthy
@@ -147,9 +166,14 @@ assert:
       condition: Available
 ```
 
-Releases under ArgoCD use the suffix `-argocd` to avoid colliding with the Flux
-release name; the namespace is `default-argocd`. See `examples/helm/simple/` for
-the canonical wiring.
+ArgoCD-managed releases use the suffix `-argocd` to avoid colliding with the
+Flux release name; the namespace is `default-argocd`. See
+`examples/helm/fluxcd/simple/` and `examples/helm/argocd/simple/` for the
+canonical wiring of each tool.
+
+If you need a side-by-side parity demo (both tools deploying the same chart),
+that belongs under `test/e2e/scenarios/helm/parity/`, not under `examples/`
+(see DESIGN.md Q5b).
 
 ---
 
@@ -189,10 +213,13 @@ deliberately, not a side-effect every scenario should pay for.
 task kubernetes/controller:test/e2e
 
 # Run one scenario
-task kubernetes/controller:test/e2e -- --focus="helm/simple"
+task kubernetes/controller:test/e2e -- --focus="helm/fluxcd/simple"
 
 # Run a family
 task kubernetes/controller:test/e2e -- --focus="^helm/"
+
+# Run a sub-family (Flux helm only)
+task kubernetes/controller:test/e2e -- --focus="^helm/fluxcd/"
 ```
 
 `--focus=` is a Ginkgo regex over `${SCENARIO_FOLDER}`. The local cluster is
@@ -218,5 +245,6 @@ persistent across runs; CI cluster is per-shard ephemeral. See DESIGN.md
 
 - [`DESIGN.md`](./DESIGN.md) — full schema, locked decisions, migration plan.
 - `hooks/registry.go` — list of named hooks (once Stage 1 lands).
-- `examples/helm/simple/` — canonical user-facing reference.
+- `examples/helm/fluxcd/simple/` — canonical Flux helm reference.
+- `examples/helm/argocd/simple/` — canonical ArgoCD helm reference.
 - `test/e2e/scenarios/applyset/pruning/` — canonical test-only reference.
