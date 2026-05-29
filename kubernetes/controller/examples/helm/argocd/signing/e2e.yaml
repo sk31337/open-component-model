@@ -1,0 +1,34 @@
+requires:
+  - kro
+  - argocd
+
+prepare:
+  components:
+    - constructor: component-constructor.yaml
+      signingKey: ocm.software
+
+deploy:
+  - apply: bootstrap.yaml
+  - apply: rgd.yaml
+    waitFor:
+      kind: rgd
+      name: ${SCENARIO_SIMPLE_NAME}
+      conditions: [create, condition=Ready=true]
+  - apply: instance.yaml
+
+assert:
+  resources:
+    - kind: applications.argoproj.io
+      name: ${SCENARIO_SIMPLE_NAME}
+      namespace: argocd
+      waitFor:
+        - create
+        - jsonpath={.status.sync.status}=Synced
+        - jsonpath={.status.health.status}=Healthy
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo
+      namespace: default-argocd
+      waitFor: [create, condition=Available]
+      pods:
+        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+        condition: condition=Ready=true
