@@ -56,4 +56,3 @@ spec:
             kind: OCIRepository
             name: ${ocirepository.metadata.name}
             namespace: default
-              - CreateNamespace=true

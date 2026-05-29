@@ -84,4 +84,3 @@ spec:
             # Configuration
             ui:
               message: ${schema.spec.podinfo.message}
-              - CreateNamespace=true
