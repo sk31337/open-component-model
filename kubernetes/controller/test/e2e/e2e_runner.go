@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,9 +10,12 @@ import (
 	"sort"
 	"strings"
 
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"sigs.k8s.io/yaml"
 
 	"ocm.software/open-component-model/kubernetes/controller/test/e2e/hooks"
+	"ocm.software/open-component-model/kubernetes/controller/test/utils"
 )
 
 // e2eYamlFile is the per-scenario contract filename. Its presence in a
@@ -262,12 +266,161 @@ func builtinVars() map[string]string {
 	}
 }
 
-// runScenario executes one parsed scenario against the live cluster. Stage 1
-// lands the function as a no-op shell so the rest of the wiring compiles;
-// Stage 2 fills in the cluster operations. Until then the scenarios slice is
-// always empty (no migrated scenarios exist), so the no-op body is never
-// reached.
+// runScenario executes one parsed scenario against the live cluster.
+// It is invoked from inside an It() body, so it relies on Ginkgo's Expect
+// machinery for assertions and on test/utils helpers for kubectl/ocm calls.
+//
+// The execution order mirrors DESIGN.md §"Per-scenario lifecycle":
+//
+//	prepare → preDeployHooks → deploy → postDeployHooks
+//	        → preAssertHooks → assert → postAssertHooks
+//	        → preCleanupHooks → (DeferCleanup runs)  → postCleanupHooks
+//
+// Cleanup itself is delegated to DeployResource's DeferCleanup, so the
+// declarative cleanup section in e2e.yaml is currently advisory; the
+// CascadeFromBootstrap flag is honored implicitly by the order in which
+// deploy steps are applied (bootstrap first → its DeferCleanup deletes
+// last).
 func runScenario(cfg *ScenarioConfig) {
-	// Intentionally empty. See DESIGN.md §"Migration plan".
-	_ = cfg
+	ctx := context.Background()
+	timeout := scenarioTimeout(cfg)
+	imageRegistry := os.Getenv("IMAGE_REGISTRY")
+
+	scenarioCtx := &hooks.Scenario{
+		Folder:     cfg.Folder,
+		SimpleName: cfg.SimpleName,
+		Dir:        cfg.Dir,
+	}
+
+	By("preparing OCM components for " + cfg.Folder)
+	for _, comp := range cfg.Prepare.Components {
+		signingKey := ""
+		if comp.SigningKey != "" {
+			signingKey = filepath.Join(cfg.Dir, comp.SigningKey)
+		} else if candidate := filepath.Join(cfg.Dir, "ocm.software"); fileExists(candidate) {
+			signingKey = candidate
+		}
+		Expect(utils.PrepareOCMComponent(
+			ctx,
+			cfg.SimpleName,
+			filepath.Join(cfg.Dir, comp.Constructor),
+			imageRegistry,
+			signingKey,
+		)).To(Succeed(), "PrepareOCMComponent failed for %s", comp.Constructor)
+	}
+
+	dispatchHooks("preDeployHooks", cfg.PreDeployHooks, scenarioCtx)
+
+	By("deploying scenario " + cfg.Folder)
+	for _, step := range cfg.Deploy {
+		manifest := filepath.Join(cfg.Dir, step.Apply)
+		Expect(utils.DeployResource(ctx, manifest)).To(Succeed(), "kubectl apply -f %s failed", manifest)
+		if step.WaitFor != nil {
+			waitForSpec(ctx, step.WaitFor, timeout)
+		}
+	}
+
+	dispatchHooks("postDeployHooks", cfg.PostDeployHooks, scenarioCtx)
+	dispatchHooks("preAssertHooks", cfg.PreAssertHooks, scenarioCtx)
+
+	By("asserting scenario " + cfg.Folder)
+	for _, res := range cfg.Assert.Resources {
+		assertResource(ctx, res, timeout)
+	}
+	for _, fe := range cfg.Assert.FieldEquals {
+		Expect(utils.CompareResourceField(ctx, fe.Resource, fe.JSONPath, fe.Value)).To(
+			Succeed(),
+			"fieldEquals mismatch on %s %s", fe.Resource, fe.JSONPath,
+		)
+	}
+
+	dispatchHooks("postAssertHooks", cfg.PostAssertHooks, scenarioCtx)
+	dispatchHooks("preCleanupHooks", cfg.PreCleanupHooks, scenarioCtx)
+	// Actual delete happens via DeferCleanup registered by DeployResource;
+	// postCleanupHooks queue a DeferCleanup so they run after that.
+	for _, name := range cfg.PostCleanupHooks {
+		hook, ok := hooks.Resolve(name)
+		Expect(ok).To(BeTrue(), "unknown postCleanupHooks reference %q", name)
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(hook(ctx, scenarioCtx)).To(Succeed(), "postCleanupHooks[%q] failed", name)
+		})
+	}
+}
+
+// scenarioTimeout returns the timeout to pass to kubectl wait for this
+// scenario. cfg.Timeout overrides the suite-wide default.
+func scenarioTimeout(cfg *ScenarioConfig) string {
+	if cfg.Timeout != "" {
+		return cfg.Timeout
+	}
+	if t := os.Getenv("RESOURCE_TIMEOUT"); t != "" {
+		return t
+	}
+	return "10m"
+}
+
+// waitForSpec runs `kubectl wait` for every condition in spec.Conditions,
+// failing the spec on the first miss.
+func waitForSpec(ctx context.Context, spec *WaitForSpec, timeout string) {
+	resource := spec.Kind + "/" + spec.Name
+	args := []string{resource}
+	if spec.Namespace != "" {
+		args = append(args, "-n", spec.Namespace)
+	}
+	for _, cond := range spec.Conditions {
+		Expect(utils.WaitForResource(ctx, cond, timeout, args...)).To(
+			Succeed(),
+			"wait %s on %s failed", cond, resource,
+		)
+	}
+}
+
+// assertResource runs the kubectl wait sequence for a single AssertResource
+// and, if Pods is set, additionally waits for matching pods.
+func assertResource(ctx context.Context, res AssertResource, timeout string) {
+	resource := res.Kind + "/" + res.Name
+	args := []string{resource}
+	if res.Namespace != "" {
+		args = append(args, "-n", res.Namespace)
+	}
+	for _, cond := range res.WaitFor {
+		Expect(utils.WaitForResource(ctx, cond, timeout, args...)).To(
+			Succeed(),
+			"wait %s on %s failed", cond, resource,
+		)
+	}
+	if res.Pods != nil {
+		podArgs := []string{"pod", "-l", res.Pods.Selector}
+		if res.Namespace != "" {
+			podArgs = append(podArgs, "-n", res.Namespace)
+		}
+		Expect(utils.WaitForResource(ctx, res.Pods.Condition, timeout, podArgs...)).To(
+			Succeed(),
+			"pod wait %s on selector %s failed", res.Pods.Condition, res.Pods.Selector,
+		)
+	}
+}
+
+// dispatchHooks runs every named hook in order. The scenario is rejected at
+// load time if any name is unknown, so a missing hook here is a runner bug,
+// not a user error.
+func dispatchHooks(phase string, names []string, scenario *hooks.Scenario) {
+	for _, name := range names {
+		hook, ok := hooks.Resolve(name)
+		Expect(ok).To(BeTrue(), "%s references unknown hook %q (load-time validation should have caught this)", phase, name)
+		ctx, cancel := context.WithCancel(context.Background())
+		err := hook(ctx, scenario)
+		cancel()
+		Expect(err).NotTo(HaveOccurred(), "%s[%q] failed", phase, name)
+	}
+}
+
+// fileExists reports whether path exists and is a regular file. Used to
+// auto-detect the per-scenario `ocm.software` private key.
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
 }

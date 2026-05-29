@@ -1,0 +1,18 @@
+requires:
+  - kro
+
+prepare:
+  components:
+    - constructor: component-constructor.yaml
+
+deploy:
+  - apply: bootstrap.yaml
+
+assert:
+  resources:
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo
+      waitFor: [create, condition=Available]
+      pods:
+        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+        condition: condition=Ready=true
