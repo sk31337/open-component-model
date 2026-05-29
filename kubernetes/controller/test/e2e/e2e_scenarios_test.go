@@ -36,8 +36,9 @@ func discoverAndLoad(root string) []*ScenarioConfig {
 	}
 	configs := make([]*ScenarioConfig, 0, len(dirs))
 	vars := builtinVars()
+	compsDir := componentsDir()
 	for _, dir := range dirs {
-		cfg, err := loadScenario(dir, root, vars)
+		cfg, err := loadScenario(dir, root, compsDir, vars)
 		if err != nil {
 			log.Fatalf("loadScenario(%q): %v", dir, err)
 		}

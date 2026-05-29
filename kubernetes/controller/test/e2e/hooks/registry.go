@@ -33,7 +33,12 @@ type Scenario struct {
 
 // Registry is the single source of truth for hook names. Adding a new hook
 // is two lines: define the function in this package, register it here.
-var Registry = map[string]HookFunc{}
+var Registry = map[string]HookFunc{
+	"applysetPatchToV2":      applysetPatchToV2,
+	"applysetAssertPruning":  applysetAssertPruning,
+	"applysetDeleteDeployer": applysetDeleteDeployer,
+	"applysetAssertCascade":  applysetAssertCascade,
+}
 
 // Resolve looks up a hook by name. Missing names are surfaced to the runner
 // so it can report which scenario referenced an unknown hook.

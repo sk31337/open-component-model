@@ -101,7 +101,31 @@ func WaitForResource(ctx context.Context, condition, timeout string, resource ..
 // PrepareOCMComponent creates an OCM component from a component-constructor file.
 // After creating the OCM component, the component is transferred to imageRegistry.
 func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, imageRegistry, signingKey string) error {
-	By("creating ocm component for " + name)
+	return PrepareOCMComponentWithOptions(ctx, PrepareOCMComponentOptions{
+		Name:                     name,
+		ComponentConstructorPath: componentConstructorPath,
+		ImageRegistry:            imageRegistry,
+		SigningKey:               signingKey,
+	})
+}
+
+// PrepareOCMComponentOptions configures PrepareOCMComponentWithOptions.
+// OCMConfig, when set, is passed to `ocm transfer` via --config and lets a
+// scenario push to a credentialed registry. Empty fields fall back to the
+// defaults of the legacy PrepareOCMComponent helper.
+type PrepareOCMComponentOptions struct {
+	Name                     string
+	ComponentConstructorPath string
+	ImageRegistry            string
+	SigningKey               string
+	OCMConfig                string
+}
+
+// PrepareOCMComponentWithOptions is the option-bag form of
+// PrepareOCMComponent. Behaves identically to PrepareOCMComponent for the
+// uncredentialed case; honors OCMConfig for protected-registry scenarios.
+func PrepareOCMComponentWithOptions(ctx context.Context, opts PrepareOCMComponentOptions) error {
+	By("creating ocm component for " + opts.Name)
 	tmpDir := GinkgoT().TempDir()
 
 	ctfDir := filepath.Join(tmpDir, "ctf")
@@ -110,7 +134,7 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 		"componentversions",
 		"--create",
 		"--file", ctfDir,
-		componentConstructorPath,
+		opts.ComponentConstructorPath,
 	}
 
 	cmd := exec.CommandContext(ctx, "ocm", cmdArgs...)
@@ -119,8 +143,8 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 		return fmt.Errorf("could not create ocm component: %w", err)
 	}
 
-	if signingKey != "" {
-		By("signing ocm component for " + name)
+	if opts.SigningKey != "" {
+		By("signing ocm component for " + opts.Name)
 		cmd = exec.CommandContext(ctx,
 			"ocm",
 			"sign",
@@ -128,7 +152,7 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 			"--signature",
 			"ocm.software",
 			"--private-key",
-			signingKey,
+			opts.SigningKey,
 			ctfDir,
 		)
 		_, err := Run(cmd)
@@ -137,10 +161,14 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 		}
 	}
 
-	By("transferring ocm component for " + name)
+	By("transferring ocm component for " + opts.Name)
 	// Note: The option '--overwrite' is necessary, when a digest of a resource is changed or unknown (which is the case
 	// in our default test)
-	cmdArgs = []string{
+	cmdArgs = nil
+	if opts.OCMConfig != "" {
+		cmdArgs = append(cmdArgs, "--config", opts.OCMConfig)
+	}
+	cmdArgs = append(cmdArgs,
 		"transfer",
 		"ctf",
 		"--overwrite",
@@ -149,8 +177,8 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 		"--omit-access-types",
 		"gitHub",
 		ctfDir,
-		imageRegistry,
-	}
+		opts.ImageRegistry,
+	)
 
 	cmd = exec.CommandContext(ctx, "ocm", cmdArgs...)
 	_, err = Run(cmd)

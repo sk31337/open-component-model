@@ -1,0 +1,40 @@
+# applyset-pruning is a test-only fixture that exercises OCM's Deployer
+# pruning contract: when a component version drops a resource, the previously
+# applied object must be removed from the cluster. The choreography (patch
+# semver, assert pruning, delete deployer, assert cascade) is imperative, so
+# the heavy lifting lives in named hooks under postAssertHooks.
+
+timeout: 10m
+
+# Only the controller-manager is needed. No kro / flux / argocd here.
+requires: []
+
+prepare:
+  components:
+    - constructor: component-constructor.yaml
+    - constructor: component-constructor-2.yaml
+
+deploy:
+  - apply: bootstrap.yaml
+  - apply: bootstrap-deployer.yaml
+
+assert:
+  resources:
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo
+      waitFor: [create, condition=Available]
+      pods:
+        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+        condition: condition=Ready=true
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo-2
+      waitFor: [create, condition=Available]
+      pods:
+        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo-2
+        condition: condition=Ready=true
+
+postAssertHooks:
+  - applysetPatchToV2          # kubectl patch component … semver=2.0.0
+  - applysetAssertPruning      # podinfo-2 deployment is pruned, podinfo remains
+  - applysetDeleteDeployer     # kubectl delete deployer
+  - applysetAssertCascade      # all derived resources gone

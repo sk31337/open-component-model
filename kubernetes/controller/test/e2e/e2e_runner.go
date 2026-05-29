@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -56,6 +57,11 @@ type PrepareComponent struct {
 	Constructor string `json:"constructor"`
 	SigningKey  string `json:"signingKey,omitempty"`
 	OCMConfig   string `json:"ocmConfig,omitempty"`
+	// Registry overrides the transfer target for this component. When empty
+	// the harness falls back to ${IMAGE_REGISTRY}. Used by credentials
+	// scenarios to push into the protected registry the bootstrap then
+	// references.
+	Registry string `json:"registry,omitempty"`
 }
 
 type DeployStep struct {
@@ -134,11 +140,15 @@ func walkScenarios(root string) ([]string, error) {
 }
 
 // loadScenario parses scenarioDir/e2e.yaml, applies ${VAR} substitution, and
-// validates that every referenced hook resolves against hooks.Registry.
+// validates that every referenced hook resolves against hooks.Registry and
+// that every `requires:` entry has a matching script under componentsDir.
 //
 // root is the discovery root (e.g. .../examples or .../test/e2e/scenarios)
-// used to derive the scenario's slash-separated Folder name.
-func loadScenario(scenarioDir, root string, vars map[string]string) (*ScenarioConfig, error) {
+// used to derive the scenario's slash-separated Folder name. componentsDir
+// is the absolute path to test/e2e/setup/components used to validate
+// `requires:` entries — pass "" to skip that check (used by unit tests that
+// stub the harness).
+func loadScenario(scenarioDir, root, componentsDir string, vars map[string]string) (*ScenarioConfig, error) {
 	folder, err := filepath.Rel(root, scenarioDir)
 	if err != nil {
 		return nil, fmt.Errorf("scenario %q is not under root %q: %w", scenarioDir, root, err)
@@ -178,7 +188,32 @@ func loadScenario(scenarioDir, root string, vars map[string]string) (*ScenarioCo
 		return nil, fmt.Errorf("scenario %s: %w", folder, err)
 	}
 
+	if componentsDir != "" {
+		if err := validateRequires(&cfg, componentsDir); err != nil {
+			return nil, fmt.Errorf("scenario %s: %w", folder, err)
+		}
+	}
+
 	return &cfg, nil
+}
+
+// validateRequires returns an error naming any `requires:` entry that has no
+// matching `<name>.sh` under componentsDir. DESIGN.md §"Setup composition":
+// each requires entry is the basename of a script in test/e2e/setup/components.
+func validateRequires(cfg *ScenarioConfig, componentsDir string) error {
+	var missing []string
+	for _, name := range cfg.Requires {
+		script := filepath.Join(componentsDir, name+".sh")
+		if _, err := os.Stat(script); err != nil {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("unknown requires entries (no matching script in %s): %s",
+			componentsDir, strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // validateHookRefs returns an error naming any hook reference in cfg that
@@ -250,19 +285,21 @@ const controllerNamespace = "ocm-k8s-toolkit-system"
 // builtinVars returns the harness-level variables (everything except the
 // per-scenario ${SCENARIO_*} set, which loadScenario adds).
 //
-// Stage 1 wires only the variables the existing tests already export
-// (IMAGE_REGISTRY, derived IMAGE_REGISTRY_HOST, CONTROLLER_NAMESPACE).
-// Protected-registry variables are added when Stage 4 migrates the
-// credentials scenarios.
+// The protected-registry variables expose the externally-reachable URL the
+// `ocm transfer` step pushes to. The bootstrap.yaml manifests reference the
+// in-cluster URL directly and do not template it; that mirrors the legacy
+// test fixtures, which hard-code the kube-internal hostname.
 func builtinVars() map[string]string {
 	registry := os.Getenv("IMAGE_REGISTRY")
 	host := registry
 	host = strings.TrimPrefix(host, "https://")
 	host = strings.TrimPrefix(host, "http://")
 	return map[string]string{
-		"IMAGE_REGISTRY":       registry,
-		"IMAGE_REGISTRY_HOST":  host,
-		"CONTROLLER_NAMESPACE": controllerNamespace,
+		"IMAGE_REGISTRY":                        registry,
+		"IMAGE_REGISTRY_HOST":                   host,
+		"CONTROLLER_NAMESPACE":                  controllerNamespace,
+		"PROTECTED_REGISTRY_BASIC_AUTH":         os.Getenv("PROTECTED_REGISTRY_URL"),
+		"PROTECTED_REGISTRY_DOCKER_CONFIG_JSON": os.Getenv("PROTECTED_REGISTRY_URL2"),
 	}
 }
 
@@ -292,6 +329,18 @@ func runScenario(cfg *ScenarioConfig) {
 		Dir:        cfg.Dir,
 	}
 
+	if len(cfg.Requires) > 0 {
+		By("ensuring required components for " + cfg.Folder)
+		dir := componentsDir()
+		for _, name := range cfg.Requires {
+			script := filepath.Join(dir, name+".sh")
+			cmd := exec.CommandContext(ctx, "bash", script)
+			cmd.Stdout = GinkgoWriter
+			cmd.Stderr = GinkgoWriter
+			Expect(cmd.Run()).To(Succeed(), "requires component %q (script %s) failed", name, script)
+		}
+	}
+
 	By("preparing OCM components for " + cfg.Folder)
 	for _, comp := range cfg.Prepare.Components {
 		signingKey := ""
@@ -300,13 +349,21 @@ func runScenario(cfg *ScenarioConfig) {
 		} else if candidate := filepath.Join(cfg.Dir, "ocm.software"); fileExists(candidate) {
 			signingKey = candidate
 		}
-		Expect(utils.PrepareOCMComponent(
-			ctx,
-			cfg.SimpleName,
-			filepath.Join(cfg.Dir, comp.Constructor),
-			imageRegistry,
-			signingKey,
-		)).To(Succeed(), "PrepareOCMComponent failed for %s", comp.Constructor)
+		ocmConfig := ""
+		if comp.OCMConfig != "" {
+			ocmConfig = filepath.Join(cfg.Dir, comp.OCMConfig)
+		}
+		registry := imageRegistry
+		if comp.Registry != "" {
+			registry = comp.Registry
+		}
+		Expect(utils.PrepareOCMComponentWithOptions(ctx, utils.PrepareOCMComponentOptions{
+			Name:                     cfg.SimpleName,
+			ComponentConstructorPath: filepath.Join(cfg.Dir, comp.Constructor),
+			ImageRegistry:            registry,
+			SigningKey:               signingKey,
+			OCMConfig:                ocmConfig,
+		})).To(Succeed(), "PrepareOCMComponent failed for %s", comp.Constructor)
 	}
 
 	dispatchHooks("preDeployHooks", cfg.PreDeployHooks, scenarioCtx)
@@ -423,4 +480,23 @@ func fileExists(path string) bool {
 		return false
 	}
 	return !info.IsDir()
+}
+
+// componentsDir returns the absolute path to test/e2e/setup/components,
+// the directory that holds every component's idempotent install script.
+// Resolution mirrors projectDir(): SETUP_COMPONENTS_DIR > PROJECT_DIR >
+// cwd, layered with the canonical "test/e2e/setup/components" suffix.
+func componentsDir() string {
+	if dir := os.Getenv("SETUP_COMPONENTS_DIR"); dir != "" {
+		return dir
+	}
+	base := os.Getenv("PROJECT_DIR")
+	if base == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		base = cwd
+	}
+	return filepath.Join(base, "test", "e2e", "setup", "components")
 }

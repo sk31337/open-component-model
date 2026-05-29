@@ -193,7 +193,7 @@ assert:
 		t.Fatal(err)
 	}
 
-	cfg, err := loadScenario(scenarioDir, root, nil)
+	cfg, err := loadScenario(scenarioDir, root, "", nil)
 	if err != nil {
 		t.Fatalf("loadScenario: %v", err)
 	}
@@ -236,7 +236,7 @@ assert: {}
 		t.Fatal(err)
 	}
 
-	_, err := loadScenario(scenarioDir, root, nil)
+	_, err := loadScenario(scenarioDir, root, "", nil)
 	if err == nil {
 		t.Fatal("expected error for unknown hook reference, got nil")
 	}
@@ -260,12 +260,69 @@ deploy:
 		t.Fatal(err)
 	}
 
-	_, err := loadScenario(scenarioDir, root, nil)
+	_, err := loadScenario(scenarioDir, root, "", nil)
 	if err == nil {
 		t.Fatal("expected error for unknown variable, got nil")
 	}
 	if !strings.Contains(err.Error(), "MADE_UP_VARIABLE") {
 		t.Errorf("error should name the missing variable, got: %v", err)
+	}
+}
+
+func TestLoadScenarioUnknownRequiresRejected(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	scenarioDir := filepath.Join(root, "helm", "simple")
+	if err := os.MkdirAll(scenarioDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `
+requires: [kro, this-component-does-not-exist]
+deploy: []
+`
+	if err := os.WriteFile(filepath.Join(scenarioDir, "e2e.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	componentsDir := t.TempDir()
+	// kro.sh exists; the second name doesn't.
+	if err := os.WriteFile(filepath.Join(componentsDir, "kro.sh"), []byte("#!/usr/bin/env bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadScenario(scenarioDir, root, componentsDir, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown requires entry, got nil")
+	}
+	if !strings.Contains(err.Error(), "this-component-does-not-exist") {
+		t.Errorf("error should name the missing component, got: %v", err)
+	}
+}
+
+func TestLoadScenarioRequiresAllPresent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	scenarioDir := filepath.Join(root, "helm", "simple")
+	if err := os.MkdirAll(scenarioDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `
+requires: [kro, flux-source]
+deploy: []
+`
+	if err := os.WriteFile(filepath.Join(scenarioDir, "e2e.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	componentsDir := t.TempDir()
+	for _, n := range []string{"kro.sh", "flux-source.sh"} {
+		if err := os.WriteFile(filepath.Join(componentsDir, n), []byte("#!/usr/bin/env bash\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := loadScenario(scenarioDir, root, componentsDir, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

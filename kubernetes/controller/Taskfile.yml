@@ -73,32 +73,35 @@ tasks:
 
 
   test/e2e/setup/local:
-    desc: "Set up a local Kind cluster for E2E tests"
+    desc: "Set up a local Kind cluster for E2E tests (runs test/e2e/setup/local.sh and loads the controller image)"
     deps:
       # We depend on a locally built image, so we need to load that into the local machine.
       - task: docker-build
         vars:
           LOAD: "true"
     cmds:
-      - 'KIND_NODE_IMAGE_VERSION={{.KIND_NODE_IMAGE_VERSION}} bash test/e2e/hacks/setup.sh'
+      - 'KIND_NODE_IMAGE_VERSION={{.KIND_NODE_IMAGE_VERSION}} bash {{.TASKFILE_DIR}}/test/e2e/setup/local.sh'
       - 'kind load docker-image {{.CONTROLLER_IMG}}'
 
   test/e2e:
-    desc: "Run end-to-end tests against a running cluster"
+    desc: "Run end-to-end tests against a running cluster. Pass a Ginkgo --focus regex via `--`, e.g. `task test/e2e -- helm/fluxcd/simple` or `task test/e2e -- --focus=helm/fluxcd/simple`."
     dotenv: ['{{.TASKFILE_DIR}}/test/e2e/hacks/.env']
     cmds:
       - task: helm/install
-      - PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v
-
-  test/e2e/example:
-    desc: "Run e2e for a single example. Usage: task test/e2e/example EXAMPLE=helm-simple"
-    dotenv: ['{{.TASKFILE_DIR}}/test/e2e/hacks/.env']
-    requires:
-      vars: [EXAMPLE]
-    cmds:
-      - task: helm/install
-      - PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v -ginkgo.focus="should deploy the example {{.EXAMPLE}}$"
-      - task: helm/uninstall
+      - |
+        focus_args=()
+        cli='{{.CLI_ARGS}}'
+        if [ -n "$cli" ]; then
+          # AUTHORING.md documents both `task ... -- <regex>` and
+          # `task ... -- --focus=<regex>`. Strip a leading --focus=/--focus
+          # so the regex is passed through cleanly to ginkgo.
+          case "$cli" in
+            --focus=*) cli="${cli#--focus=}" ;;
+            "--focus "*) cli="${cli#--focus }" ;;
+          esac
+          focus_args=(-ginkgo.focus="$cli")
+        fi
+        PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v "${focus_args[@]}"
 
   # Build
   build:
