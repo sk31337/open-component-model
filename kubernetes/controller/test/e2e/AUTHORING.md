@@ -4,10 +4,9 @@ A short, task-oriented guide for adding a new e2e scenario. For the architectura
 rationale, locked decisions (Q1–Q16), and the full schema reference see
 [`DESIGN.md`](./DESIGN.md).
 
-> **Status:** target state. The runner described here is not yet implemented;
-> the layout below is what you should build new scenarios against once Stage 1
-> of the migration plan in `DESIGN.md` lands. Until then, follow the legacy
-> `e2e_*_test.go` patterns.
+> **Status:** implemented. The runner described here is live; all scenarios
+> follow the declarative `e2e.yaml` schema. See `DESIGN.md` for the full
+> architectural rationale and migration history.
 
 ---
 
@@ -66,8 +65,9 @@ Two variables are exposed to your `e2e.yaml`:
   anywhere a name lands on the cluster.
 
 Plus everything in the **fixed variable list** (see DESIGN.md §"Templated
-variables"): `${IMAGE_REGISTRY}`, `${SIGNING_KEY}`, `${SIGNING_PUBKEY}`,
-`${TIMEOUT}`, `${E2E_NAMESPACE}`.
+variables"): `${IMAGE_REGISTRY}`, `${IMAGE_REGISTRY_HOST}`,
+`${CONTROLLER_NAMESPACE}`, `${PROTECTED_REGISTRY_BASIC_AUTH}`,
+`${PROTECTED_REGISTRY_DOCKER_CONFIG_JSON}`, `${SCENARIO_DIR}`.
 
 No Go templates. No `{{ ... }}`. Only `${VAR}` envsubst-style substitution
 against the fixed list. Unknown variables are a hard error at parse time.
@@ -79,8 +79,10 @@ against the fixed list. Unknown variables are a hard error at parse time.
 Smallest viable scenario — bootstrap a kro RGD, wait for a deployment:
 
 ```yaml
-apiVersion: e2e.ocm.software/v1
-kind: Scenario
+requires:
+  - kro
+  - flux-source
+  - flux-helm
 
 prepare:
   components:
@@ -88,14 +90,17 @@ prepare:
 
 deploy:
   - apply: bootstrap.yaml
+  - apply: rgd.yaml
     waitFor:
-      - target: rgd/${SCENARIO_SIMPLE_NAME}
-        condition: Ready=true
+      kind: rgd
+      name: ${SCENARIO_SIMPLE_NAME}
+      conditions: [create, condition=Ready=true]
 
 assert:
   resources:
-    - target: deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo
-      condition: Available
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo
+      waitFor: [create, condition=Available]
 ```
 
 That's the whole file. The runner handles ordering, OCM transfer, namespace
@@ -110,23 +115,22 @@ verify a side-effect that is not a Kubernetes resource — **do not** add fields
 to `e2e.yaml`. Instead, write a hook.
 
 ```yaml
-hooks:
-  preDeploy:
-    - createBasicAuthSecret
-  postAssert:
-    - verifySignedComponent
+preDeployHooks:
+  - createBasicAuthSecret
+postAssertHooks:
+  - verifySignedComponent
 ```
 
 Each name must exist in `kubernetes/controller/test/e2e/hooks/registry.go`.
-Hooks run in array order. The six phases — `preDeploy`, `postDeploy`,
-`preAssert`, `postAssert`, `preCleanup`, `postCleanup` — are documented in
-DESIGN.md.
+Hooks run in array order. The six phases — `preDeployHooks`, `postDeployHooks`,
+`preAssertHooks`, `postAssertHooks`, `preCleanupHooks`, `postCleanupHooks` — are
+documented in DESIGN.md.
 
 A hook is a Go function:
 
 ```go
-func createBasicAuthSecret(ctx context.Context, s ScenarioContext) error {
-    // s.Folder, s.SimpleName, s.Namespace, s.Client, s.OCM, s.Logf
+func createBasicAuthSecret(ctx context.Context, s *hooks.Scenario) error {
+    // s.Folder, s.SimpleName, s.Dir
 }
 ```
 
@@ -150,8 +154,12 @@ A Flux scenario asserts the Flux-managed deployment:
 ```yaml
 assert:
   resources:
-    - target: deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo
-      condition: Available
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo
+      waitFor: [create, condition=Available]
+      pods:
+        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+        condition: condition=Ready=true
 ```
 
 An ArgoCD scenario asserts both the `Application`'s sync/health status and
@@ -160,12 +168,20 @@ the ArgoCD-managed deployment in `default-argocd`:
 ```yaml
 assert:
   resources:
-    - target: applications.argoproj.io/${SCENARIO_SIMPLE_NAME}
+    - kind: applications.argoproj.io
+      name: ${SCENARIO_SIMPLE_NAME}
       namespace: argocd
-      condition: jsonpath={.status.health.status}=Healthy
-    - target: deployment.apps/${SCENARIO_SIMPLE_NAME}-argocd-podinfo
+      waitFor:
+        - create
+        - jsonpath={.status.sync.status}=Synced
+        - jsonpath={.status.health.status}=Healthy
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo
       namespace: default-argocd
-      condition: Available
+      waitFor: [create, condition=Available]
+      pods:
+        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+        condition: condition=Ready=true
 ```
 
 ArgoCD-managed releases use the suffix `-argocd` to avoid colliding with the

@@ -1,6 +1,7 @@
 requires:
   - kro
   - flux-source
+  - flux-helm
 
 prepare:
   components:

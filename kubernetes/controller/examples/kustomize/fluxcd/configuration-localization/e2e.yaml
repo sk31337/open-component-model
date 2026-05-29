@@ -1,6 +1,7 @@
 requires:
   - kro
   - flux-source
+  - flux-kustomize
 
 prepare:
   components:
