@@ -1,11 +1,9 @@
 // Command shard enumerates e2e scenarios under examples/ and
-// test/e2e/scenarios/, splits them into N round-robin shards, and emits a
+// test/e2e/scenarios/, splits them into shards, and emits a
 // matrix=<json> line suitable for $GITHUB_OUTPUT.
 //
-// At Stage 1 of the migration plan, both roots are still empty of e2e.yaml
-// files (legacy flat layout has not been moved yet), so this program emits
-// an empty matrix. That is the expected output and is structural — it lets
-// the GitHub Actions workflow be wired up before any scenario migrates.
+// By default (--shards=0), each scenario gets its own shard. Pass
+// --shards=N to group scenarios into N round-robin buckets instead.
 package main
 
 import (
@@ -21,14 +19,9 @@ import (
 const e2eYamlFile = "e2e.yaml"
 
 func main() {
-	shards := flag.Int("shards", 4, "number of shards to split scenarios into")
+	shards := flag.Int("shards", 0, "number of shards to split scenarios into (0 = one shard per scenario)")
 	repoRoot := flag.String("repo-root", "", "path to the controller module root (defaults to cwd)")
 	flag.Parse()
-
-	if *shards < 1 {
-		fmt.Fprintln(os.Stderr, "shards must be >= 1")
-		os.Exit(2)
-	}
 
 	root := *repoRoot
 	if root == "" {
@@ -56,20 +49,28 @@ func main() {
 	}
 	sort.Strings(scenarios)
 
+	numShards := *shards
+	if numShards <= 0 {
+		numShards = len(scenarios)
+	}
+	if numShards < 1 {
+		numShards = 1
+	}
+
 	type shard struct {
 		Shard int    `json:"shard"`
 		Focus string `json:"focus"`
 	}
-	matrix := make([]shard, *shards)
+	matrix := make([]shard, numShards)
 	for i := range matrix {
 		matrix[i] = shard{Shard: i, Focus: ""}
 	}
 
 	// Round-robin scenarios into shards. Empty shards get a sentinel focus
 	// regex that matches nothing so the runner exits quickly.
-	buckets := make([][]string, *shards)
+	buckets := make([][]string, numShards)
 	for i, s := range scenarios {
-		buckets[i%*shards] = append(buckets[i%*shards], s)
+		buckets[i%numShards] = append(buckets[i%numShards], s)
 	}
 	for i, names := range buckets {
 		if len(names) == 0 {

@@ -79,6 +79,9 @@ against the fixed list. Unknown variables are a hard error at parse time.
 Smallest viable scenario — bootstrap a kro RGD, wait for a deployment:
 
 ```yaml
+apiVersion: e2e.ocm.software/v1
+kind: Scenario
+
 requires:
   - kro
   - flux-source
@@ -227,6 +230,9 @@ deliberately, not a side-effect every scenario should pay for.
 ## Local iteration
 
 ```sh
+# Provision a fresh kind cluster + all components
+task kubernetes/controller:test/e2e/setup/local
+
 # Run everything
 task kubernetes/controller:test/e2e
 
@@ -238,6 +244,9 @@ task kubernetes/controller:test/e2e -- --focus="^helm/"
 
 # Run a sub-family (Flux helm only)
 task kubernetes/controller:test/e2e -- --focus="^helm/fluxcd/"
+
+# Tear down the cluster and registry when done
+task kubernetes/controller:test/e2e/teardown
 ```
 
 `--focus=` is a Ginkgo regex over `${SCENARIO_FOLDER}`. The local cluster is

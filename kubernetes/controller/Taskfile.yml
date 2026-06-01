@@ -83,6 +83,12 @@ tasks:
       - 'KIND_NODE_IMAGE_VERSION={{.KIND_NODE_IMAGE_VERSION}} bash {{.TASKFILE_DIR}}/test/e2e/setup/local.sh'
       - 'kind load docker-image {{.CONTROLLER_IMG}}'
 
+  test/e2e/teardown:
+    desc: "Delete the local Kind cluster and registry used by E2E tests"
+    cmds:
+      - 'kind delete cluster 2>/dev/null || true'
+      - 'docker rm -f image-registry 2>/dev/null || true'
+
   test/e2e:
     desc: "Run end-to-end tests against a running cluster. Pass a Ginkgo --focus regex via `--`, e.g. `task test/e2e -- helm/fluxcd/simple` or `task test/e2e -- --focus=helm/fluxcd/simple`."
     dotenv: ['{{.TASKFILE_DIR}}/test/e2e/hacks/.env']

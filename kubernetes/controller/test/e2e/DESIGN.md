@@ -124,6 +124,9 @@ Nested scenarios are illegal and cause a load-time error. Directories without an
 ## The `e2e.yaml` schema
 
 ```yaml
+apiVersion: e2e.ocm.software/v1
+kind: Scenario
+
 # Optional. Overrides the global E2E_TIMEOUT for this scenario.
 # Applies to deploy[].waitFor and assert.resources[] waits.
 timeout: 10m
@@ -308,7 +311,8 @@ script as a no-op when an earlier scenario already required it.
 `test/e2e/cmd/shard` is a small Go program that:
 
 1. Walks both roots, enumerates scenario names (same logic as `walkScenarios`).
-2. Splits the list into N shards (`--shards`, default 4), round-robin.
+2. By default, assigns one shard per scenario. Pass `--shards=N` to group
+   scenarios into N round-robin buckets instead.
 3. Emits `matrix=...` to `$GITHUB_OUTPUT` as a JSON array, one entry per shard.
 
 The GitHub Actions workflow consumes the matrix:
@@ -321,7 +325,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: discover
-        run: go run ./test/e2e/cmd/shard --shards=4 >> "$GITHUB_OUTPUT"
+        run: go run ./test/e2e/cmd/shard >> "$GITHUB_OUTPUT"
 
   e2e:
     needs: discover
@@ -344,14 +348,15 @@ Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
 
 | Command | Effect |
 |---|---|
-| `task test/e2e` | run all 18 scenarios |
+| `task test/e2e` | run all 20 scenarios |
 | `task test/e2e -- helm/fluxcd/simple` | run one scenario |
 | `task test/e2e -- helm/fluxcd/` | run all six Flux helm scenarios |
 | `task test/e2e -- helm/argocd/` | run all six ArgoCD helm scenarios |
 | `task test/e2e -- helm/` | run all twelve helm scenarios |
 | `task test/e2e -- credentials/` | run both credentials scenarios |
-| `task test/e2e -- examples` | run only the `Context("examples")` block (15 demos) |
+| `task test/e2e -- examples` | run only the `Context("examples")` block (17 demos) |
 | `task test/e2e/setup/local` | provision kind cluster + all components |
+| `task test/e2e/teardown` | delete kind cluster and registry |
 | `E2E_TIMEOUT=10m task test/e2e` | bump global timeout |
 
 The retired `task test/e2e/example NAME=foo` is replaced by `task test/e2e -- foo`.
@@ -522,7 +527,7 @@ discussion that produced this doc.
 | Q11 | Timeout layering | Global default + scenario override | Step-level was speculative; scenario-level handles all observed variation. |
 | Q12 | Global timeout source | `E2E_TIMEOUT` env var, defaulted in Taskfile | Operator surface is the Taskfile, not Go code. |
 | Q13 | Invocation | Ginkgo `--focus=` via Taskfile `{{.CLI_ARGS}}` | Reuses Ginkgo's existing matcher; no harness regex code. |
-| Q14 | CI sharding | Dynamic `cmd/shard`, 4 shards default | Self-updating as scenarios are added/removed; tunable shard count. |
+| Q14 | CI sharding | Dynamic `cmd/shard`, one shard per scenario by default | Self-updating as scenarios are added/removed; pass `--shards=N` to group into fewer buckets. |
 | Q15 | `description:` field | Omitted; optional `README.md` next to `e2e.yaml` | Folder name is self-documenting; descriptions invite marketing copy. |
 | Q16 | Hook registry | Map literal in `hooks/registry.go`, validated at `BeforeSuite` | Single source of truth; typos surface before any cluster work. |
 
@@ -581,7 +586,7 @@ Implementation lands in stages so the suite stays green throughout.
 ### Stage 5 — wire CI sharding
 
 - Update the GitHub Actions workflow to use the `discover` + matrix pattern.
-- Default `--shards=4`; revisit after observing per-shard runtimes.
+- Default: one shard per scenario; pass `--shards=N` to reduce parallelism if needed.
 
 ### Stage 6 — cleanup
 
