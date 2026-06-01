@@ -90,7 +90,7 @@ tasks:
       - 'docker rm -f image-registry 2>/dev/null || true'
 
   test/e2e:
-    desc: "Run end-to-end tests against a running cluster. Pass a Ginkgo --focus regex via `--`, e.g. `task test/e2e -- helm/fluxcd/simple` or `task test/e2e -- --focus=helm/fluxcd/simple`."
+    desc: "Run end-to-end tests against a running cluster. Pass a scenario folder via `--`, e.g. `task test/e2e -- helm/fluxcd/simple`. Omit to run all scenarios."
     dotenv: ['{{.TASKFILE_DIR}}/test/e2e/hacks/.env']
     cmds:
       - task: helm/install
@@ -98,14 +98,15 @@ tasks:
         focus_args=()
         cli='{{.CLI_ARGS}}'
         if [ -n "$cli" ]; then
-          # AUTHORING.md documents both `task ... -- <regex>` and
-          # `task ... -- --focus=<regex>`. Strip a leading --focus=/--focus
-          # so the regex is passed through cleanly to ginkgo.
+          # Strip a leading --focus= or --focus prefix if present.
           case "$cli" in
             --focus=*) cli="${cli#--focus=}" ;;
             "--focus "*) cli="${cli#--focus }" ;;
           esac
-          focus_args=(-ginkgo.focus="$cli")
+          # Anchor the pattern so "helm/argocd/nested" does not also
+          # match "helm/argocd/nested-signed". The spec text is
+          # "should run <folder>" so we anchor against that exact folder.
+          focus_args=(-ginkgo.focus="^.*${cli}$")
         fi
         PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v "${focus_args[@]}"
 
