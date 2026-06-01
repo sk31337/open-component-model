@@ -4,7 +4,7 @@
 # semver, assert pruning, delete deployer, assert cascade) is imperative, so
 # the heavy lifting lives in named hooks under postAssertHooks.
 
-timeout: 10m
+timeout: 5m
 
 # Only the controller-manager is needed. No kro / flux / argocd here.
 requires: []

@@ -130,7 +130,7 @@ kind: Scenario
 
 # Optional. Overrides the global E2E_TIMEOUT for this scenario.
 # Applies to deploy[].waitFor and assert.resources[] waits.
-timeout: 10m
+timeout: 5m
 
 # Required. Components the harness must install before the scenario runs. Each name
 # corresponds to a script at test/e2e/setup/components/<name>.sh. Unknown names cause
@@ -461,7 +461,7 @@ scenario is needed for the test suite, place it under
 ### 2. Multi-stage test choreography (`test/e2e/scenarios/applyset/pruning/e2e.yaml`)
 
 ```yaml
-timeout: 10m
+timeout: 5m
 
 requires: []                       # only controller-manager (always present)
 
@@ -490,7 +490,7 @@ postAssertHooks:
 ### 3. Protected-registry credentials (`test/e2e/scenarios/credentials/basic-auth/e2e.yaml`)
 
 ```yaml
-timeout: 10m
+timeout: 5m
 
 requires: [kro, flux-source, flux-helm, protected-registry-basic-auth]
 
