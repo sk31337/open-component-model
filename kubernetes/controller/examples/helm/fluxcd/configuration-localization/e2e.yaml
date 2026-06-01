@@ -6,6 +6,7 @@ requires:
 prepare:
   components:
     - constructor: component-constructor.yaml
+      copyResources: true
 
 deploy:
   - apply: bootstrap.yaml

@@ -109,16 +109,13 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 	})
 }
 
-// PrepareOCMComponentOptions configures PrepareOCMComponentWithOptions.
-// OCMConfig, when set, is passed to `ocm transfer` via --config and lets a
-// scenario push to a credentialed registry. Empty fields fall back to the
-// defaults of the legacy PrepareOCMComponent helper.
 type PrepareOCMComponentOptions struct {
 	Name                     string
 	ComponentConstructorPath string
 	ImageRegistry            string
 	SigningKey               string
 	OCMConfig                string
+	CopyResources            bool
 }
 
 // PrepareOCMComponentWithOptions is the option-bag form of
@@ -173,7 +170,11 @@ func PrepareOCMComponentWithOptions(ctx context.Context, opts PrepareOCMComponen
 		"ctf",
 		"--overwrite",
 		"--enforce",
-		"--copy-resources",
+	)
+	if opts.CopyResources {
+		cmdArgs = append(cmdArgs, "--copy-resources")
+	}
+	cmdArgs = append(cmdArgs,
 		"--omit-access-types",
 		"gitHub",
 		ctfDir,

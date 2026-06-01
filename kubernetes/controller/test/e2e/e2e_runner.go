@@ -54,14 +54,11 @@ type PrepareSpec struct {
 }
 
 type PrepareComponent struct {
-	Constructor string `json:"constructor"`
-	SigningKey  string `json:"signingKey,omitempty"`
-	OCMConfig   string `json:"ocmConfig,omitempty"`
-	// Registry overrides the transfer target for this component. When empty
-	// the harness falls back to ${IMAGE_REGISTRY}. Used by credentials
-	// scenarios to push into the protected registry the bootstrap then
-	// references.
-	Registry string `json:"registry,omitempty"`
+	Constructor   string `json:"constructor"`
+	SigningKey    string `json:"signingKey,omitempty"`
+	OCMConfig     string `json:"ocmConfig,omitempty"`
+	Registry      string `json:"registry,omitempty"`
+	CopyResources bool   `json:"copyResources,omitempty"`
 }
 
 type DeployStep struct {
@@ -364,6 +361,7 @@ func runScenario(cfg *ScenarioConfig) {
 			ImageRegistry:            registry,
 			SigningKey:               signingKey,
 			OCMConfig:                ocmConfig,
+			CopyResources:            comp.CopyResources,
 		})).To(Succeed(), "PrepareOCMComponent failed for %s", comp.Constructor)
 	}
 
