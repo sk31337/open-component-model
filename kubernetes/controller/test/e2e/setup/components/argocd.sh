@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Install ArgoCD into its own namespace and register the host-side
-# image-registry as a plain-HTTP OCI Helm repo-creds template. Any
-# Application whose repoURL starts with `oci://image-registry:5000`
-# inherits the insecureOCIForceHttp setting.
-#
-# Idempotent: namespace creation is `apply` style; install.yaml is
-# applied with `--server-side --force-conflicts`; the repo-creds Secret
-# is `kubectl apply` of stable content.
+# Install ArgoCD and register the host-side image-registry as a
+# plain-HTTP OCI Helm repo-creds template.
 set -euo pipefail
+
+if kubectl get deployment argocd-server -n argocd >/dev/null 2>&1 \
+   && kubectl get deployment argocd-server -n argocd -o jsonpath='{.status.availableReplicas}' | grep -q '[1-9]'; then
+  echo "argocd already installed and running, skipping"
+  exit 0
+fi
 
 reg_name='image-registry'
 reg_port='5000'

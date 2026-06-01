@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Install Flux's kustomize-controller. Source-controller is a hard
-# dependency, so this script also ensures source-controller is present.
-# Idempotent via `flux install`.
+# Install Flux's kustomize-controller (+ source-controller dependency).
 set -euo pipefail
+
+if kubectl get deployment kustomize-controller -n flux-system >/dev/null 2>&1 \
+   && kubectl get deployment kustomize-controller -n flux-system -o jsonpath='{.status.availableReplicas}' | grep -q '[1-9]'; then
+  echo "flux kustomize-controller already installed and running, skipping"
+  exit 0
+fi
 
 flux install --components=source-controller,kustomize-controller

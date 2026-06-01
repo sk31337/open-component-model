@@ -334,6 +334,7 @@ func runScenario(cfg *ScenarioConfig) {
 		dir := componentsDir()
 		for _, name := range cfg.Requires {
 			script := filepath.Join(dir, name+".sh")
+			By(fmt.Sprintf("installing component %q (script %s)...", name, script))
 			cmd := exec.CommandContext(ctx, "bash", script)
 			cmd.Stdout = GinkgoWriter
 			cmd.Stderr = GinkgoWriter

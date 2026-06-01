@@ -6,7 +6,8 @@ It is the source of truth for the harness; update it when the design changes.
 
 ## Status
 
-- **State:** proposed. Not yet implemented at the time of writing.
+- **State:** implemented. Stages 1–4 are complete; Stage 5 (CI sharding) is wired
+  but not yet active in the GitHub Actions workflow.
 - **Replaces:** the monolithic `e2e_examples_test.go` / `e2e_credentials_test.go` /
   `e2e_applyset_test.go` files plus the single `hacks/setup.sh` script.
 - **Supersedes:** `task test/e2e/example NAME=...` (removed).
@@ -298,9 +299,22 @@ reference is unknown. This catches typos before any cluster work begins.
 ## Setup composition
 
 `test/e2e/setup/local.sh` is the single entrypoint operators use to set up a fresh kind
-cluster. It runs `cluster.sh` followed by every component script under
-`setup/components/`. Per-scenario, the runner calls only the scripts named in
-`requires:` (after `cluster.sh`, which is always already up).
+cluster. By default it runs `cluster.sh` followed by every component script under
+`setup/components/`. Pass `--cluster-only` to skip component installation — the runner
+will then install each scenario's dependencies on demand via `requires:`.
+
+```sh
+# Full setup (cluster + all components) — good for focused local iteration
+task test/e2e/setup/local
+
+# Cluster only — components installed selectively by the runner per requires:
+task test/e2e/setup/local -- --cluster-only
+```
+
+Per-scenario, the runner calls only the scripts named in `requires:` (after `cluster.sh`,
+which is always already up). When `local.sh` ran without `--cluster-only`, these calls
+are idempotent no-ops. When `--cluster-only` was used (or in CI shards), the runner's
+`requires:` invocation is the actual install path.
 
 Each component script must be **idempotent**: invoking it on a cluster that already has
 the component installed must succeed without changes. This lets the runner re-invoke a
@@ -335,12 +349,12 @@ jobs:
         include: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
-      - run: task kubernetes/controller:test/e2e/setup/local
+      - run: task kubernetes/controller:test/e2e/setup/local -- --cluster-only
       - run: task kubernetes/controller:test/e2e -- "${{ matrix.focus }}"
 ```
 
-Each runner gets its own ephemeral kind cluster (Q4 D-cross-runner). Locally,
-developers iterate against a persistent cluster they keep across runs.
+Each shard provisions only the cluster; component installation is deferred to the
+runner's `requires:` step, so each shard only installs what its scenario needs.
 
 ## Operator UX
 
@@ -356,6 +370,7 @@ Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
 | `task test/e2e -- credentials/` | run both credentials scenarios |
 | `task test/e2e -- examples` | run only the `Context("examples")` block (17 demos) |
 | `task test/e2e/setup/local` | provision kind cluster + all components |
+| `task test/e2e/setup/local -- --cluster-only` | provision kind cluster only; components installed on demand by the runner |
 | `task test/e2e/teardown` | delete kind cluster and registry |
 | `E2E_TIMEOUT=10m task test/e2e` | bump global timeout |
 

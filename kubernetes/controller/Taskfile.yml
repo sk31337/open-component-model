@@ -75,12 +75,11 @@ tasks:
   test/e2e/setup/local:
     desc: "Set up a local Kind cluster for E2E tests (runs test/e2e/setup/local.sh and loads the controller image)"
     deps:
-      # We depend on a locally built image, so we need to load that into the local machine.
       - task: docker-build
         vars:
           LOAD: "true"
     cmds:
-      - 'KIND_NODE_IMAGE_VERSION={{.KIND_NODE_IMAGE_VERSION}} bash {{.TASKFILE_DIR}}/test/e2e/setup/local.sh'
+      - 'KIND_NODE_IMAGE_VERSION={{.KIND_NODE_IMAGE_VERSION}} bash {{.TASKFILE_DIR}}/test/e2e/setup/local.sh {{.CLI_ARGS}}'
       - 'kind load docker-image {{.CONTROLLER_IMG}}'
 
   test/e2e/teardown:

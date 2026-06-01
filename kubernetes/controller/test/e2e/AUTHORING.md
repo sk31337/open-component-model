@@ -230,28 +230,26 @@ deliberately, not a side-effect every scenario should pay for.
 ## Local iteration
 
 ```sh
-# Provision a fresh kind cluster + all components
+# Provision a fresh kind cluster + all components (fast focused runs)
 task kubernetes/controller:test/e2e/setup/local
+
+# Or: cluster only — components installed on demand via requires:
+task kubernetes/controller:test/e2e/setup/local -- --cluster-only
 
 # Run everything
 task kubernetes/controller:test/e2e
 
-# Run one scenario
-task kubernetes/controller:test/e2e -- --focus="helm/fluxcd/simple"
-
-# Run a family
-task kubernetes/controller:test/e2e -- --focus="^helm/"
-
-# Run a sub-family (Flux helm only)
-task kubernetes/controller:test/e2e -- --focus="^helm/fluxcd/"
+# Run one scenario (exact match — won't run nested-signed when you say nested)
+task kubernetes/controller:test/e2e -- helm/fluxcd/simple
 
 # Tear down the cluster and registry when done
 task kubernetes/controller:test/e2e/teardown
 ```
 
-`--focus=` is a Ginkgo regex over `${SCENARIO_FOLDER}`. The local cluster is
-persistent across runs; CI cluster is per-shard ephemeral. See DESIGN.md
-§"Operator UX" for the full table.
+The scenario name passed via `--` is matched exactly (anchored). The local
+cluster is persistent across runs; CI shards use `--cluster-only` so each
+shard only installs the components its scenario declares in `requires:`.
+See DESIGN.md §"Operator UX" for the full command table.
 
 ---
 

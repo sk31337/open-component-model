@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Install the in-cluster password-protected registry used by the
-# credentials/docker-config-json scenario (different htpasswd creds, so
-# the controller cannot inadvertently reuse a cached identity).
-# Idempotent via `kubectl apply` + Ready wait.
+# credentials/docker-config-json scenario.
 set -euo pipefail
+
+if kubectl get pod -l app=protected-registry2 -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q Running; then
+  echo "protected-registry-docker-config-json already running, skipping"
+  exit 0
+fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 manifests_dir="$(cd "${script_dir}/../manifests" && pwd)"
