@@ -299,22 +299,24 @@ reference is unknown. This catches typos before any cluster work begins.
 ## Setup composition
 
 `test/e2e/setup/local.sh` is the single entrypoint operators use to set up a fresh kind
-cluster. By default it runs `cluster.sh` followed by every component script under
-`setup/components/`. Pass `--cluster-only` to skip component installation — the runner
-will then install each scenario's dependencies on demand via `requires:`.
+cluster. By default it only runs `cluster.sh` (kind cluster + host registry + RBAC).
+Component installation is deferred to the e2e runner, which installs each scenario's
+dependencies on demand via `requires:`. Pass `--all-components` to also pre-install
+every component script — useful for fast local iteration when you want focused runs
+to start instantly without waiting for component setup.
 
 ```sh
-# Full setup (cluster + all components) — good for focused local iteration
+# Default: cluster only — components installed on demand by the runner
 task test/e2e/setup/local
 
-# Cluster only — components installed selectively by the runner per requires:
-task test/e2e/setup/local -- --cluster-only
+# Pre-install all components — good for rapid focused iteration
+task test/e2e/setup/local -- --all-components
 ```
 
-Per-scenario, the runner calls only the scripts named in `requires:` (after `cluster.sh`,
-which is always already up). When `local.sh` ran without `--cluster-only`, these calls
-are idempotent no-ops. When `--cluster-only` was used (or in CI shards), the runner's
-`requires:` invocation is the actual install path.
+Per-scenario, the runner calls only the scripts named in `requires:`. When
+`--all-components` was used, these calls are idempotent no-ops (each script
+detects the component is already running and exits immediately). Without
+`--all-components`, the runner's `requires:` invocation is the actual install path.
 
 Each component script must be **idempotent**: invoking it on a cluster that already has
 the component installed must succeed without changes. This lets the runner re-invoke a
@@ -349,12 +351,12 @@ jobs:
         include: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
-      - run: task kubernetes/controller:test/e2e/setup/local -- --cluster-only
+      - run: task kubernetes/controller:test/e2e/setup/local
       - run: task kubernetes/controller:test/e2e -- "${{ matrix.focus }}"
 ```
 
-Each shard provisions only the cluster; component installation is deferred to the
-runner's `requires:` step, so each shard only installs what its scenario needs.
+Each shard provisions only the cluster (the default); component installation is deferred
+to the runner's `requires:` step, so each shard only installs what its scenario needs.
 
 ## Operator UX
 
@@ -369,8 +371,8 @@ Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
 | `task test/e2e -- helm/` | run all twelve helm scenarios |
 | `task test/e2e -- credentials/` | run both credentials scenarios |
 | `task test/e2e -- examples` | run only the `Context("examples")` block (17 demos) |
-| `task test/e2e/setup/local` | provision kind cluster + all components |
-| `task test/e2e/setup/local -- --cluster-only` | provision kind cluster only; components installed on demand by the runner |
+| `task test/e2e/setup/local` | provision kind cluster (components installed on demand by runner) |
+| `task test/e2e/setup/local -- --all-components` | provision kind cluster + pre-install all components |
 | `task test/e2e/teardown` | delete kind cluster and registry |
 | `E2E_TIMEOUT=10m task test/e2e` | bump global timeout |
 

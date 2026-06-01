@@ -230,11 +230,11 @@ deliberately, not a side-effect every scenario should pay for.
 ## Local iteration
 
 ```sh
-# Provision a fresh kind cluster + all components (fast focused runs)
+# Provision a fresh kind cluster (components installed on demand by the runner)
 task kubernetes/controller:test/e2e/setup/local
 
-# Or: cluster only — components installed on demand via requires:
-task kubernetes/controller:test/e2e/setup/local -- --cluster-only
+# Or: pre-install all components for fast repeated focused runs
+task kubernetes/controller:test/e2e/setup/local -- --all-components
 
 # Run everything
 task kubernetes/controller:test/e2e
@@ -247,7 +247,7 @@ task kubernetes/controller:test/e2e/teardown
 ```
 
 The scenario name passed via `--` is matched exactly (anchored). The local
-cluster is persistent across runs; CI shards use `--cluster-only` so each
+cluster is persistent across runs; CI uses the default (cluster only) so each
 shard only installs the components its scenario declares in `requires:`.
 See DESIGN.md §"Operator UX" for the full command table.
 

@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
 # Orchestrator for the local e2e environment.
 #
-# Runs the always-on bootstrap (cluster.sh) followed by every per-
-# component script under components/. Each script is idempotent and
-# self-contained; running this orchestrator twice should converge.
+# By default, only provisions the kind cluster + host registry (cluster.sh).
+# Component installation is deferred to the e2e runner, which installs each
+# scenario's dependencies on demand via `requires:`.
 #
 # Flags:
-#   --cluster-only   Only run cluster.sh; skip component installation.
-#                    Use this when the e2e runner will install components
-#                    on demand via each scenario's `requires:` list.
+#   --all-components   Also install all component scripts under components/.
+#                      Use this for fast local iteration when you want every
+#                      component pre-installed so focused runs start instantly.
 #
 # DESIGN.md §"Setup composition" describes the contract:
 #   * cluster.sh provisions the kind cluster + host registry + RBAC and
 #     is always required.
 #   * Every file in components/ corresponds to an opt-in component a
-#     scenario can declare via `requires:` in its e2e.yaml. By default
-#     we install all of them so any focused run finds its dependencies
-#     up. Pass --cluster-only to defer component installation to the
-#     runner (useful for CI shards that only need a subset).
+#     scenario can declare via `requires:` in its e2e.yaml. The runner
+#     installs them on demand; pass --all-components to pre-install all.
 set -euo pipefail
 
-cluster_only=false
+all_components=false
 for arg in "$@"; do
   case "$arg" in
-    --cluster-only) cluster_only=true ;;
+    --all-components) all_components=true ;;
   esac
 done
 
@@ -39,9 +37,9 @@ fi
 echo ">>> cluster.sh"
 bash "${cluster_script}"
 
-if [[ "${cluster_only}" == "true" ]]; then
+if [[ "${all_components}" != "true" ]]; then
   echo
-  echo "setup/local.sh complete (cluster only — components deferred to runner)."
+  echo "setup/local.sh complete (cluster only — components installed on demand by the runner)."
   exit 0
 fi
 
@@ -66,4 +64,4 @@ for s in "${scripts[@]}"; do
 done
 
 echo
-echo "setup/local.sh complete."
+echo "setup/local.sh complete (all components installed)."
