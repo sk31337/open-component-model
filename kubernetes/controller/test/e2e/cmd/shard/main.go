@@ -67,7 +67,7 @@ func main() {
 	}
 
 	// Round-robin scenarios into shards. Empty shards get a sentinel focus
-	// regex that matches nothing so the runner exits quickly.
+	// that matches nothing so the runner exits quickly.
 	buckets := make([][]string, numShards)
 	for i, s := range scenarios {
 		buckets[i%numShards] = append(buckets[i%numShards], s)
@@ -77,7 +77,14 @@ func main() {
 			matrix[i].Focus = "$.^" // matches nothing
 			continue
 		}
-		matrix[i].Focus = "^(" + joinAlternation(names) + ")$"
+		// Output plain scenario name when a single scenario per shard;
+		// the Taskfile anchors it automatically. For multi-scenario shards,
+		// join with | so the Taskfile passes the pre-built regex through.
+		if len(names) == 1 {
+			matrix[i].Focus = names[0]
+		} else {
+			matrix[i].Focus = "^.*(" + joinAlternation(names) + ")$"
+		}
 	}
 
 	out, err := json.Marshal(matrix)

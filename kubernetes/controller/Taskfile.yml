@@ -103,10 +103,15 @@ tasks:
             --focus=*) cli="${cli#--focus=}" ;;
             "--focus "*) cli="${cli#--focus }" ;;
           esac
-          # Anchor the pattern so "helm/argocd/nested" does not also
-          # match "helm/argocd/nested-signed". The spec text is
-          # "should run <folder>" so we anchor against that exact folder.
-          focus_args=(-ginkgo.focus="^.*${cli}$")
+          # If the value already looks like a regex (starts with ^), pass
+          # it through verbatim (e.g. from cmd/shard CI output). Otherwise
+          # anchor it so "helm/argocd/nested" matches exactly that scenario
+          # and not "helm/argocd/nested-signed".
+          if [[ "$cli" == ^* ]]; then
+            focus_args=(-ginkgo.focus="$cli")
+          else
+            focus_args=(-ginkgo.focus="^.*${cli}$")
+          fi
         fi
         PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v "${focus_args[@]}"
 
