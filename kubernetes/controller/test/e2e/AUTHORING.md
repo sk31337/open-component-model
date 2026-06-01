@@ -230,6 +230,9 @@ deliberately, not a side-effect every scenario should pay for.
 ## Local iteration
 
 ```sh
+# Teardown + fresh cluster + run one scenario (full clean slate)
+task kubernetes/controller:test/e2e/fresh -- helm/fluxcd/simple
+
 # Provision a fresh kind cluster (components installed on demand by the runner)
 task kubernetes/controller:test/e2e/setup/local
 

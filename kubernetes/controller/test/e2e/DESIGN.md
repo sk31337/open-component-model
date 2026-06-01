@@ -371,6 +371,7 @@ Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
 | `task test/e2e -- helm/` | run all twelve helm scenarios |
 | `task test/e2e -- credentials/` | run both credentials scenarios |
 | `task test/e2e -- examples` | run only the `Context("examples")` block (17 demos) |
+| `task test/e2e/fresh -- helm/fluxcd/simple` | teardown + setup + run one scenario from scratch |
 | `task test/e2e/setup/local` | provision kind cluster (components installed on demand by runner) |
 | `task test/e2e/setup/local -- --all-components` | provision kind cluster + pre-install all components |
 | `task test/e2e/teardown` | delete kind cluster and registry |

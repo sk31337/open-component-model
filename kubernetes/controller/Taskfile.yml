@@ -88,6 +88,15 @@ tasks:
       - 'kind delete cluster 2>/dev/null || true'
       - 'docker rm -f image-registry 2>/dev/null || true'
 
+  test/e2e/fresh:
+    desc: "Teardown, setup, and run E2E tests from scratch. Pass a scenario via `--`, e.g. `task test/e2e/fresh -- helm/fluxcd/simple`."
+    cmds:
+      - task: test/e2e/teardown
+      - task: test/e2e/setup/local
+      - task: test/e2e
+        vars:
+          CLI_ARGS: '{{.CLI_ARGS}}'
+
   test/e2e:
     desc: "Run end-to-end tests against a running cluster. Pass a scenario folder via `--`, e.g. `task test/e2e -- helm/fluxcd/simple`. Omit to run all scenarios."
     dotenv: ['{{.TASKFILE_DIR}}/test/e2e/hacks/.env']
