@@ -368,10 +368,10 @@ sequenceDiagram
 
 ## The runner
 
-[`e2e_runner.go`](./e2e_runner.go) exposes a single entry point `runScenario(cfg)`. The Ginkgo suite
+[`runner_test.go`](./runner_test.go) exposes a single entry point `runScenario(cfg)`. The Ginkgo suite
 calls it once per discovered scenario. See
 [`e2e_scenarios_test.go`](./e2e_scenarios_test.go) and
-[`e2e_runner.go`](./e2e_runner.go) for the full implementation.
+[`runner_test.go`](./runner_test.go) for the full implementation.
 
 ### Debug commands
 
@@ -394,7 +394,7 @@ force diagnostics on success.
 
 If a scenario omits `debug:`, a built-in default set runs (controller
 pods/logs, kro pods/events, RGD conditions) — see `defaultDebugCommands` in
-[`e2e_runner.go`](./e2e_runner.go). The detection helper is `isWorkflowDebug`
+[`runner_test.go`](./runner_test.go). The detection helper is `isWorkflowDebug`
 in the same file.
 
 ### Hook registry
