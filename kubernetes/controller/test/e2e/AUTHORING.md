@@ -10,15 +10,6 @@ rationale, locked decisions (Q1–Q16), and the full schema reference see
 
 ## E2E Pipeline Architecture
 
-```mermaid
-graph LR
-    T["Taskfile"] --> R["Runner (e2e_runner.go)"]
-    T --> S["cmd/shard (CI)"]
-    R --> CFG["ScenarioConfig (e2e.yaml)"]
-    R --> H["Hooks (registry.go)"]
-    R --> SC["Setup Scripts (components/*.sh)"]
-```
-
 <details>
 <summary>Detailed class diagram</summary>
 
@@ -119,26 +110,6 @@ sequenceDiagram
     Runner->>K8s: kubectl wait --for=condition=Available deployment
     Runner->>K8s: kubectl get -o jsonpath (fieldEquals)
     Note over Runner,Cluster: DeferCleanup: kubectl delete -f bootstrap.yaml
-```
-
-### Decision tree: what happens when things go wrong
-
-```mermaid
-flowchart TD
-    START["runScenario()"] --> REQ_OK{{"requires: scripts succeed?"}}
-    REQ_OK -- "no" --> FAIL1["FAIL: 'requires component X failed'"]
-    REQ_OK -- "yes" --> PREP_OK{{"prepare: ocm transfer succeeds?"}}
-    PREP_OK -- "no" --> FAIL2["FAIL: 'PrepareOCMComponent failed'"]
-    PREP_OK -- "yes" --> DEP_OK{{"deploy: apply + waitFor succeed?"}}
-    DEP_OK -- "no" --> FAIL3["FAIL: 'kubectl apply/wait failed'"]
-    DEP_OK -- "yes" --> ASSERT_OK{{"assert: all resources ready?"}}
-    ASSERT_OK -- "no" --> FAIL4["FAIL: 'wait condition on resource failed'"]
-    ASSERT_OK -- "yes" --> PASS["PASS ✓"]
-
-    FAIL1 --> DBG["debug: kubectl commands run"]
-    FAIL2 --> DBG
-    FAIL3 --> DBG
-    FAIL4 --> DBG
 ```
 
 </details>
@@ -464,11 +435,19 @@ deliberately, not a side-effect every scenario should pay for.
 
 ---
 
-## Diagnostics on failure
+## Diagnostics on failure (or in debug mode)
 
-When a scenario fails, the runner executes kubectl commands declared in `debug:`.
-If omitted, a default set runs (controller pods/logs, kro pods/events, RGD
-conditions). Override it to add scenario-specific diagnostics:
+The runner executes the kubectl commands declared in `debug:` whenever
+**either** of these is true:
+
+- the scenario fails, **or**
+- the GitHub Actions workflow is in debug mode — `RUNNER_DEBUG=1` (set when
+  an operator picks "Re-run with debug logging") or `ACTIONS_STEP_DEBUG=true`
+  is exported into the runner environment.
+
+If you omit `debug:`, a default set runs (controller pods/logs, kro
+pods/events, RGD conditions). Override it to add scenario-specific
+diagnostics:
 
 ```yaml
 debug:
@@ -482,6 +461,16 @@ debug:
 
 Each `kubectl:` value is passed directly to `kubectl` (split on whitespace).
 `label:` is optional — used to group output lines in the log.
+
+To force the snapshot on a green run locally, prepend `RUNNER_DEBUG=1`:
+
+```sh
+RUNNER_DEBUG=1 task kubernetes/controller:test/e2e -- helm/fluxcd/simple
+```
+
+In CI, re-run the workflow with "Enable debug logging" checked — GitHub
+exports `RUNNER_DEBUG=1` automatically and the runner picks it up without
+any workflow-file changes.
 
 ---
 

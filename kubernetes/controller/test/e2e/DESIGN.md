@@ -13,17 +13,8 @@ It is the source of truth for the harness; update it when the design changes.
 
 ## Architecture overview
 
-**what the harness does**:
-
-```mermaid
-graph LR
-    YAML["e2e.yaml (20 scenarios)"] --> RUNNER["Go Runner"]
-    RUNNER --> CLUSTER["Kind Cluster"]
-    CLUSTER --> RESULT["Pass / Fail"]
-```
 <details>
-<summary>discovery → execution → diagnostics (detailed)</summary>
-
+<summary>what the harness does: discovery → execution → diagnostics (detailed)</summary>
 
 ```mermaid
 graph LR
@@ -46,7 +37,7 @@ graph LR
         HOOKS4 --> CLN["cleanup + postCleanupHooks"]
     end
 
-    subgraph "On Failure"
+    subgraph "On Failure or Debug Mode"
         ASS -. "fail" .-> DBG["debug: kubectl commands"]
         DEP -. "fail" .-> DBG
     end
@@ -310,9 +301,12 @@ cleanup:
   cascadeFromBootstrap: false
   cascadeTimeout: 5m
 
-# Optional. kubectl commands to run on failure for diagnostics. Each entry
-# specifies a kubectl subcommand and a label for log grouping. When omitted,
-# a default set runs (controller pods/logs, kro pods/events, RGD conditions).
+# Optional. kubectl commands to run for diagnostics. Each entry specifies a
+# kubectl subcommand and a label for log grouping. When omitted, a default set
+# runs (controller pods/logs, kro pods/events, RGD conditions). The runner
+# executes these commands when the spec fails OR when the GitHub Actions
+# workflow is in debug mode (RUNNER_DEBUG=1 or ACTIONS_STEP_DEBUG=true) — so
+# a "Re-run with debug logging" yields a cluster snapshot on green runs too.
 debug:
   - kubectl: get pods -n ${CONTROLLER_NAMESPACE} -o wide
     label: controller-pods
@@ -365,7 +359,7 @@ sequenceDiagram
     Runner->>Hooks: preCleanupHooks
     Runner->>Cluster: cleanup: DeferCleanup (kubectl delete)
     Runner->>Hooks: postCleanupHooks
-    alt On failure
+    alt On failure or RUNNER_DEBUG/ACTIONS_STEP_DEBUG set
         Runner->>Cluster: debug: kubectl diagnostic commands
     end
 ```
@@ -378,6 +372,30 @@ sequenceDiagram
 calls it once per discovered scenario. See
 [`e2e_scenarios_test.go`](./e2e_scenarios_test.go) and
 [`e2e_runner.go`](./e2e_runner.go) for the full implementation.
+
+### Debug commands
+
+Each scenario may declare a `debug:` array of `kubectl` commands. The runner
+runs them via `DeferCleanup`, prefixing each line with `[DEBUG] <label>:`.
+The trigger is the OR of two conditions:
+
+1. **The spec failed** — `CurrentSpecReport().Failed()` returns true. This is
+   the historical behaviour and stays the default.
+2. **The GitHub Actions workflow is in debug mode** — `RUNNER_DEBUG=1` (set
+   when an operator picks "Re-run with debug logging" in the Actions UI) or
+   `ACTIONS_STEP_DEBUG=true` (step-level debug, typically toggled via a repo
+   variable or secret). Either flag is sufficient.
+
+The second trigger means a debug-mode re-run on a green pipeline still yields
+the cluster snapshot. Operators no longer need to manufacture a failure to
+inspect controller pods, kro events, or RGD conditions on a passing run.
+Locally the same applies: prepend `RUNNER_DEBUG=1` to the test command to
+force diagnostics on success.
+
+If a scenario omits `debug:`, a built-in default set runs (controller
+pods/logs, kro pods/events, RGD conditions) — see `defaultDebugCommands` in
+[`e2e_runner.go`](./e2e_runner.go). The detection helper is `isWorkflowDebug`
+in the same file.
 
 ### Hook registry
 
@@ -469,7 +487,7 @@ graph TD
         S1["kind create cluster"] --> S2["requires: install components"]
         S2 --> S3["helm install controller"]
         S3 --> S4["runScenario(focus)"]
-        S4 --> S5["debug: on failure"]
+        S4 --> S5["debug: on failure or workflow debug mode"]
     end
 
     E1 --> S1
@@ -645,7 +663,9 @@ assert:
 </details>
 
 <details>
+
 ## Decision summary
+
 <summary>Decision summary (Q1–Q16)</summary>
 
 | # | Decision | Choice | Rationale |
@@ -675,7 +695,9 @@ assert:
 </details>
 
 <details>
+
 ## Migration plan 
+
 <summary>Migration plan (Stages 1–6)</summary>
 
 Implementation lands in stages so the suite stays green throughout.
