@@ -51,168 +51,7 @@ graph LR
     end
 ```
 
-### Detailed: internal function call graph
-
-```mermaid
-graph TD
-    GK["Ginkgo It()"] --> RS["runScenario(cfg)"]
-    RS --> DC["DeferCleanup(runDebugCommands)"]
-    RS --> BY1["By('ensuring required components')"]
-    BY1 --> EXEC["exec.CommandContext('bash', script)"]
-    RS --> BY2["By('preparing OCM components')"]
-    BY2 --> POC["PrepareOCMComponentWithOptions()"]
-    POC --> OCMADD["ocm add componentversions"]
-    POC --> OCMSIGN["ocm sign componentversions (if signingKey)"]
-    POC --> OCMTX["ocm transfer ctf --overwrite --enforce"]
-    RS --> DH1["dispatchHooks('preDeployHooks')"]
-    DH1 --> HR["hooks.Resolve(name) → hook(ctx, scenario)"]
-    RS --> BY3["By('deploying scenario')"]
-    BY3 --> DR["utils.DeployResource() → kubectl apply"]
-    BY3 --> WFS["waitForSpec() → kubectl wait --for=condition"]
-    RS --> DH2["dispatchHooks('postDeployHooks')"]
-    RS --> DH3["dispatchHooks('preAssertHooks')"]
-    RS --> BY4["By('asserting scenario')"]
-    BY4 --> AR["assertResource() → kubectl wait"]
-    BY4 --> CRF["utils.CompareResourceField() → kubectl get -o jsonpath"]
-    RS --> DH4["dispatchHooks('postAssertHooks')"]
-    RS --> DH5["dispatchHooks('preCleanupHooks')"]
-```
-
-### Data flow: e2e.yaml → cluster state
-
-```mermaid
-graph LR
-    subgraph "Authoring (human)"
-        YAML["e2e.yaml"]
-        CC["component-constructor.yaml"]
-        BOOT["bootstrap.yaml"]
-        RGD["rgd.yaml"]
-    end
-
-    subgraph "Harness (Go)"
-        LOAD["loadScenario()"] --> SUB["substituteVars()"]
-        SUB --> VAL["validateHookRefs() + validateRequires()"]
-    end
-
-    subgraph "Cluster (Kubernetes)"
-        OCM["OCM CRs: Repository, Component, Resource, Deployer"]
-        KRO["kro RGD → custom instance"]
-        FLUX["Flux: OCIRepository → HelmRelease"]
-        ARGO["ArgoCD: Application"]
-        POD["Deployment → Pod (podinfo)"]
-    end
-
-    YAML --> LOAD
-    CC --> |"ocm transfer"| OCM
-    BOOT --> |"kubectl apply"| OCM
-    RGD --> |"Deployer deploys"| KRO
-    KRO --> FLUX
-    KRO --> ARGO
-    FLUX --> POD
-    ARGO --> POD
-```
-
-## CI sharding architecture
-
-### High-level: fan-out pattern
-
-```mermaid
-graph LR
-    PUSH["git push"] --> DISC["Discover (1 job)"]
-    DISC --> SHARDS["20 parallel jobs"]
-    SHARDS --> RESULT["All green ✓"]
-```
-
-### Mid-level: discover → matrix → shards
-
-```mermaid
-graph TD
-    subgraph "discover job"
-        D1["checkout"] --> D2["go run cmd/shard"]
-        D2 --> D3["matrix=JSON → GITHUB_OUTPUT"]
-    end
-
-    D3 --> E1["shard 0: applyset/pruning"]
-    D3 --> E2["shard 1: credentials/basic-auth"]
-    D3 --> E3["shard 2: helm/argocd/simple"]
-    D3 --> E4["..."]
-    D3 --> E5["shard 19: kustomize/fluxcd/simple"]
-
-    subgraph "each shard (parallel)"
-        S1["kind create cluster"] --> S2["requires: install components"]
-        S2 --> S3["helm install controller"]
-        S3 --> S4["runScenario(focus)"]
-        S4 --> S5["debug: on failure"]
-    end
-
-    E1 --> S1
-    E2 --> S1
-    E3 --> S1
-    E5 --> S1
-```
-
-### Detailed: cmd/shard internals + Taskfile focus anchoring
-
-```mermaid
-flowchart TD
-    subgraph "cmd/shard/main.go"
-        WALK1["walk('examples/')"] --> SCENARIOS
-        WALK2["walk('test/e2e/scenarios/')"] --> SCENARIOS["sort(scenarios)"]
-        SCENARIOS --> NSHARDS{{"--shards=0?"}}
-        NSHARDS -- "yes (default)" --> ONE["numShards = len(scenarios)"]
-        NSHARDS -- "no" --> N["numShards = N"]
-        ONE --> BUCKET["round-robin into buckets"]
-        N --> BUCKET
-        BUCKET --> SINGLE{{"bucket has 1 name?"}}
-        SINGLE -- "yes" --> PLAIN["focus = 'helm/fluxcd/simple'"]
-        SINGLE -- "no" --> REGEX["focus = '^.*(name1|name2)$'"]
-        PLAIN --> JSON["matrix=JSON → stdout"]
-        REGEX --> JSON
-    end
-
-    subgraph "Taskfile test/e2e"
-        JSON --> CLI["cli = matrix.focus"]
-        CLI --> STARTS{{"cli starts with ^?"}}
-        STARTS -- "yes" --> PASS["pass verbatim to -ginkgo.focus"]
-        STARTS -- "no" --> ANCHOR["wrap as '^.*${cli}$'"]
-        PASS --> GINKGO["go test -ginkgo.focus=..."]
-        ANCHOR --> GINKGO
-    end
-```
-
-### Timing: what happens on CI vs locally
-
-```mermaid
-gantt
-    title CI Shard Timeline (20 parallel jobs)
-    dateFormat mm:ss
-    axisFormat %M:%S
-
-    section discover
-    checkout + go run cmd/shard : d1, 00:00, 20s
-
-    section shard (each parallel)
-    kind create cluster       : s1, 00:20, 60s
-    install components        : s2, after s1, 60s
-    helm install controller   : s3, after s2, 30s
-    runScenario               : s4, after s3, 30s
-    cleanup                   : s5, after s4, 10s
-```
-
 ## Setup composition flow
-
-### High-level: two modes
-
-```mermaid
-graph LR
-    A["setup/local.sh"] --> B{{"flag?"}}
-    B -- "default" --> C["cluster only"]
-    B -- "--all-components" --> D["cluster + all components"]
-    C --> E["runner installs on demand"]
-    D --> E
-```
-
-### Mid-level: cluster.sh + components
 
 ```mermaid
 flowchart TD
@@ -232,37 +71,6 @@ flowchart TD
 
     DONE1 --> RUN
     ALL --> RUN
-```
-
-### Detailed: cluster.sh internals
-
-```mermaid
-flowchart TD
-    CS["cluster.sh"] --> PRE["check prerequisites: docker, flux, helm, jq, kind, kubectl"]
-    PRE --> REG{{"image-registry container exists?"}}
-    REG -- "no" --> CREG["docker run -d registry:2 --name image-registry -p 5000:5000"]
-    REG -- "yes" --> SKIPRE["skip"]
-    CREG --> KIND{{"kind cluster exists?"}}
-    SKIPRE --> KIND
-    KIND -- "no" --> CKIND["kind create cluster --config (extraPortMappings 31002,31003)"]
-    KIND -- "yes" --> SKIPK["skip"]
-    CKIND --> CERTS["configure containerd hosts.toml mirrors on each node"]
-    SKIPK --> CERTS
-    CERTS --> NET{{"registry on kind network?"}}
-    NET -- "no" --> CONN["docker network connect kind image-registry"]
-    NET -- "yes" --> SKIPN["skip"]
-    CONN --> RBAC["kubectl apply -f manifests/rbac.yaml"]
-    SKIPN --> RBAC
-```
-
-### Component script pattern (idempotent)
-
-```mermaid
-flowchart TD
-    SCRIPT["components/<name>.sh"] --> CHECK{{"deployment running + available replicas > 0?"}}
-    CHECK -- "yes" --> SKIP["echo 'already installed, skipping' && exit 0"]
-    CHECK -- "no" --> INSTALL["install (helm upgrade / flux install / kubectl apply)"]
-    INSTALL --> WAIT["kubectl wait --for=condition=Available --timeout=5m"]
 ```
 
 ## Why this exists
@@ -297,6 +105,9 @@ A scenario has exactly one home. Both roots use the same `e2e.yaml` schema, the 
 walker, and the same runner.
 
 ## Folder layout
+
+<details>
+<summary>Full directory tree</summary>
 
 ```
 kubernetes/controller/
@@ -355,6 +166,8 @@ kubernetes/controller/
         docker-config-json/
 ```
 
+</details>
+
 Each scenario directory contains an `e2e.yaml` plus the fixture files the scenario
 references (bootstrap, component-constructor, rgd, instance, k8s-manifest, signing keys,
 `.ocmconfig`, etc.).
@@ -376,6 +189,36 @@ Nested scenarios are illegal and cause a load-time error. Directories without an
 `helm/fluxcd/`, `credentials/`) and incidental files (`README.md`).
 
 ## The `e2e.yaml` schema
+
+Minimal example:
+
+```yaml
+apiVersion: e2e.ocm.software/v1
+kind: Scenario
+
+requires: [kro, flux-source, flux-helm]
+
+prepare:
+  components:
+    - constructor: component-constructor.yaml
+
+deploy:
+  - apply: bootstrap.yaml
+  - waitFor:
+      kind: rgd
+      name: ${SCENARIO_SIMPLE_NAME}
+      conditions: [create, condition=Ready=true]
+  - apply: instance.yaml
+
+assert:
+  resources:
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo
+      waitFor: [create, condition=Available]
+```
+
+<details>
+<summary>Full schema reference with all fields</summary>
 
 ```yaml
 apiVersion: e2e.ocm.software/v1
@@ -474,6 +317,8 @@ debug:
     label: helmreleases
 ```
 
+</details>
+
 ### Templated variables
 
 All string fields support `${VAR}` substitution. The variable list is fixed; unknown
@@ -493,7 +338,8 @@ references cause a load-time error.
 `${PROTECTED_REGISTRY_*}` resolve only when the scenario lists the corresponding
 component in `requires:`.
 
-### Lifecycle (per scenario)
+<details>
+<summary>Lifecycle (per scenario)</summary>
 
 ```mermaid
 sequenceDiagram
@@ -519,57 +365,27 @@ sequenceDiagram
     end
 ```
 
+</details>
+
 ## The runner
 
-`e2e_runner.go` exposes a single entry point `runScenario(ctx, cfg)`. The Ginkgo suite
-calls it once per discovered scenario.
-
-```go
-var _ = Describe("controller", func() {
-    AfterEach(func() {
-        if !CurrentSpecReport().Failed() { return }
-        utils.DumpLogs("kro", "rgd")
-        utils.DumpLogs("argocd", "applications.argoproj.io")
-        utils.DumpLogs("flux-system", "helmrelease,ocirepository,kustomization")
-    })
-
-    Context("examples", func() { registerScenarios(examplesDir) })
-    Context("test scenarios", func() { registerScenarios(scenariosDir) })
-})
-
-func registerScenarios(root string) {
-    for _, scenarioDir := range walkScenarios(root) {
-        cfg := mustLoadE2EYaml(scenarioDir) // resolves ${VAR}, validates requires + hooks
-        It("should run "+cfg.Name, func(ctx SpecContext) { runScenario(ctx, cfg) })
-    }
-}
-```
+[`e2e_runner.go`](./e2e_runner.go) exposes a single entry point `runScenario(cfg)`. The Ginkgo suite
+calls it once per discovered scenario. See
+[`e2e_scenarios_test.go`](./e2e_scenarios_test.go) and
+[`e2e_runner.go`](./e2e_runner.go) for the full implementation.
 
 ### Hook registry
 
-Hooks are registered as a single map literal in `test/e2e/hooks/registry.go`:
-
-```go
-package hooks
-
-type HookFunc func(ctx context.Context, scenario *Scenario) error
-
-var Registry = map[string]HookFunc{
-    "applysetPatchToV2":      applysetPatchToV2,
-    "applysetAssertPruning":  applysetAssertPruning,
-    "applysetDeleteDeployer": applysetDeleteDeployer,
-    "applysetAssertCascade":  applysetAssertCascade,
-}
-```
-
-`BeforeSuite` walks every loaded scenario, resolves every name in every `*Hooks` array
-against `Registry`, and fails the suite (with scenario file path and bad name) if any
-reference is unknown. This catches typos before any cluster work begins.
+Hooks are registered as a single map literal in
+[`test/e2e/hooks/registry.go`](./hooks/registry.go). `BeforeSuite` walks every
+loaded scenario, resolves every name in every `*Hooks` array against the registry,
+and fails the suite (with scenario file path and bad name) if any reference is
+unknown. This catches typos before any cluster work begins.
 
 ## Setup composition
 
-`test/e2e/setup/local.sh` is the single entrypoint operators use to set up a fresh kind
-cluster. By default it only runs `cluster.sh` (kind cluster + host registry + RBAC).
+[`test/e2e/setup/local.sh`](./setup/local.sh) is the single entrypoint operators use to set up a fresh kind
+cluster. By default it only runs [`cluster.sh`](./setup/cluster.sh) (kind cluster + host registry + RBAC).
 Component installation is deferred to the e2e runner, which installs each scenario's
 dependencies on demand via `requires:`. Pass `--all-components` to also pre-install
 every component script — useful for fast local iteration when you want focused runs
@@ -594,7 +410,7 @@ script as a no-op when an earlier scenario already required it.
 
 ## CI sharding
 
-`test/e2e/cmd/shard` is a small Go program that:
+[`test/e2e/cmd/shard`](./cmd/shard/main.go) is a small Go program that:
 
 1. Walks both roots, enumerates scenario names (same logic as `walkScenarios`).
 2. By default, assigns one shard per scenario. Pass `--shards=N` to group
@@ -628,6 +444,37 @@ jobs:
 Each shard provisions only the cluster (the default); component installation is deferred
 to the runner's `requires:` step, so each shard only installs what its scenario needs.
 
+<details>
+<summary>CI sharding diagram</summary>
+
+```mermaid
+graph TD
+    subgraph "discover job"
+        D1["checkout"] --> D2["go run cmd/shard"]
+        D2 --> D3["matrix=JSON → GITHUB_OUTPUT"]
+    end
+
+    D3 --> E1["shard 0: applyset/pruning"]
+    D3 --> E2["shard 1: credentials/basic-auth"]
+    D3 --> E3["shard 2: helm/argocd/simple"]
+    D3 --> E4["..."]
+    D3 --> E5["shard 19: kustomize/fluxcd/simple"]
+
+    subgraph "each shard (parallel)"
+        S1["kind create cluster"] --> S2["requires: install components"]
+        S2 --> S3["helm install controller"]
+        S3 --> S4["runScenario(focus)"]
+        S4 --> S5["debug: on failure"]
+    end
+
+    E1 --> S1
+    E2 --> S1
+    E3 --> S1
+    E5 --> S1
+```
+
+</details>
+
 ## Operator UX
 
 Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
@@ -651,7 +498,8 @@ The retired `task test/e2e/example NAME=foo` is replaced by `task test/e2e -- fo
 
 ## Worked examples
 
-### 1a. Flux-only helm demo (`examples/helm/fluxcd/simple/e2e.yaml`)
+<details>
+<summary>1a. Flux-only helm demo (<code>examples/helm/fluxcd/simple/e2e.yaml</code>)</summary>
 
 ```yaml
 requires: [kro, flux-source, flux-helm]
@@ -681,7 +529,10 @@ assert:
 The `rgd.yaml` declares only the OCM `Resource` → `OCIRepository` → `HelmRelease`
 chain. No ArgoCD `Application`. `argocd` is *not* in `requires:`.
 
-### 1b. ArgoCD-only helm demo (`examples/helm/argocd/simple/e2e.yaml`)
+</details>
+
+<details>
+<summary>1b. ArgoCD-only helm demo (<code>examples/helm/argocd/simple/e2e.yaml</code>)</summary>
 
 ```yaml
 requires: [kro, argocd]
@@ -720,14 +571,10 @@ The `rgd.yaml` declares only the OCM `Resource` chain feeding an ArgoCD
 `Application`. No `OCIRepository` or `HelmRelease`. `flux-source`/`flux-helm`
 are *not* in `requires:`.
 
-This split — one delivery tool per scenario — is deliberate (Q5 / Q5b). It
-gives new readers an unambiguous reference for each tool, and lets the runner
-skip Flux setup for `helm/argocd/*` and ArgoCD setup for `helm/fluxcd/*`. A
-side-by-side parity demo is intentionally *not* in `examples/`; if such a
-scenario is needed for the test suite, place it under
-`test/e2e/scenarios/helm/parity/`.
+</details>
 
-### 2. Multi-stage test choreography (`test/e2e/scenarios/applyset/pruning/e2e.yaml`)
+<details>
+<summary>2. Multi-stage test choreography (<code>test/e2e/scenarios/applyset/pruning/e2e.yaml</code>)</summary>
 
 ```yaml
 timeout: 5m
@@ -756,7 +603,10 @@ postAssertHooks:
   - applysetAssertCascade      # all derived resources gone
 ```
 
-### 3. Protected-registry credentials (`test/e2e/scenarios/credentials/basic-auth/e2e.yaml`)
+</details>
+
+<details>
+<summary>3. Protected-registry credentials (<code>test/e2e/scenarios/credentials/basic-auth/e2e.yaml</code>)</summary>
 
 ```yaml
 timeout: 5m
@@ -787,11 +637,10 @@ assert:
         condition: Ready=true
 ```
 
-## Decision summary
+</details>
 
-The shape above results from a deliberate sequence of design questions. Concise
-rationale per decision; the underlying tradeoffs were explored in the design
-discussion that produced this doc.
+<details>
+<summary>Decision summary (Q1–Q16)</summary>
 
 | # | Decision | Choice | Rationale |
 |---|---|---|---|
@@ -817,7 +666,10 @@ discussion that produced this doc.
 | Q15 | `description:` field | Omitted; optional `README.md` next to `e2e.yaml` | Folder name is self-documenting; descriptions invite marketing copy. |
 | Q16 | Hook registry | Map literal in `hooks/registry.go`, validated at `BeforeSuite` | Single source of truth; typos surface before any cluster work. |
 
-## Migration plan
+</details>
+
+<details>
+<summary>Migration plan (Stages 1–6)</summary>
 
 Implementation lands in stages so the suite stays green throughout.
 
@@ -842,31 +694,15 @@ Implementation lands in stages so the suite stays green throughout.
 
 ### Stage 3 — migrate examples scenarios
 
-- Move each user-facing example into the family-grouped layout under `examples/`:
-  flat `examples/helm-simple/` → first `examples/helm/simple/`, then per Q5b
-  split per delivery tool into `examples/helm/fluxcd/simple/` (Flux only) and
-  `examples/helm/argocd/simple/` (ArgoCD only). Same pattern for the other five
-  helm scenarios. `k8s-manifest/` is not split (it ships only one delivery
-  tool today). `kustomize/` is split per the same pattern: Flux variants live
-  under `kustomize/fluxcd/{simple,configuration-localization}/`; ArgoCD
-  variants under `kustomize/argocd/{simple,configuration-localization}/`.
-- Each split scenario's `rgd.yaml` declares only the resources for *its*
-  delivery tool (no `Application` in `helm/fluxcd/*`, no `OCIRepository`/
-  `HelmRelease` in `helm/argocd/*`).
-- Author `e2e.yaml` for each migrated scenario. The new runner picks them up
-  via `Context("examples")`.
-- Delete the corresponding entries from the legacy `e2e_examples_test.go`.
-- After all examples migrate, `e2e_examples_test.go` is deleted.
+- Move each user-facing example into the family-grouped layout under `examples/`.
+- Each split scenario's `rgd.yaml` declares only the resources for *its* delivery tool.
+- Author `e2e.yaml` for each migrated scenario.
+- Delete the legacy `e2e_examples_test.go`.
 
 ### Stage 4 — migrate test-only scenarios
 
-- Move `test/e2e/testdata/basic-auth/` → `test/e2e/scenarios/credentials/basic-auth/`,
-  same for docker-config-json. Author `e2e.yaml` for each.
-- ~~Move `examples/applyset-pruning/` → `test/e2e/scenarios/applyset/pruning/`~~
-  (done — the folder now lives under `test/e2e/scenarios/applyset/pruning/`;
-  `e2e_applyset_test.go` resolves it via `legacyScenariosDir()`).
-  Still pending: author `e2e.yaml` plus the `applyset*` hooks in
-  `test/e2e/hooks/applyset.go`, registered in `Registry`.
+- Move `test/e2e/testdata/` → `test/e2e/scenarios/credentials/`.
+- Author `e2e.yaml` plus the `applyset*` hooks.
 - Delete `e2e_credentials_test.go` and `e2e_applyset_test.go`.
 
 ### Stage 5 — wire CI sharding
@@ -877,9 +713,9 @@ Implementation lands in stages so the suite stays green throughout.
 ### Stage 6 — cleanup
 
 - Remove `task test/e2e/example` from the Taskfile.
-- Update README and any docs that linked `examples/<name>/` to the new
-  `examples/<family>/<name>/` paths.
+- Update README and any docs that linked `examples/<name>/` to the new paths.
 - Remove `hacks/` if `setup.sh` is the only thing left.
 
-Each stage is independently mergeable and leaves the suite passing. Do not start
-Stage 3 until Stage 2 is in `main`.
+Each stage is independently mergeable and leaves the suite passing.
+
+</details>

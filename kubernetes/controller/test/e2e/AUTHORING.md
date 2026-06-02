@@ -8,34 +8,79 @@ rationale, locked decisions (Q1–Q16), and the full schema reference see
 > follow the declarative `e2e.yaml` schema. See `DESIGN.md` for the full
 > architectural rationale and migration history.
 
-## How a scenario runs
-
-### High-level: the 30-second mental model
+## E2E Pipeline Architecture
 
 ```mermaid
-graph LR
-    AUTHOR["You write e2e.yaml"] --> RUNNER["Runner executes it"]
-    RUNNER --> CLUSTER["Cluster gets resources"]
-    CLUSTER --> CHECK["Runner verifies state"]
+classDiagram
+    class Taskfile {
+        +test/e2e/setup/local
+        +test/e2e
+        +test/e2e/fresh
+        +test/e2e/teardown
+    }
+
+    class Runner {
+        +walkScenarios(root) []string
+        +loadScenario(dir, root, compsDir, vars) *ScenarioConfig
+        +runScenario(cfg)
+        +substituteVars(s, vars) string
+        +waitForSpec(ctx, spec, timeout)
+        +assertResource(ctx, res, timeout)
+        +dispatchHooks(phase, names, scenario)
+        +runDebugCommands(cfg)
+    }
+
+    class ScenarioConfig {
+        +Folder string
+        +SimpleName string
+        +Dir string
+        +Timeout string
+        +Requires []string
+        +Prepare PrepareSpec
+        +Deploy []DeployStep
+        +Assert AssertSpec
+        +Cleanup CleanupSpec
+        +Debug []DebugCmd
+        +PreDeployHooks []string
+        +PostAssertHooks []string
+    }
+
+    class HookRegistry {
+        +Resolve(name) HookFunc, bool
+        +applysetPatchToV2()
+        +applysetAssertPruning()
+        +applysetDeleteDeployer()
+        +applysetAssertCascade()
+    }
+
+    class SetupScripts {
+        +cluster.sh
+        +kro.sh
+        +flux-source.sh
+        +flux-helm.sh
+        +flux-kustomize.sh
+        +argocd.sh
+        +protected-registry-basic-auth.sh
+        +protected-registry-docker-config-json.sh
+    }
+
+    class CmdShard {
+        +walk(root) []string
+        +main() matrix=JSON
+    }
+
+    Taskfile --> Runner : invokes via go test
+    Runner --> ScenarioConfig : loads from e2e.yaml
+    Runner --> HookRegistry : resolves hook names
+    Runner --> SetupScripts : bash components/name.sh
+    CmdShard --> Runner : shares walkScenarios logic
+    Taskfile --> CmdShard : go run cmd/shard
 ```
 
-### Mid-level: phases
+<details>
+<summary><strong>How a scenario runs (detailed diagrams)</strong></summary>
 
-```mermaid
-flowchart TD
-    YAML["e2e.yaml"] --> LOAD["loadScenario(): parse + substitute ${VAR}"]
-    LOAD --> VAL["validate: requires, hooks, variables"]
-    VAL --> REQ["install components (requires:)"]
-    REQ --> PREP["transfer OCM component (prepare:)"]
-    PREP --> DEP["deploy: apply manifests + waitFor"]
-    DEP --> ASSERT["assert: kubectl wait + fieldEquals"]
-    ASSERT --> CLEAN["cleanup: DeferCleanup deletes resources"]
-
-    DEP -. "failure" .-> DEBUG["debug: run diagnostic kubectl commands"]
-    ASSERT -. "failure" .-> DEBUG
-```
-
-### Detailed: what each phase does to the cluster
+### Sequence: what each phase does to the cluster
 
 ```mermaid
 sequenceDiagram
@@ -82,145 +127,7 @@ flowchart TD
     FAIL4 --> DBG
 ```
 
-## Folder structure at a glance
-
-### High-level: two roots
-
-```mermaid
-graph LR
-    A["examples/ (user-facing)"] --> R["Same runner"]
-    B["test/e2e/scenarios/ (test-only)"] --> R
-    R --> C["20 scenarios total"]
-```
-
-### Mid-level: family grouping
-
-```mermaid
-graph TD
-    ROOT["kubernetes/controller/"] --> EX["examples/"]
-    ROOT --> TEST["test/e2e/"]
-
-    EX --> HELM["helm/"]
-    EX --> KUST["kustomize/"]
-    EX --> K8S["k8s-manifest/"]
-
-    HELM --> FLUX["fluxcd/"]
-    HELM --> ARGO["argocd/"]
-    FLUX --> S1["simple/"]
-    FLUX --> S2["nested/"]
-    FLUX --> S3["configuration-localization/"]
-    ARGO --> A1["simple/"]
-    ARGO --> A2["nested/"]
-    ARGO --> A3["configuration-localization/"]
-
-    TEST --> SCENARIOS["scenarios/"]
-    TEST --> SETUP["setup/"]
-    SCENARIOS --> APP["applyset/pruning/"]
-    SCENARIOS --> CRED["credentials/basic-auth/"]
-    SETUP --> COMP["components/*.sh"]
-    SETUP --> CL["cluster.sh"]
-```
-
-### Detailed: what's inside a scenario folder
-
-```mermaid
-graph TD
-    SCENARIO["helm/fluxcd/simple/"] --> E2E["e2e.yaml — declares the test"]
-    SCENARIO --> CC["component-constructor.yaml — OCM component spec"]
-    SCENARIO --> BOOT["bootstrap.yaml — Repository + Component + Resource + Deployer"]
-    SCENARIO --> RGD["rgd.yaml — kro ResourceGraphDefinition (deployed by Deployer)"]
-    SCENARIO --> INST["instance.yaml — kro custom resource instance"]
-    SCENARIO --> KEY["ocm.software (optional — private signing key)"]
-    SCENARIO --> PUB["ocm.software.pub (optional — public key)"]
-    SCENARIO --> OCMCFG[".ocmconfig (optional — registry credentials)"]
-```
-
-### Discovery: how the walker finds scenarios
-
-```mermaid
-flowchart TD
-    ROOT["walkScenarios(root)"] --> WALK["filepath.WalkDir()"]
-    WALK --> DIR{{"is directory?"}}
-    DIR -- "no" --> SKIP1["skip file"]
-    DIR -- "yes" --> HAS{{"contains e2e.yaml?"}}
-    HAS -- "yes" --> ADD["append to found[] + SkipDir"]
-    HAS -- "no" --> CONT["descend into children"]
-    ADD --> SORT["sort.Strings(found)"]
-    SORT --> RETURN["return found"]
-```
-
-## Local iteration workflow
-
-### High-level: the loop
-
-```mermaid
-graph LR
-    SETUP["Setup cluster"] --> TEST["Run test"] --> FIX["Fix"] --> TEST
-```
-
-### Mid-level: commands
-
-```mermaid
-flowchart LR
-    DEV["Developer"] --> SETUP["task test/e2e/setup/local"]
-    SETUP --> CLUSTER["Kind cluster ready"]
-    CLUSTER --> RUN["task test/e2e -- scenario"]
-    RUN --> PASS{{"pass?"}}
-    PASS -- "yes" --> NEXT["edit code / scenario"]
-    PASS -- "no" --> FIX["read debug output, fix"]
-    NEXT --> RUN
-    FIX --> RUN
-    CLUSTER --> TEAR["task test/e2e/teardown"]
-```
-
-### Detailed: what each command does under the hood
-
-```mermaid
-flowchart TD
-    subgraph "task test/e2e/setup/local"
-        SL1["docker build controller image (--load)"]
-        SL1 --> SL2["bash setup/local.sh"]
-        SL2 --> SL3["cluster.sh: kind create + registry + RBAC"]
-        SL3 --> SL4["kind load docker-image controller:latest"]
-    end
-
-    subgraph "task test/e2e -- helm/fluxcd/simple"
-        TE1["helm upgrade --install controller chart/"]
-        TE1 --> TE2["anchor focus: '^.*helm/fluxcd/simple$'"]
-        TE2 --> TE3["go test ./test/e2e/ -ginkgo.focus=..."]
-        TE3 --> TE4["Ginkgo matches 1 of 20 specs"]
-        TE4 --> TE5["runScenario(cfg)"]
-    end
-
-    subgraph "task test/e2e/teardown"
-        TD1["kind delete cluster"]
-        TD1 --> TD2["docker rm -f image-registry"]
-    end
-
-    subgraph "task test/e2e/fresh -- scenario"
-        TF1["teardown"] --> TF2["setup/local"]
-        TF2 --> TF3["test/e2e -- scenario"]
-    end
-```
-
-### CI vs local: side-by-side comparison
-
-```mermaid
-graph TD
-    subgraph "Local Developer"
-        L1["persistent kind cluster"]
-        L1 --> L2["--all-components (optional)"]
-        L2 --> L3["task test/e2e -- scenario (repeat)"]
-        L3 --> L4["components already installed → skip"]
-    end
-
-    subgraph "CI Shard (ephemeral)"
-        C1["fresh kind cluster per job"]
-        C1 --> C2["runner installs requires: on demand"]
-        C2 --> C3["single scenario runs"]
-        C3 --> C4["cluster destroyed after job"]
-    end
-```
+</details>
 
 ---
 
@@ -338,7 +245,7 @@ postAssertHooks:
   - verifySignedComponent
 ```
 
-Each name must exist in `kubernetes/controller/test/e2e/hooks/registry.go`.
+Each name must exist in [`kubernetes/controller/test/e2e/hooks/registry.go`](./hooks/registry.go).
 Hooks run in array order. The six phases — `preDeployHooks`, `postDeployHooks`,
 `preAssertHooks`, `postAssertHooks`, `preCleanupHooks`, `postCleanupHooks` — are
 documented in DESIGN.md.
@@ -403,7 +310,7 @@ assert:
 
 ArgoCD-managed releases use the suffix `-argocd` to avoid colliding with the
 Flux release name; the namespace is `default-argocd`. See
-`examples/helm/fluxcd/simple/` and `examples/helm/argocd/simple/` for the
+[`examples/helm/fluxcd/simple/`](../../examples/helm/fluxcd/simple/) and [`examples/helm/argocd/simple/`](../../examples/helm/argocd/simple/) for the
 canonical wiring of each tool.
 
 If you need a side-by-side parity demo (both tools deploying the same chart),
