@@ -13,6 +13,10 @@ on:
 env:
   LOCATION: "kubernetes/controller"
 
+concurrency:
+  cancel-in-progress: true
+  group: k8s-constroller-e2e-sharded-${{ github.ref_name }}
+
 permissions:
   contents: read
 
