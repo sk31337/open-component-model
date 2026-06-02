@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -40,6 +41,7 @@ type ScenarioConfig struct {
 	Deploy   []DeployStep `json:"deploy,omitempty"`
 	Assert   AssertSpec   `json:"assert,omitempty"`
 	Cleanup  CleanupSpec  `json:"cleanup,omitempty"`
+	Debug    []DebugCmd   `json:"debug,omitempty"`
 
 	PreDeployHooks   []string `json:"preDeployHooks,omitempty"`
 	PostDeployHooks  []string `json:"postDeployHooks,omitempty"`
@@ -47,6 +49,11 @@ type ScenarioConfig struct {
 	PostAssertHooks  []string `json:"postAssertHooks,omitempty"`
 	PreCleanupHooks  []string `json:"preCleanupHooks,omitempty"`
 	PostCleanupHooks []string `json:"postCleanupHooks,omitempty"`
+}
+
+type DebugCmd struct {
+	Kubectl string `json:"kubectl"`
+	Label   string `json:"label,omitempty"`
 }
 
 type PrepareSpec struct {
@@ -320,6 +327,13 @@ func runScenario(cfg *ScenarioConfig) {
 	timeout := scenarioTimeout(cfg)
 	imageRegistry := os.Getenv("IMAGE_REGISTRY")
 
+	DeferCleanup(func() {
+		if !CurrentSpecReport().Failed() {
+			return
+		}
+		runDebugCommands(cfg)
+	})
+
 	scenarioCtx := &hooks.Scenario{
 		Folder:     cfg.Folder,
 		SimpleName: cfg.SimpleName,
@@ -470,6 +484,39 @@ func dispatchHooks(phase string, names []string, scenario *hooks.Scenario) {
 		err := hook(ctx, scenario)
 		cancel()
 		Expect(err).NotTo(HaveOccurred(), "%s[%q] failed", phase, name)
+	}
+}
+
+var defaultDebugCommands = []DebugCmd{
+	{Kubectl: "get pods -n " + controllerNamespace + " -o wide", Label: "controller-pods"},
+	{Kubectl: "logs -n " + controllerNamespace + " deploy/ocm-k8s-toolkit-controller-manager --tail=80 --all-containers", Label: "controller-logs"},
+	{Kubectl: "get pods -n kro -o wide", Label: "kro-pods"},
+	{Kubectl: "get events -n kro --sort-by=.lastTimestamp", Label: "kro-events"},
+	{Kubectl: "get rgd -o custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type==\"Ready\")].status,READY_MSG:.status.conditions[?(@.type==\"Ready\")].message", Label: "rgd-conditions"},
+}
+
+func runDebugCommands(cfg *ScenarioConfig) {
+	cmds := cfg.Debug
+	if len(cmds) == 0 {
+		cmds = defaultDebugCommands
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, d := range cmds {
+		label := d.Label
+		if label == "" {
+			label = d.Kubectl
+		}
+		args := append([]string{}, strings.Fields(d.Kubectl)...)
+		cmd := exec.CommandContext(ctx, "kubectl", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			GinkgoLogr.Info(fmt.Sprintf("[DEBUG] %s: error: %v", label, err))
+		} else {
+			for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+				GinkgoLogr.Info(fmt.Sprintf("[DEBUG] %s: %s", label, line))
+			}
+		}
 	}
 }
 

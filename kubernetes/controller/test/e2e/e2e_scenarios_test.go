@@ -7,8 +7,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"ocm.software/open-component-model/kubernetes/controller/test/utils"
 )
 
 // projectDir is the repository's controller root, used to resolve the two
@@ -53,14 +51,6 @@ var _ = Describe("scenarios", func() {
 	scenariosRoot := filepath.Join(dir, "test/e2e/scenarios")
 
 	Context("examples", func() {
-		AfterEach(func() {
-			if !CurrentSpecReport().Failed() {
-				return
-			}
-			utils.DumpLogs("kro", "rgd")
-			utils.DumpLogs("argocd", "applications.argoproj.io")
-		})
-
 		for _, cfg := range discoverAndLoad(examplesRoot) {
 			cfg := cfg
 			It("should run "+cfg.Folder, func(_ SpecContext) {
@@ -70,14 +60,6 @@ var _ = Describe("scenarios", func() {
 	})
 
 	Context("scenarios", func() {
-		AfterEach(func() {
-			if !CurrentSpecReport().Failed() {
-				return
-			}
-			utils.DumpLogs("kro", "rgd")
-			utils.DumpLogs("argocd", "applications.argoproj.io")
-		})
-
 		for _, cfg := range discoverAndLoad(scenariosRoot) {
 			cfg := cfg
 			It("should run "+cfg.Folder, func(_ SpecContext) {
