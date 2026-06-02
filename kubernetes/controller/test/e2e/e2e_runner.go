@@ -328,7 +328,7 @@ func runScenario(cfg *ScenarioConfig) {
 	imageRegistry := os.Getenv("IMAGE_REGISTRY")
 
 	DeferCleanup(func() {
-		if !CurrentSpecReport().Failed() {
+		if !CurrentSpecReport().Failed() && !isWorkflowDebug() {
 			return
 		}
 		runDebugCommands(cfg)
@@ -493,6 +493,18 @@ var defaultDebugCommands = []DebugCmd{
 	{Kubectl: "get pods -n kro -o wide", Label: "kro-pods"},
 	{Kubectl: "get events -n kro --sort-by=.lastTimestamp", Label: "kro-events"},
 	{Kubectl: "get rgd -o custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type==\"Ready\")].status,READY_MSG:.status.conditions[?(@.type==\"Ready\")].message", Label: "rgd-conditions"},
+}
+
+// isWorkflowDebug reports whether the GitHub Actions workflow is running in
+// debug mode. GitHub sets RUNNER_DEBUG=1 when the user picks "Re-run with
+// debug logging" and ACTIONS_STEP_DEBUG=true when step-level debug is
+// enabled via repo/secret configuration. Either flag is sufficient — the
+// runner then runs the scenario's debug: commands on success as well as on
+// failure, so a debug-mode re-run yields a cluster snapshot without having
+// to manufacture a failure.
+func isWorkflowDebug() bool {
+	return os.Getenv("RUNNER_DEBUG") == "1" ||
+		strings.EqualFold(os.Getenv("ACTIONS_STEP_DEBUG"), "true")
 }
 
 func runDebugCommands(cfg *ScenarioConfig) {

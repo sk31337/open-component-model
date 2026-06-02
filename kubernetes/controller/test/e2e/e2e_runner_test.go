@@ -349,3 +349,32 @@ func TestBuiltinVarsRegistryHostStripsScheme(t *testing.T) {
 		})
 	}
 }
+
+func TestIsWorkflowDebug(t *testing.T) {
+	tests := []struct {
+		name      string
+		runner    string
+		stepDebug string
+		want      bool
+	}{
+		{name: "neither set", want: false},
+		{name: "RUNNER_DEBUG=1", runner: "1", want: true},
+		{name: "RUNNER_DEBUG=0 ignored", runner: "0", want: false},
+		{name: "RUNNER_DEBUG=true ignored", runner: "true", want: false},
+		{name: "ACTIONS_STEP_DEBUG=true", stepDebug: "true", want: true},
+		{name: "ACTIONS_STEP_DEBUG=TRUE", stepDebug: "TRUE", want: true},
+		{name: "ACTIONS_STEP_DEBUG=false", stepDebug: "false", want: false},
+		{name: "ACTIONS_STEP_DEBUG=1 ignored", stepDebug: "1", want: false},
+		{name: "both set", runner: "1", stepDebug: "true", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RUNNER_DEBUG", tt.runner)
+			t.Setenv("ACTIONS_STEP_DEBUG", tt.stepDebug)
+			if got := isWorkflowDebug(); got != tt.want {
+				t.Errorf("isWorkflowDebug() = %v, want %v (RUNNER_DEBUG=%q ACTIONS_STEP_DEBUG=%q)",
+					got, tt.want, tt.runner, tt.stepDebug)
+			}
+		})
+	}
+}
