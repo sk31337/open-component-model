@@ -17,5 +17,10 @@ if [[ ! -f "${manifest}" ]]; then
   exit 1
 fi
 
+# make sure to remove any existing protected registry, otherwise the new one won't be able to bind to the same port
+if kubectl get pod -l app=protected-registry2 -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q Running; then
+  kubectl delete -f "${manifests_dir}/protected-registry-basic-auth.yaml" --ignore-not-found
+fi
+
 kubectl apply -f "${manifest}"
 kubectl wait pod -l app=protected-registry1 --for=condition=Ready --timeout=5m
