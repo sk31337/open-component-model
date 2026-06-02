@@ -696,6 +696,7 @@ serializable
 serviceaccountname
 sexualized
 sha
+sharded
 sharding
 shortcode
 shortcodes
