@@ -8,6 +8,220 @@ rationale, locked decisions (Q1–Q16), and the full schema reference see
 > follow the declarative `e2e.yaml` schema. See `DESIGN.md` for the full
 > architectural rationale and migration history.
 
+## How a scenario runs
+
+### High-level: the 30-second mental model
+
+```mermaid
+graph LR
+    AUTHOR["You write e2e.yaml"] --> RUNNER["Runner executes it"]
+    RUNNER --> CLUSTER["Cluster gets resources"]
+    CLUSTER --> CHECK["Runner verifies state"]
+```
+
+### Mid-level: phases
+
+```mermaid
+flowchart TD
+    YAML["e2e.yaml"] --> LOAD["loadScenario(): parse + substitute ${VAR}"]
+    LOAD --> VAL["validate: requires, hooks, variables"]
+    VAL --> REQ["install components (requires:)"]
+    REQ --> PREP["transfer OCM component (prepare:)"]
+    PREP --> DEP["deploy: apply manifests + waitFor"]
+    DEP --> ASSERT["assert: kubectl wait + fieldEquals"]
+    ASSERT --> CLEAN["cleanup: DeferCleanup deletes resources"]
+
+    DEP -. "failure" .-> DEBUG["debug: run diagnostic kubectl commands"]
+    ASSERT -. "failure" .-> DEBUG
+```
+
+### Detailed: what each phase does to the cluster
+
+```mermaid
+sequenceDiagram
+    participant Author as e2e.yaml
+    participant Runner as Go Runner
+    participant OCM as ocm CLI
+    participant K8s as kubectl
+    participant Cluster as Kind Cluster
+
+    Author->>Runner: loadScenario()
+    Runner->>Runner: substituteVars(${SCENARIO_SIMPLE_NAME})
+    Runner->>K8s: bash components/kro.sh (requires)
+    K8s->>Cluster: helm upgrade --install kro
+    Runner->>OCM: ocm add componentversions + ocm transfer ctf
+    OCM->>Cluster: push to image-registry:5000
+    Runner->>K8s: kubectl apply -f bootstrap.yaml (deploy)
+    K8s->>Cluster: create Repository, Component, Resource, Deployer
+    Cluster->>Cluster: Deployer reconciles → creates RGD
+    Runner->>K8s: kubectl wait --for=condition=Ready rgd/name
+    Runner->>K8s: kubectl apply -f instance.yaml
+    Cluster->>Cluster: kro instance → OCIRepository → HelmRelease → Deployment
+    Runner->>K8s: kubectl wait --for=condition=Available deployment
+    Runner->>K8s: kubectl get -o jsonpath (fieldEquals)
+    Note over Runner,Cluster: DeferCleanup: kubectl delete -f bootstrap.yaml
+```
+
+### Decision tree: what happens when things go wrong
+
+```mermaid
+flowchart TD
+    START["runScenario()"] --> REQ_OK{{"requires: scripts succeed?"}}
+    REQ_OK -- "no" --> FAIL1["FAIL: 'requires component X failed'"]
+    REQ_OK -- "yes" --> PREP_OK{{"prepare: ocm transfer succeeds?"}}
+    PREP_OK -- "no" --> FAIL2["FAIL: 'PrepareOCMComponent failed'"]
+    PREP_OK -- "yes" --> DEP_OK{{"deploy: apply + waitFor succeed?"}}
+    DEP_OK -- "no" --> FAIL3["FAIL: 'kubectl apply/wait failed'"]
+    DEP_OK -- "yes" --> ASSERT_OK{{"assert: all resources ready?"}}
+    ASSERT_OK -- "no" --> FAIL4["FAIL: 'wait condition on resource failed'"]
+    ASSERT_OK -- "yes" --> PASS["PASS ✓"]
+
+    FAIL1 --> DBG["debug: kubectl commands run"]
+    FAIL2 --> DBG
+    FAIL3 --> DBG
+    FAIL4 --> DBG
+```
+
+## Folder structure at a glance
+
+### High-level: two roots
+
+```mermaid
+graph LR
+    A["examples/ (user-facing)"] --> R["Same runner"]
+    B["test/e2e/scenarios/ (test-only)"] --> R
+    R --> C["20 scenarios total"]
+```
+
+### Mid-level: family grouping
+
+```mermaid
+graph TD
+    ROOT["kubernetes/controller/"] --> EX["examples/"]
+    ROOT --> TEST["test/e2e/"]
+
+    EX --> HELM["helm/"]
+    EX --> KUST["kustomize/"]
+    EX --> K8S["k8s-manifest/"]
+
+    HELM --> FLUX["fluxcd/"]
+    HELM --> ARGO["argocd/"]
+    FLUX --> S1["simple/"]
+    FLUX --> S2["nested/"]
+    FLUX --> S3["configuration-localization/"]
+    ARGO --> A1["simple/"]
+    ARGO --> A2["nested/"]
+    ARGO --> A3["configuration-localization/"]
+
+    TEST --> SCENARIOS["scenarios/"]
+    TEST --> SETUP["setup/"]
+    SCENARIOS --> APP["applyset/pruning/"]
+    SCENARIOS --> CRED["credentials/basic-auth/"]
+    SETUP --> COMP["components/*.sh"]
+    SETUP --> CL["cluster.sh"]
+```
+
+### Detailed: what's inside a scenario folder
+
+```mermaid
+graph TD
+    SCENARIO["helm/fluxcd/simple/"] --> E2E["e2e.yaml — declares the test"]
+    SCENARIO --> CC["component-constructor.yaml — OCM component spec"]
+    SCENARIO --> BOOT["bootstrap.yaml — Repository + Component + Resource + Deployer"]
+    SCENARIO --> RGD["rgd.yaml — kro ResourceGraphDefinition (deployed by Deployer)"]
+    SCENARIO --> INST["instance.yaml — kro custom resource instance"]
+    SCENARIO --> KEY["ocm.software (optional — private signing key)"]
+    SCENARIO --> PUB["ocm.software.pub (optional — public key)"]
+    SCENARIO --> OCMCFG[".ocmconfig (optional — registry credentials)"]
+```
+
+### Discovery: how the walker finds scenarios
+
+```mermaid
+flowchart TD
+    ROOT["walkScenarios(root)"] --> WALK["filepath.WalkDir()"]
+    WALK --> DIR{{"is directory?"}}
+    DIR -- "no" --> SKIP1["skip file"]
+    DIR -- "yes" --> HAS{{"contains e2e.yaml?"}}
+    HAS -- "yes" --> ADD["append to found[] + SkipDir"]
+    HAS -- "no" --> CONT["descend into children"]
+    ADD --> SORT["sort.Strings(found)"]
+    SORT --> RETURN["return found"]
+```
+
+## Local iteration workflow
+
+### High-level: the loop
+
+```mermaid
+graph LR
+    SETUP["Setup cluster"] --> TEST["Run test"] --> FIX["Fix"] --> TEST
+```
+
+### Mid-level: commands
+
+```mermaid
+flowchart LR
+    DEV["Developer"] --> SETUP["task test/e2e/setup/local"]
+    SETUP --> CLUSTER["Kind cluster ready"]
+    CLUSTER --> RUN["task test/e2e -- scenario"]
+    RUN --> PASS{{"pass?"}}
+    PASS -- "yes" --> NEXT["edit code / scenario"]
+    PASS -- "no" --> FIX["read debug output, fix"]
+    NEXT --> RUN
+    FIX --> RUN
+    CLUSTER --> TEAR["task test/e2e/teardown"]
+```
+
+### Detailed: what each command does under the hood
+
+```mermaid
+flowchart TD
+    subgraph "task test/e2e/setup/local"
+        SL1["docker build controller image (--load)"]
+        SL1 --> SL2["bash setup/local.sh"]
+        SL2 --> SL3["cluster.sh: kind create + registry + RBAC"]
+        SL3 --> SL4["kind load docker-image controller:latest"]
+    end
+
+    subgraph "task test/e2e -- helm/fluxcd/simple"
+        TE1["helm upgrade --install controller chart/"]
+        TE1 --> TE2["anchor focus: '^.*helm/fluxcd/simple$'"]
+        TE2 --> TE3["go test ./test/e2e/ -ginkgo.focus=..."]
+        TE3 --> TE4["Ginkgo matches 1 of 20 specs"]
+        TE4 --> TE5["runScenario(cfg)"]
+    end
+
+    subgraph "task test/e2e/teardown"
+        TD1["kind delete cluster"]
+        TD1 --> TD2["docker rm -f image-registry"]
+    end
+
+    subgraph "task test/e2e/fresh -- scenario"
+        TF1["teardown"] --> TF2["setup/local"]
+        TF2 --> TF3["test/e2e -- scenario"]
+    end
+```
+
+### CI vs local: side-by-side comparison
+
+```mermaid
+graph TD
+    subgraph "Local Developer"
+        L1["persistent kind cluster"]
+        L1 --> L2["--all-components (optional)"]
+        L2 --> L3["task test/e2e -- scenario (repeat)"]
+        L3 --> L4["components already installed → skip"]
+    end
+
+    subgraph "CI Shard (ephemeral)"
+        C1["fresh kind cluster per job"]
+        C1 --> C2["runner installs requires: on demand"]
+        C2 --> C3["single scenario runs"]
+        C3 --> C4["cluster destroyed after job"]
+    end
+```
+
 ---
 
 ## Two audiences, two locations
@@ -93,11 +307,11 @@ prepare:
 
 deploy:
   - apply: bootstrap.yaml
-  - apply: rgd.yaml
-    waitFor:
+  - waitFor:
       kind: rgd
       name: ${SCENARIO_SIMPLE_NAME}
       conditions: [create, condition=Ready=true]
+  - apply: instance.yaml
 
 assert:
   resources:
@@ -224,6 +438,27 @@ cleanup:
 
 This is opt-in because OCM cleanup cascade is itself a behaviour worth testing
 deliberately, not a side-effect every scenario should pay for.
+
+---
+
+## Diagnostics on failure
+
+When a scenario fails, the runner executes kubectl commands declared in `debug:`.
+If omitted, a default set runs (controller pods/logs, kro pods/events, RGD
+conditions). Override it to add scenario-specific diagnostics:
+
+```yaml
+debug:
+  - kubectl: get pods -n argocd -o wide
+    label: argocd-pods
+  - kubectl: get applications.argoproj.io -A -o wide
+    label: argocd-apps
+  - kubectl: logs -n ${CONTROLLER_NAMESPACE} deploy/ocm-k8s-toolkit-controller-manager --tail=80
+    label: controller-logs
+```
+
+Each `kubectl:` value is passed directly to `kubectl` (split on whitespace).
+`label:` is optional — used to group output lines in the log.
 
 ---
 

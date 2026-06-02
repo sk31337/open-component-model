@@ -6,11 +6,264 @@ It is the source of truth for the harness; update it when the design changes.
 
 ## Status
 
-- **State:** implemented. Stages 1–4 are complete; Stage 5 (CI sharding) is wired
-  but not yet active in the GitHub Actions workflow.
+- **State:** implemented. Stages 1–5 are complete; the sharded CI workflow is active.
 - **Replaces:** the monolithic `e2e_examples_test.go` / `e2e_credentials_test.go` /
   `e2e_applyset_test.go` files plus the single `hacks/setup.sh` script.
 - **Supersedes:** `task test/e2e/example NAME=...` (removed).
+
+## Architecture overview
+
+### High-level: what the harness does
+
+```mermaid
+graph LR
+    YAML["e2e.yaml (20 scenarios)"] --> RUNNER["Go Runner"]
+    RUNNER --> CLUSTER["Kind Cluster"]
+    CLUSTER --> RESULT["Pass / Fail"]
+```
+
+### Mid-level: discovery → execution → diagnostics
+
+```mermaid
+graph LR
+    subgraph "Scenario Discovery"
+        A["examples/"] --> W["walkScenarios()"]
+        B["test/e2e/scenarios/"] --> W
+        W --> C["ScenarioConfig[]"]
+    end
+
+    subgraph "Per-Scenario Execution"
+        C --> R["runScenario(cfg)"]
+        R --> REQ["requires: install components"]
+        REQ --> PREP["prepare: transfer OCM components"]
+        PREP --> HOOKS1["preDeployHooks"]
+        HOOKS1 --> DEP["deploy: apply + waitFor"]
+        DEP --> HOOKS2["postDeployHooks"]
+        HOOKS2 --> HOOKS3["preAssertHooks"]
+        HOOKS3 --> ASS["assert: resources + fieldEquals"]
+        ASS --> HOOKS4["postAssertHooks"]
+        HOOKS4 --> CLN["cleanup + postCleanupHooks"]
+    end
+
+    subgraph "On Failure"
+        ASS -. "fail" .-> DBG["debug: kubectl commands"]
+        DEP -. "fail" .-> DBG
+    end
+```
+
+### Detailed: internal function call graph
+
+```mermaid
+graph TD
+    GK["Ginkgo It()"] --> RS["runScenario(cfg)"]
+    RS --> DC["DeferCleanup(runDebugCommands)"]
+    RS --> BY1["By('ensuring required components')"]
+    BY1 --> EXEC["exec.CommandContext('bash', script)"]
+    RS --> BY2["By('preparing OCM components')"]
+    BY2 --> POC["PrepareOCMComponentWithOptions()"]
+    POC --> OCMADD["ocm add componentversions"]
+    POC --> OCMSIGN["ocm sign componentversions (if signingKey)"]
+    POC --> OCMTX["ocm transfer ctf --overwrite --enforce"]
+    RS --> DH1["dispatchHooks('preDeployHooks')"]
+    DH1 --> HR["hooks.Resolve(name) → hook(ctx, scenario)"]
+    RS --> BY3["By('deploying scenario')"]
+    BY3 --> DR["utils.DeployResource() → kubectl apply"]
+    BY3 --> WFS["waitForSpec() → kubectl wait --for=condition"]
+    RS --> DH2["dispatchHooks('postDeployHooks')"]
+    RS --> DH3["dispatchHooks('preAssertHooks')"]
+    RS --> BY4["By('asserting scenario')"]
+    BY4 --> AR["assertResource() → kubectl wait"]
+    BY4 --> CRF["utils.CompareResourceField() → kubectl get -o jsonpath"]
+    RS --> DH4["dispatchHooks('postAssertHooks')"]
+    RS --> DH5["dispatchHooks('preCleanupHooks')"]
+```
+
+### Data flow: e2e.yaml → cluster state
+
+```mermaid
+graph LR
+    subgraph "Authoring (human)"
+        YAML["e2e.yaml"]
+        CC["component-constructor.yaml"]
+        BOOT["bootstrap.yaml"]
+        RGD["rgd.yaml"]
+    end
+
+    subgraph "Harness (Go)"
+        LOAD["loadScenario()"] --> SUB["substituteVars()"]
+        SUB --> VAL["validateHookRefs() + validateRequires()"]
+    end
+
+    subgraph "Cluster (Kubernetes)"
+        OCM["OCM CRs: Repository, Component, Resource, Deployer"]
+        KRO["kro RGD → custom instance"]
+        FLUX["Flux: OCIRepository → HelmRelease"]
+        ARGO["ArgoCD: Application"]
+        POD["Deployment → Pod (podinfo)"]
+    end
+
+    YAML --> LOAD
+    CC --> |"ocm transfer"| OCM
+    BOOT --> |"kubectl apply"| OCM
+    RGD --> |"Deployer deploys"| KRO
+    KRO --> FLUX
+    KRO --> ARGO
+    FLUX --> POD
+    ARGO --> POD
+```
+
+## CI sharding architecture
+
+### High-level: fan-out pattern
+
+```mermaid
+graph LR
+    PUSH["git push"] --> DISC["Discover (1 job)"]
+    DISC --> SHARDS["20 parallel jobs"]
+    SHARDS --> RESULT["All green ✓"]
+```
+
+### Mid-level: discover → matrix → shards
+
+```mermaid
+graph TD
+    subgraph "discover job"
+        D1["checkout"] --> D2["go run cmd/shard"]
+        D2 --> D3["matrix=JSON → GITHUB_OUTPUT"]
+    end
+
+    D3 --> E1["shard 0: applyset/pruning"]
+    D3 --> E2["shard 1: credentials/basic-auth"]
+    D3 --> E3["shard 2: helm/argocd/simple"]
+    D3 --> E4["..."]
+    D3 --> E5["shard 19: kustomize/fluxcd/simple"]
+
+    subgraph "each shard (parallel)"
+        S1["kind create cluster"] --> S2["requires: install components"]
+        S2 --> S3["helm install controller"]
+        S3 --> S4["runScenario(focus)"]
+        S4 --> S5["debug: on failure"]
+    end
+
+    E1 --> S1
+    E2 --> S1
+    E3 --> S1
+    E5 --> S1
+```
+
+### Detailed: cmd/shard internals + Taskfile focus anchoring
+
+```mermaid
+flowchart TD
+    subgraph "cmd/shard/main.go"
+        WALK1["walk('examples/')"] --> SCENARIOS
+        WALK2["walk('test/e2e/scenarios/')"] --> SCENARIOS["sort(scenarios)"]
+        SCENARIOS --> NSHARDS{{"--shards=0?"}}
+        NSHARDS -- "yes (default)" --> ONE["numShards = len(scenarios)"]
+        NSHARDS -- "no" --> N["numShards = N"]
+        ONE --> BUCKET["round-robin into buckets"]
+        N --> BUCKET
+        BUCKET --> SINGLE{{"bucket has 1 name?"}}
+        SINGLE -- "yes" --> PLAIN["focus = 'helm/fluxcd/simple'"]
+        SINGLE -- "no" --> REGEX["focus = '^.*(name1|name2)$'"]
+        PLAIN --> JSON["matrix=JSON → stdout"]
+        REGEX --> JSON
+    end
+
+    subgraph "Taskfile test/e2e"
+        JSON --> CLI["cli = matrix.focus"]
+        CLI --> STARTS{{"cli starts with ^?"}}
+        STARTS -- "yes" --> PASS["pass verbatim to -ginkgo.focus"]
+        STARTS -- "no" --> ANCHOR["wrap as '^.*${cli}$'"]
+        PASS --> GINKGO["go test -ginkgo.focus=..."]
+        ANCHOR --> GINKGO
+    end
+```
+
+### Timing: what happens on CI vs locally
+
+```mermaid
+gantt
+    title CI Shard Timeline (20 parallel jobs)
+    dateFormat mm:ss
+    axisFormat %M:%S
+
+    section discover
+    checkout + go run cmd/shard : d1, 00:00, 20s
+
+    section shard (each parallel)
+    kind create cluster       : s1, 00:20, 60s
+    install components        : s2, after s1, 60s
+    helm install controller   : s3, after s2, 30s
+    runScenario               : s4, after s3, 30s
+    cleanup                   : s5, after s4, 10s
+```
+
+## Setup composition flow
+
+### High-level: two modes
+
+```mermaid
+graph LR
+    A["setup/local.sh"] --> B{{"flag?"}}
+    B -- "default" --> C["cluster only"]
+    B -- "--all-components" --> D["cluster + all components"]
+    C --> E["runner installs on demand"]
+    D --> E
+```
+
+### Mid-level: cluster.sh + components
+
+```mermaid
+flowchart TD
+    START["task test/e2e/setup/local"] --> CLUSTER["cluster.sh: kind + registry + RBAC"]
+    CLUSTER --> FLAG{{"--all-components?"}}
+    FLAG -- "yes" --> ALL["install all components/*.sh"]
+    FLAG -- "no (default)" --> DONE1["cluster ready — components deferred"]
+
+    subgraph "Runner (per scenario)"
+        RUN["runScenario()"] --> REQ["for name in requires:"]
+        REQ --> CHK{{"component running?"}}
+        CHK -- "yes" --> SKIP["skip (already installed)"]
+        CHK -- "no" --> INST["bash components/<name>.sh"]
+        INST --> NEXT["next component"]
+        SKIP --> NEXT
+    end
+
+    DONE1 --> RUN
+    ALL --> RUN
+```
+
+### Detailed: cluster.sh internals
+
+```mermaid
+flowchart TD
+    CS["cluster.sh"] --> PRE["check prerequisites: docker, flux, helm, jq, kind, kubectl"]
+    PRE --> REG{{"image-registry container exists?"}}
+    REG -- "no" --> CREG["docker run -d registry:2 --name image-registry -p 5000:5000"]
+    REG -- "yes" --> SKIPRE["skip"]
+    CREG --> KIND{{"kind cluster exists?"}}
+    SKIPRE --> KIND
+    KIND -- "no" --> CKIND["kind create cluster --config (extraPortMappings 31002,31003)"]
+    KIND -- "yes" --> SKIPK["skip"]
+    CKIND --> CERTS["configure containerd hosts.toml mirrors on each node"]
+    SKIPK --> CERTS
+    CERTS --> NET{{"registry on kind network?"}}
+    NET -- "no" --> CONN["docker network connect kind image-registry"]
+    NET -- "yes" --> SKIPN["skip"]
+    CONN --> RBAC["kubectl apply -f manifests/rbac.yaml"]
+    SKIPN --> RBAC
+```
+
+### Component script pattern (idempotent)
+
+```mermaid
+flowchart TD
+    SCRIPT["components/<name>.sh"] --> CHECK{{"deployment running + available replicas > 0?"}}
+    CHECK -- "yes" --> SKIP["echo 'already installed, skipping' && exit 0"]
+    CHECK -- "no" --> INSTALL["install (helm upgrade / flux install / kubectl apply)"]
+    INSTALL --> WAIT["kubectl wait --for=condition=Available --timeout=5m"]
+```
 
 ## Why this exists
 
@@ -148,6 +401,7 @@ prepare:
     - constructor: component-constructor.yaml      # required, scenario-relative path
       signingKey: ocm.software                     # optional; private key path
       ocmConfig: .ocmconfig                        # optional; --config for `ocm transfer`
+      copyResources: true                          # optional; adds --copy-resources to transfer
 
 # Optional. Hooks (named Go functions) chained in array order. Each phase wraps the
 # corresponding harness step. Resolved against test/e2e/hooks/registry.go at load
@@ -168,8 +422,7 @@ postCleanupHooks: []
 # not run, cleanup still does.
 deploy:
   - apply: bootstrap.yaml
-  - apply: rgd.yaml
-    waitFor:
+  - waitFor:                                          # waitFor-only: the Deployer creates the RGD
       kind: rgd
       name: ${SCENARIO_SIMPLE_NAME}
       namespace: default                           # optional
@@ -208,6 +461,17 @@ assert:
 cleanup:
   cascadeFromBootstrap: false
   cascadeTimeout: 5m
+
+# Optional. kubectl commands to run on failure for diagnostics. Each entry
+# specifies a kubectl subcommand and a label for log grouping. When omitted,
+# a default set runs (controller pods/logs, kro pods/events, RGD conditions).
+debug:
+  - kubectl: get pods -n ${CONTROLLER_NAMESPACE} -o wide
+    label: controller-pods
+  - kubectl: logs -n ${CONTROLLER_NAMESPACE} deploy/ocm-k8s-toolkit-controller-manager --tail=80 --all-containers
+    label: controller-logs
+  - kubectl: get helmrelease -A -o wide
+    label: helmreleases
 ```
 
 ### Templated variables
@@ -231,23 +495,29 @@ component in `requires:`.
 
 ### Lifecycle (per scenario)
 
-```
-load e2e.yaml + validate hook references
-└─ requires:        run setup/components/<name>.sh idempotently in declared order
-└─ prepare:         transfer each OCM component (with optional signing/ocmConfig)
-└─ preDeployHooks:  user hooks
-└─ deploy:          ordered steps; first failure aborts before assert
-└─ postDeployHooks: user hooks
-└─ preAssertHooks:  user hooks
-└─ assert:          resources + fieldEquals (final-state validation)
-└─ postAssertHooks: user hooks
-└─ preCleanupHooks: user hooks
-└─ cleanup:         no-op unless cleanup.cascadeFromBootstrap = true
-└─ postCleanupHooks: user hooks
-```
+```mermaid
+sequenceDiagram
+    participant Runner as runScenario()
+    participant Cluster as Kind Cluster
+    participant OCM as OCM CLI
+    participant Hooks as hooks/registry.go
 
-`AfterEach` (Ginkgo) still dumps controller logs on failure; that is independent of the
-cleanup phase.
+    Runner->>Runner: load e2e.yaml + validate hooks
+    Runner->>Cluster: requires: bash components/<name>.sh
+    Runner->>OCM: prepare: ocm transfer ctf → registry
+    Runner->>Hooks: preDeployHooks
+    Runner->>Cluster: deploy: kubectl apply + waitFor
+    Runner->>Hooks: postDeployHooks
+    Runner->>Hooks: preAssertHooks
+    Runner->>Cluster: assert: kubectl wait + jsonpath checks
+    Runner->>Hooks: postAssertHooks
+    Runner->>Hooks: preCleanupHooks
+    Runner->>Cluster: cleanup: DeferCleanup (kubectl delete)
+    Runner->>Hooks: postCleanupHooks
+    alt On failure
+        Runner->>Cluster: debug: kubectl diagnostic commands
+    end
+```
 
 ## The runner
 
@@ -392,8 +662,7 @@ prepare:
 
 deploy:
   - apply: bootstrap.yaml
-  - apply: rgd.yaml
-    waitFor:
+  - waitFor:
       kind: rgd
       name: ${SCENARIO_SIMPLE_NAME}
       conditions: [create, condition=Ready=true]
@@ -423,8 +692,7 @@ prepare:
 
 deploy:
   - apply: bootstrap.yaml
-  - apply: rgd.yaml
-    waitFor:
+  - waitFor:
       kind: rgd
       name: ${SCENARIO_SIMPLE_NAME}
       conditions: [create, condition=Ready=true]
@@ -493,19 +761,19 @@ postAssertHooks:
 ```yaml
 timeout: 5m
 
-requires: [kro, flux-source, flux-helm, protected-registry-basic-auth]
+requires: [protected-registry-basic-auth, kro, flux-source, flux-helm]
 
 prepare:
   components:
     - constructor: component-constructor.yaml
       ocmConfig: .ocmconfig
+      registry: ${PROTECTED_REGISTRY_BASIC_AUTH}
 
 deploy:
   - apply: bootstrap.yaml
-  - apply: rgd.yaml
-    waitFor:
+  - waitFor:
       kind: rgd
-      name: ${SCENARIO_SIMPLE_NAME}
+      name: basic-auth
       conditions: [create, condition=Ready=true]
   - apply: instance.yaml
 
