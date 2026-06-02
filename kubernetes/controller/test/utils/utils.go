@@ -48,7 +48,7 @@ func DeployAndWaitForResource(ctx context.Context, manifestFilePath, waitingFor,
 // a DeferCleanup-handler is created that will delete the resource, when the test-suite ends.
 // In contrast to "DeployAndWaitForResource", this function does not wait for a certain condition to be fulfilled.
 func DeployResource(ctx context.Context, manifestFilePath string) error {
-	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-f", manifestFilePath)
+	cmd := exec.CommandContext(ctx, "kubectl", "apply", "--server-side", "--force-conflicts", "-f", manifestFilePath)
 	_, err := Run(cmd)
 	if err != nil {
 		return err
