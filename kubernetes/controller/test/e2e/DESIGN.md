@@ -13,7 +13,7 @@ It is the source of truth for the harness; update it when the design changes.
 
 ## Architecture overview
 
-### High-level: what the harness does
+**what the harness does**:
 
 ```mermaid
 graph LR
@@ -21,8 +21,9 @@ graph LR
     RUNNER --> CLUSTER["Kind Cluster"]
     CLUSTER --> RESULT["Pass / Fail"]
 ```
+<details>
+<summary>discovery → execution → diagnostics (detailed)</summary>
 
-### Mid-level: discovery → execution → diagnostics
 
 ```mermaid
 graph LR
@@ -51,7 +52,10 @@ graph LR
     end
 ```
 
-## Setup composition flow
+</details>
+
+<details>
+<summary>Setup composition flow</summary>
 
 ```mermaid
 flowchart TD
@@ -72,6 +76,7 @@ flowchart TD
     DONE1 --> RUN
     ALL --> RUN
 ```
+</details>
 
 ## Why this exists
 
@@ -640,6 +645,7 @@ assert:
 </details>
 
 <details>
+## Decision summary
 <summary>Decision summary (Q1–Q16)</summary>
 
 | # | Decision | Choice | Rationale |
@@ -669,6 +675,7 @@ assert:
 </details>
 
 <details>
+## Migration plan 
 <summary>Migration plan (Stages 1–6)</summary>
 
 Implementation lands in stages so the suite stays green throughout.

@@ -11,6 +11,18 @@ rationale, locked decisions (Q1–Q16), and the full schema reference see
 ## E2E Pipeline Architecture
 
 ```mermaid
+graph LR
+    T["Taskfile"] --> R["Runner (e2e_runner.go)"]
+    T --> S["cmd/shard (CI)"]
+    R --> CFG["ScenarioConfig (e2e.yaml)"]
+    R --> H["Hooks (registry.go)"]
+    R --> SC["Setup Scripts (components/*.sh)"]
+```
+
+<details>
+<summary>Detailed class diagram</summary>
+
+```mermaid
 classDiagram
     class Taskfile {
         +test/e2e/setup/local
@@ -76,6 +88,8 @@ classDiagram
     CmdShard --> Runner : shares walkScenarios logic
     Taskfile --> CmdShard : go run cmd/shard
 ```
+
+</details>
 
 <details>
 <summary><strong>How a scenario runs (detailed diagrams)</strong></summary>
@@ -230,6 +244,108 @@ assert:
 That's the whole file. The runner handles ordering, OCM transfer, namespace
 scoping, log dumping on failure, and cleanup.
 
+
+<details>
+<summary>Full schema reference with all fields</summary>
+
+```yaml
+apiVersion: e2e.ocm.software/v1
+kind: Scenario
+
+# Optional. Overrides the global E2E_TIMEOUT for this scenario.
+# Applies to deploy[].waitFor and assert.resources[] waits.
+timeout: 5m
+
+# Required. Components the harness must install before the scenario runs. Each name
+# corresponds to a script at test/e2e/setup/components/<name>.sh. Unknown names cause
+# a load-time error. Order matters: dependencies first.
+requires:
+  - kro
+  - flux-source
+  - flux-helm
+  - argocd
+
+# Optional. OCM components to prepare (transfer to the local registry) before deploy.
+# Each entry runs the equivalent of the current PrepareOCMComponent helper.
+prepare:
+  components:
+    - constructor: component-constructor.yaml      # required, scenario-relative path
+      signingKey: ocm.software                     # optional; private key path
+      ocmConfig: .ocmconfig                        # optional; --config for `ocm transfer`
+      copyResources: true                          # optional; adds --copy-resources to transfer
+
+# Optional. Hooks (named Go functions) chained in array order. Each phase wraps the
+# corresponding harness step. Resolved against test/e2e/hooks/registry.go at load
+# time; missing hooks fail BeforeSuite.
+preDeployHooks: []
+postDeployHooks: []
+preAssertHooks: []
+postAssertHooks: []
+preCleanupHooks: []
+postCleanupHooks: []
+
+# Required. Ordered deploy steps. Each step is one of:
+#   - apply only:                  - apply: <path>
+#   - waitFor only:                - waitFor: { ... }
+#   - apply followed by wait:      - apply: <path>
+#                                    waitFor: { ... }
+# A wait failure is a deploy-step failure (not an assertion failure): assert: does
+# not run, cleanup still does.
+deploy:
+  - apply: bootstrap.yaml
+  - waitFor:                                          # waitFor-only: the Deployer creates the RGD
+      kind: rgd
+      name: ${SCENARIO_SIMPLE_NAME}
+      namespace: default                           # optional
+      conditions:                                  # any kubectl wait condition
+        - create
+        - condition=Ready=true
+
+# Required. Final-state validation, run after deploy completes.
+assert:
+  resources:
+    - kind: deployment.apps
+      name: ${SCENARIO_SIMPLE_NAME}-podinfo
+      namespace: default                           # optional
+      waitFor: [create, condition=Available]
+      pods:                                        # optional pod-readiness check
+        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+        condition: Ready=true
+    - kind: applications.argoproj.io
+      name: ${SCENARIO_SIMPLE_NAME}
+      namespace: argocd
+      waitFor: [create]
+      jsonPath:                                    # field-equality on status
+        '{.status.sync.status}': Synced
+        '{.status.health.status}': Healthy
+
+  # Optional. Field-equality checks against rendered cluster state, expressed as
+  # `kubectl get <resource> -o jsonpath=<jsonPath>` == <value>.
+  fieldEquals:
+    - resource: pod -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+      jsonPath: '{.items[0].spec.containers[0].image}'
+      value: ${IMAGE_REGISTRY_HOST}/stefanprodan/podinfo:6.9.1
+
+# Optional. Default no-op. When cascadeFromBootstrap is true, the harness deletes the
+# Bootstrap resource and waits for the cascade to clear all derived resources within
+# cascadeTimeout. Used to assert OCM teardown contracts.
+cleanup:
+  cascadeFromBootstrap: false
+  cascadeTimeout: 5m
+
+# Optional. kubectl commands to run on failure for diagnostics. Each entry
+# specifies a kubectl subcommand and a label for log grouping. When omitted,
+# a default set runs (controller pods/logs, kro pods/events, RGD conditions).
+debug:
+  - kubectl: get pods -n ${CONTROLLER_NAMESPACE} -o wide
+    label: controller-pods
+  - kubectl: logs -n ${CONTROLLER_NAMESPACE} deploy/ocm-k8s-toolkit-controller-manager --tail=80 --all-containers
+    label: controller-logs
+  - kubectl: get helmrelease -A -o wide
+    label: helmreleases
+```
+
+</details>
 ---
 
 ## Adding behaviour the schema does not cover
@@ -414,7 +530,7 @@ See DESIGN.md §"Operator UX" for the full command table.
 ## Where to read more
 
 - [`DESIGN.md`](./DESIGN.md) — full schema, locked decisions, migration plan.
-- `hooks/registry.go` — list of named hooks (once Stage 1 lands).
-- `examples/helm/fluxcd/simple/` — canonical Flux helm reference.
-- `examples/helm/argocd/simple/` — canonical ArgoCD helm reference.
-- `test/e2e/scenarios/applyset/pruning/` — canonical test-only reference.
+- [`hooks/registry.go`](./hooks/registry.go) — list of named hooks.
+- [`examples/helm/fluxcd/simple/`](../../examples/helm/fluxcd/simple/) — canonical Flux helm reference.
+- [`examples/helm/argocd/simple/`](../../examples/helm/argocd/simple/) — canonical ArgoCD helm reference.
+- [`test/e2e/scenarios/applyset/pruning/`](./scenarios/applyset/pruning/) — canonical test-only reference.
