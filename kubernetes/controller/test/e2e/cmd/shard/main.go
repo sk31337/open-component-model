@@ -92,7 +92,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "marshal:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("matrix=%s\n", out)
+	fmt.Fprintf(os.Stdout, "matrix=%s\n", out)
 }
 
 func walk(root string) ([]string, error) {

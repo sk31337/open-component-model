@@ -14,6 +14,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	"sigs.k8s.io/yaml"
 
 	"ocm.software/open-component-model/kubernetes/controller/test/e2e/hooks"

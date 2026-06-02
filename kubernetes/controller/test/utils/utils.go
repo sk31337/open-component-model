@@ -142,7 +142,7 @@ func PrepareOCMComponentWithOptions(ctx context.Context, opts PrepareOCMComponen
 
 	if opts.SigningKey != "" {
 		By("signing ocm component for " + opts.Name)
-		cmd = exec.CommandContext(ctx,
+		cmd = exec.CommandContext(ctx, //nolint:gosec // args are hardcoded in test code
 			"ocm",
 			"sign",
 			"componentversions",
