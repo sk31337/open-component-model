@@ -77,7 +77,11 @@ jobs:
           cache-dependency-path: ${{ env.LOCATION }}/go.sum
 
       - name: Install Task
-        uses: arduino/setup-task@a2bd34e69f19b4cc026b2a9cc5214df7acdccccc # pre-release: PR #1394 (Node 24)
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
+        env:
+          # Opt into Node 24 runtime: arduino/setup-task v2.0.0 still declares
+          # using: node20. Drop this once a Node-24 release ships.
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
