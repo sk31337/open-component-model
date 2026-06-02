@@ -369,8 +369,10 @@ func runScenario(cfg *ScenarioConfig) {
 
 	By("deploying scenario " + cfg.Folder)
 	for _, step := range cfg.Deploy {
-		manifest := filepath.Join(cfg.Dir, step.Apply)
-		Expect(utils.DeployResource(ctx, manifest)).To(Succeed(), "kubectl apply -f %s failed", manifest)
+		if step.Apply != "" {
+			manifest := filepath.Join(cfg.Dir, step.Apply)
+			Expect(utils.DeployResource(ctx, manifest)).To(Succeed(), "kubectl apply -f %s failed", manifest)
+		}
 		if step.WaitFor != nil {
 			waitForSpec(ctx, step.WaitFor, timeout)
 		}
