@@ -24,3 +24,15 @@ assert:
       pods:
         selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
         condition: condition=Ready=true
+
+debug:
+  - kubectl: get pods -n flux-system -o wide
+    label: flux-pods
+  - kubectl: get events -n flux-system --sort-by=.lastTimestamp
+    label: flux-events
+  - kubectl: get helmrelease -A -o wide
+    label: helmreleases
+  - kubectl: get ocirepository -A -o wide
+    label: ocirepositories
+  - kubectl: get kustomization -A -o wide
+    label: kustomizations

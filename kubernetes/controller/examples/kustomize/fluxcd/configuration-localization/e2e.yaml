@@ -31,3 +31,15 @@ assert:
     - resource: pod -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
       jsonPath: "'{.items[0].spec.containers[0].env[?(@.name==\"PODINFO_UI_MESSAGE\")].value}'"
       value: ${SCENARIO_SIMPLE_NAME}
+
+debug:
+  - kubectl: get pods -n flux-system -o wide
+    label: flux-pods
+  - kubectl: get events -n flux-system --sort-by=.lastTimestamp
+    label: flux-events
+  - kubectl: get helmrelease -A -o wide
+    label: helmreleases
+  - kubectl: get ocirepository -A -o wide
+    label: ocirepositories
+  - kubectl: get kustomization -A -o wide
+    label: kustomizations

@@ -38,3 +38,13 @@ assert:
     - resource: pod -n default-argocd -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
       jsonPath: "'{.items[0].spec.containers[0].env[?(@.name==\"PODINFO_UI_MESSAGE\")].value}'"
       value: ${SCENARIO_SIMPLE_NAME}
+
+debug:
+  - kubectl: get pods -n argocd -o wide
+    label: argocd-pods
+  - kubectl: get events -n argocd --sort-by=.lastTimestamp
+    label: argocd-events
+  - kubectl: get applications.argoproj.io -A -o wide
+    label: argocd-apps
+  - kubectl: logs -n argocd -l app.kubernetes.io/name=argocd-application-controller --tail=50
+    label: argocd-controller-logs
