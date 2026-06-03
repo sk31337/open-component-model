@@ -194,10 +194,6 @@ kind: Scenario
 
 requires: [kro, flux-source, flux-helm]
 
-prepare:
-  components:
-    - constructor: component-constructor.yaml
-
 deploy:
   - apply: bootstrap.yaml
   - waitFor:
@@ -237,7 +233,7 @@ requires:
 # Each entry runs the equivalent of the current PrepareOCMComponent helper.
 prepare:
   components:
-    - constructor: component-constructor.yaml      # required, scenario-relative path
+    - constructor: component-constructor.yaml      # optional, scenario-relative path
       signingKey: ocm.software                     # optional; private key path
       ocmConfig: .ocmconfig                        # optional; --config for `ocm transfer`
       copyResources: true                          # optional; adds --copy-resources to transfer
@@ -255,21 +251,31 @@ postCleanupHooks: []
 # Required. Ordered deploy steps. Each step is one of:
 #   - apply only:                  - apply: <path>
 #   - waitFor only:                - waitFor: { ... }
+#   - assert only:                 - assert: { ... }
 #   - apply followed by wait:      - apply: <path>
 #                                    waitFor: { ... }
+#                                    assert: { ... }
+#                                    debug: { ... }
 # A wait failure is a deploy-step failure (not an assertion failure): assert: does
 # not run, cleanup still does.
 deploy:
   - apply: bootstrap.yaml
-  - waitFor:                                          # waitFor-only: the Deployer creates the RGD
-      kind: rgd
-      name: ${SCENARIO_SIMPLE_NAME}
+    waitFor:                                          # waitFor-only: the Deployer creates the RGD
+    - kind: rgd                                       # mandatory
+      name: ${SCENARIO_SIMPLE_NAME}                 # mandatory
+      timeout: 2m                                   # optional, overrides scenario-level timeout
       namespace: default                           # optional
-      conditions:                                  # any kubectl wait condition
+      conditions:                                  # mandatory; any kubectl wait condition
         - create
         - condition=Ready=true
+    debug:                                            # optional; kubectl command to run on failure or debug mode for this apply step
+    - kubectl: get rgd ${SCENARIO_SIMPLE_NAME} -n default -o yaml         
+    - kubectl: get events -n default --field-selector involvedObject.name=${SCENARIO_SIMPLE_NAME} -o yaml    
+    - waitFor: # -kind/name/conditions array OR kubectl array is mandatory;  
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=basic-auth-podinfo -n default --timeout=5m" # which translates to `kubectl wait --for=condition=Ready=true pod -l app.kubernetes.io/name=basic-auth-podinfo -n default --timeout=5m`
+        
 
-# Required. Final-state validation, run after deploy completes.
+# Optional. Final-state validation, run after deploy completes. Not needed, if the deploy's waitFor conditions are sufficient to guarantee the scenario's success criteria.
 assert:
   resources:
     - kind: deployment.apps

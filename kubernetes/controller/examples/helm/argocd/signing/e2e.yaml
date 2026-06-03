@@ -4,8 +4,7 @@ requires:
 
 prepare:
   components:
-    - constructor: component-constructor.yaml
-      signingKey: ocm.software
+    - signingKey: ocm.software
 
 deploy:
   - apply: bootstrap.yaml

@@ -5,8 +5,7 @@ requires:
 
 prepare:
   components:
-    - constructor: component-constructor.yaml
-      copyResources: true
+    - copyResources: true
 
 deploy:
   - apply: bootstrap.yaml

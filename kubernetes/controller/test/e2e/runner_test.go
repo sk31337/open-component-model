@@ -189,6 +189,12 @@ func loadScenario(scenarioDir, root, componentsDir string, vars map[string]strin
 	cfg.SimpleName = simpleName
 	cfg.Dir = scenarioDir
 
+	if len(cfg.Prepare.Components) == 0 {
+		if _, err := os.Stat(filepath.Join(scenarioDir, "component-constructor.yaml")); err == nil {
+			cfg.Prepare.Components = []PrepareComponent{{Constructor: "component-constructor.yaml"}}
+		}
+	}
+
 	if err := validateHookRefs(&cfg); err != nil {
 		return nil, fmt.Errorf("scenario %s: %w", folder, err)
 	}
@@ -370,9 +376,13 @@ func runScenario(cfg *ScenarioConfig) {
 		if comp.Registry != "" {
 			registry = comp.Registry
 		}
+		constructor := comp.Constructor
+		if constructor == "" {
+			constructor = "component-constructor.yaml"
+		}
 		Expect(utils.PrepareOCMComponentWithOptions(ctx, utils.PrepareOCMComponentOptions{
 			Name:                     cfg.SimpleName,
-			ComponentConstructorPath: filepath.Join(cfg.Dir, comp.Constructor),
+			ComponentConstructorPath: filepath.Join(cfg.Dir, constructor),
 			ImageRegistry:            registry,
 			SigningKey:               signingKey,
 			OCMConfig:                ocmConfig,

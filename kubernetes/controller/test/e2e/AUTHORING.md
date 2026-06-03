@@ -193,10 +193,6 @@ requires:
   - flux-source
   - flux-helm
 
-prepare:
-  components:
-    - constructor: component-constructor.yaml
-
 deploy:
   - apply: bootstrap.yaml
   - waitFor:

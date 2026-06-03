@@ -19,3 +19,12 @@ fi
 
 kubectl apply -f "${manifest}"
 kubectl wait pod -l app=protected-registry1 --for=condition=Ready --timeout=5m
+
+echo "waiting for NodePort 31002 to become reachable..."
+for i in $(seq 1 30); do
+  if curl -sf -o /dev/null -u admin:admin http://localhost:31002/v2/ 2>/dev/null; then
+    echo "NodePort 31002 reachable"
+    break
+  fi
+  sleep 1
+done

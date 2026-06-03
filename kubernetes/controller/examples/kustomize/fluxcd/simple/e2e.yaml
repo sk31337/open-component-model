@@ -3,10 +3,6 @@ requires:
   - flux-source
   - flux-kustomize
 
-prepare:
-  components:
-    - constructor: component-constructor.yaml
-
 deploy:
   - apply: bootstrap.yaml
   - waitFor:
