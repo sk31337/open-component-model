@@ -8,29 +8,13 @@ prepare:
 
 deploy:
   - apply: bootstrap.yaml
-  - waitFor:
-      kind: rgd
-      name: ${SCENARIO_SIMPLE_NAME}
-      conditions: [create, condition=Ready=true]
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/helm-argocd-signing"
   - apply: instance.yaml
-
-assert:
-  resources:
-    - kind: applications.argoproj.io
-      name: ${SCENARIO_SIMPLE_NAME}
-      namespace: argocd
-      waitFor:
-        - create
-        - jsonpath={.status.sync.status}=Synced
-        - jsonpath={.status.health.status}=Healthy
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      namespace: default-argocd
-      waitFor: [create, condition=Available]
-      pods:
-        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
-        condition: condition=Ready=true
-
+    waitFor:
+      - kubectl: "--for=create --for=jsonpath={.status.sync.status}=Synced --for=jsonpath={.status.health.status}=Healthy applications.argoproj.io/helm-argocd-signing -n argocd"
+      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-argocd-signing-podinfo -n default-argocd"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-argocd-signing-podinfo -n default-argocd"
 debug:
   - kubectl: get pods -n argocd -o wide
     label: argocd-pods

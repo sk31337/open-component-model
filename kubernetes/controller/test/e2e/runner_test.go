@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -70,18 +71,39 @@ type PrepareComponent struct {
 }
 
 type DeployStep struct {
-	Apply   string       `json:"apply,omitempty"`
-	WaitFor *WaitForSpec `json:"waitFor,omitempty"`
+	Apply   string      `json:"apply,omitempty"`
+	WaitFor WaitForList `json:"waitFor,omitempty"`
+	Debug   []DebugCmd  `json:"debug,omitempty"`
+}
+
+type WaitForList []WaitForSpec
+
+func (w *WaitForList) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] != '[' {
+		return fmt.Errorf("waitFor must be an array, got: %s", string(data[:min(len(data), 40)]))
+	}
+	var list []WaitForSpec
+	if err := json.Unmarshal(data, &list); err != nil {
+		return err
+	}
+	*w = list
+	return nil
 }
 
 type WaitForSpec struct {
-	Kind       string   `json:"kind"`
-	Name       string   `json:"name"`
+	Kind       string   `json:"kind,omitempty"`
+	Name       string   `json:"name,omitempty"`
 	Namespace  string   `json:"namespace,omitempty"`
-	Conditions []string `json:"conditions"`
+	Timeout    string   `json:"timeout,omitempty"`
+	Conditions []string `json:"conditions,omitempty"`
+	Kubectl    string   `json:"kubectl,omitempty"`
 }
 
 type AssertSpec struct {
+	Kubectl     []string         `json:"kubectl,omitempty"`
 	Resources   []AssertResource `json:"resources,omitempty"`
 	FieldEquals []FieldEquals    `json:"fieldEquals,omitempty"`
 }
@@ -199,6 +221,10 @@ func loadScenario(scenarioDir, root, componentsDir string, vars map[string]strin
 		return nil, fmt.Errorf("scenario %s: %w", folder, err)
 	}
 
+	if err := validateWaitFor(&cfg); err != nil {
+		return nil, fmt.Errorf("scenario %s: %w", folder, err)
+	}
+
 	if componentsDir != "" {
 		if err := validateRequires(&cfg, componentsDir); err != nil {
 			return nil, fmt.Errorf("scenario %s: %w", folder, err)
@@ -206,6 +232,24 @@ func loadScenario(scenarioDir, root, componentsDir string, vars map[string]strin
 	}
 
 	return &cfg, nil
+}
+
+// validateWaitFor checks that each waitFor entry uses either the kubectl
+// shorthand OR the structured kind/name/conditions fields, never both.
+func validateWaitFor(cfg *ScenarioConfig) error {
+	for i, step := range cfg.Deploy {
+		for j, w := range step.WaitFor {
+			hasKubectl := w.Kubectl != ""
+			hasStructured := w.Kind != "" || w.Name != "" || len(w.Conditions) > 0
+			if hasKubectl && hasStructured {
+				return fmt.Errorf("deploy[%d].waitFor[%d]: cannot mix 'kubectl' with 'kind'/'name'/'conditions'", i, j)
+			}
+			if !hasKubectl && !hasStructured {
+				return fmt.Errorf("deploy[%d].waitFor[%d]: must specify either 'kubectl' or 'kind'+'name'+'conditions'", i, j)
+			}
+		}
+	}
+	return nil
 }
 
 // validateRequires returns an error naming any `requires:` entry that has no
@@ -393,13 +437,46 @@ func runScenario(cfg *ScenarioConfig) {
 	dispatchHooks("preDeployHooks", cfg.PreDeployHooks, scenarioCtx)
 
 	By("deploying scenario " + cfg.Folder)
-	for _, step := range cfg.Deploy {
+	for i, step := range cfg.Deploy {
 		if step.Apply != "" {
 			manifest := filepath.Join(cfg.Dir, step.Apply)
-			Expect(utils.DeployResource(ctx, manifest)).To(Succeed(), "kubectl apply -f %s failed", manifest)
+			err := utils.DeployResource(ctx, manifest)
+			if err != nil {
+				runStepDebug(cfg.Deploy[i].Debug)
+				Expect(err).NotTo(HaveOccurred(), "kubectl apply -f %s failed", manifest)
+			}
+			if isWorkflowDebug() == true {
+				runStepDebug(cfg.Deploy[i].Debug)
+			}
 		}
-		if step.WaitFor != nil {
-			waitForSpec(ctx, step.WaitFor, timeout)
+		for _, w := range step.WaitFor {
+			t := timeout
+			if w.Timeout != "" {
+				t = w.Timeout
+			}
+			if w.Kubectl != "" {
+				args := strings.Fields(w.Kubectl)
+				args = append(args, "--timeout="+t)
+				cmd := exec.CommandContext(ctx, "kubectl", append([]string{"wait"}, args...)...)
+				out, err := utils.Run(cmd)
+				if err != nil {
+					runStepDebug(cfg.Deploy[i].Debug)
+					Expect(err).NotTo(HaveOccurred(), "kubectl wait %s failed: %s", w.Kubectl, string(out))
+				}
+			} else {
+				resource := w.Kind + "/" + w.Name
+				args := []string{resource}
+				if w.Namespace != "" {
+					args = append(args, "-n", w.Namespace)
+				}
+				for _, cond := range w.Conditions {
+					err := utils.WaitForResource(ctx, cond, t, args...)
+					if err != nil {
+						runStepDebug(cfg.Deploy[i].Debug)
+						Expect(err).NotTo(HaveOccurred(), "wait %s on %s failed", cond, resource)
+					}
+				}
+			}
 		}
 	}
 
@@ -407,6 +484,12 @@ func runScenario(cfg *ScenarioConfig) {
 	dispatchHooks("preAssertHooks", cfg.PreAssertHooks, scenarioCtx)
 
 	By("asserting scenario " + cfg.Folder)
+	for _, kc := range cfg.Assert.Kubectl {
+		args := strings.Fields(kc)
+		cmd := exec.CommandContext(ctx, "kubectl", args...)
+		out, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "assert kubectl %s failed: %s", kc, string(out))
+	}
 	for _, res := range cfg.Assert.Resources {
 		assertResource(ctx, res, timeout)
 	}
@@ -440,22 +523,6 @@ func scenarioTimeout(cfg *ScenarioConfig) string {
 		return t
 	}
 	return "10m"
-}
-
-// waitForSpec runs `kubectl wait` for every condition in spec.Conditions,
-// failing the spec on the first miss.
-func waitForSpec(ctx context.Context, spec *WaitForSpec, timeout string) {
-	resource := spec.Kind + "/" + spec.Name
-	args := []string{resource}
-	if spec.Namespace != "" {
-		args = append(args, "-n", spec.Namespace)
-	}
-	for _, cond := range spec.Conditions {
-		Expect(utils.WaitForResource(ctx, cond, timeout, args...)).To(
-			Succeed(),
-			"wait %s on %s failed", cond, resource,
-		)
-	}
 }
 
 // assertResource runs the kubectl wait sequence for a single AssertResource
@@ -502,7 +569,7 @@ var defaultDebugCommands = []DebugCmd{
 	{Kubectl: "get pods -n " + controllerNamespace + " -o wide", Label: "controller-pods"},
 	{Kubectl: "logs -n " + controllerNamespace + " deploy/ocm-k8s-toolkit-controller-manager --tail=80 --all-containers", Label: "controller-logs"},
 	{Kubectl: "get pods -n kro -o wide", Label: "kro-pods"},
-	{Kubectl: "get events -n kro --sort-by=.lastTimestamp", Label: "kro-events"},
+	{Kubectl: "get events --sort-by=.lastTimestamp", Label: "events"},
 	{Kubectl: "get rgd -o custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type==\"Ready\")].status,READY_MSG:.status.conditions[?(@.type==\"Ready\")].message", Label: "rgd-conditions"},
 }
 
@@ -516,6 +583,30 @@ var defaultDebugCommands = []DebugCmd{
 func isWorkflowDebug() bool {
 	return os.Getenv("RUNNER_DEBUG") == "1" ||
 		strings.EqualFold(os.Getenv("ACTIONS_STEP_DEBUG"), "true")
+}
+
+func runStepDebug(cmds []DebugCmd) {
+	if len(cmds) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, d := range cmds {
+		label := d.Label
+		if label == "" {
+			label = d.Kubectl
+		}
+		args := strings.Fields(d.Kubectl)
+		cmd := exec.CommandContext(ctx, "kubectl", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			GinkgoLogr.Info(fmt.Sprintf("[STEP-DEBUG] %s: error: %v", label, err))
+		} else {
+			for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+				GinkgoLogr.Info(fmt.Sprintf("[STEP-DEBUG] %s: %s", label, line))
+			}
+		}
+	}
 }
 
 func runDebugCommands(cfg *ScenarioConfig) {

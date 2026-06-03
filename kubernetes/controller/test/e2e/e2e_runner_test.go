@@ -179,9 +179,9 @@ deploy:
   - apply: bootstrap.yaml
   - apply: rgd.yaml
     waitFor:
-      kind: rgd
-      name: ${SCENARIO_SIMPLE_NAME}
-      conditions: [create, condition=Ready=true]
+      - kind: rgd
+        name: ${SCENARIO_SIMPLE_NAME}
+        conditions: [create, condition=Ready=true]
 
 assert:
   resources:
@@ -209,7 +209,7 @@ assert:
 	if got := cfg.Requires; len(got) != 2 || got[0] != "kro" || got[1] != "flux-source" {
 		t.Errorf("Requires = %v, want [kro flux-source]", got)
 	}
-	if len(cfg.Deploy) != 2 || cfg.Deploy[1].WaitFor == nil || cfg.Deploy[1].WaitFor.Name != "helm-simple" {
+	if len(cfg.Deploy) != 2 || len(cfg.Deploy[1].WaitFor) == 0 || cfg.Deploy[1].WaitFor[0].Name != "helm-simple" {
 		t.Errorf("deploy waitFor.name not substituted: %+v", cfg.Deploy)
 	}
 	if len(cfg.Assert.Resources) != 1 || cfg.Assert.Resources[0].Name != "helm-simple-podinfo" {

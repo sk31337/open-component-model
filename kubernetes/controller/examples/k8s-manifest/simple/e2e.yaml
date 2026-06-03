@@ -3,12 +3,6 @@ requires:
 
 deploy:
   - apply: bootstrap.yaml
-
-assert:
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      waitFor: [create, condition=Available]
-      pods:
-        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
-        condition: condition=Ready=true
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/k8s-manifest-simple-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=k8s-manifest-simple-podinfo"

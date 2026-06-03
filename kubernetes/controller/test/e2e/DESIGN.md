@@ -251,10 +251,8 @@ postCleanupHooks: []
 # Required. Ordered deploy steps. Each step is one of:
 #   - apply only:                  - apply: <path>
 #   - waitFor only:                - waitFor: { ... }
-#   - assert only:                 - assert: { ... }
 #   - apply followed by wait:      - apply: <path>
 #                                    waitFor: { ... }
-#                                    assert: { ... }
 #                                    debug: { ... }
 # A wait failure is a deploy-step failure (not an assertion failure): assert: does
 # not run, cleanup still does.
@@ -276,7 +274,10 @@ deploy:
         
 
 # Optional. Final-state validation, run after deploy completes. Not needed, if the deploy's waitFor conditions are sufficient to guarantee the scenario's success criteria.
-assert:
+assert:    
+  kubectl: 
+    - "wait --for=condition=Ready=true pod -l app.kubernetes.io/name=basic-auth-podinfo -n default --timeout=5m"
+    # which translates to `kubectl wait --for=condition=Ready=true pod -l app.kubernetes.io/name=basic-auth-podinfo -n default --timeout=5m`
   resources:
     - kind: deployment.apps
       name: ${SCENARIO_SIMPLE_NAME}-podinfo

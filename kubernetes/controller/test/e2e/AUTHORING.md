@@ -185,9 +185,6 @@ against the fixed list. Unknown variables are a hard error at parse time.
 Smallest viable scenario — bootstrap a kro RGD, wait for a deployment:
 
 ```yaml
-apiVersion: e2e.ocm.software/v1
-kind: Scenario
-
 requires:
   - kro
   - flux-source
@@ -195,21 +192,15 @@ requires:
 
 deploy:
   - apply: bootstrap.yaml
-  - waitFor:
-      kind: rgd
-      name: ${SCENARIO_SIMPLE_NAME}
-      conditions: [create, condition=Ready=true]
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/helm-fluxcd-simple"
   - apply: instance.yaml
-
-assert:
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      waitFor: [create, condition=Available]
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-simple-podinfo"
 ```
 
-That's the whole file. The runner handles ordering, OCM transfer, namespace
-scoping, log dumping on failure, and cleanup.
+That's the whole file. The runner handles OCM component transfer (defaults to
+`component-constructor.yaml`), namespace scoping, log dumping on failure, and cleanup.
 
 
 <details>
@@ -220,30 +211,22 @@ apiVersion: e2e.ocm.software/v1
 kind: Scenario
 
 # Optional. Overrides the global E2E_TIMEOUT for this scenario.
-# Applies to deploy[].waitFor and assert.resources[] waits.
 timeout: 5m
 
-# Required. Components the harness must install before the scenario runs. Each name
-# corresponds to a script at test/e2e/setup/components/<name>.sh. Unknown names cause
-# a load-time error. Order matters: dependencies first.
+# Required. Components the harness must install before the scenario runs.
 requires:
   - kro
   - flux-source
   - flux-helm
-  - argocd
 
-# Optional. OCM components to prepare (transfer to the local registry) before deploy.
-# Each entry runs the equivalent of the current PrepareOCMComponent helper.
+# Optional. Defaults to component-constructor.yaml if that file exists.
 prepare:
   components:
-    - constructor: component-constructor.yaml      # required, scenario-relative path
-      signingKey: ocm.software                     # optional; private key path
+    - signingKey: ocm.software                     # optional; private key path
       ocmConfig: .ocmconfig                        # optional; --config for `ocm transfer`
       copyResources: true                          # optional; adds --copy-resources to transfer
 
-# Optional. Hooks (named Go functions) chained in array order. Each phase wraps the
-# corresponding harness step. Resolved against test/e2e/hooks/registry.go at load
-# time; missing hooks fail BeforeSuite.
+# Optional. Hooks (named Go functions) chained in array order.
 preDeployHooks: []
 postDeployHooks: []
 preAssertHooks: []
@@ -251,63 +234,38 @@ postAssertHooks: []
 preCleanupHooks: []
 postCleanupHooks: []
 
-# Required. Ordered deploy steps. Each step is one of:
-#   - apply only:                  - apply: <path>
-#   - waitFor only:                - waitFor: { ... }
-#   - apply followed by wait:      - apply: <path>
-#                                    waitFor: { ... }
-# A wait failure is a deploy-step failure (not an assertion failure): assert: does
-# not run, cleanup still does.
+# Required. Ordered deploy steps.
 deploy:
   - apply: bootstrap.yaml
-  - waitFor:                                          # waitFor-only: the Deployer creates the RGD
-      kind: rgd
-      name: ${SCENARIO_SIMPLE_NAME}
-      namespace: default                           # optional
-      conditions:                                  # any kubectl wait condition
-        - create
-        - condition=Ready=true
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/my-scenario"
+        timeout: 2m                                # optional, overrides scenario timeout
+    debug:                                         # optional; runs on step failure
+      - kubectl: get rgd my-scenario -o yaml
+      - kubectl: get events --field-selector involvedObject.name=my-scenario
+  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/my-scenario-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=my-scenario-podinfo"
 
-# Required. Final-state validation, run after deploy completes.
+# Optional. Final-state validation after deploy completes.
 assert:
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      namespace: default                           # optional
-      waitFor: [create, condition=Available]
-      pods:                                        # optional pod-readiness check
-        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
-        condition: Ready=true
-    - kind: applications.argoproj.io
-      name: ${SCENARIO_SIMPLE_NAME}
-      namespace: argocd
-      waitFor: [create]
-      jsonPath:                                    # field-equality on status
-        '{.status.sync.status}': Synced
-        '{.status.health.status}': Healthy
-
-  # Optional. Field-equality checks against rendered cluster state, expressed as
-  # `kubectl get <resource> -o jsonpath=<jsonPath>` == <value>.
+  kubectl:
+    - "wait --for=condition=Ready=true pod -l app.kubernetes.io/name=my-scenario-podinfo --timeout=5m"
   fieldEquals:
-    - resource: pod -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
+    - resource: pod -l app.kubernetes.io/name=my-scenario-podinfo
       jsonPath: '{.items[0].spec.containers[0].image}'
       value: ${IMAGE_REGISTRY_HOST}/stefanprodan/podinfo:6.9.1
 
-# Optional. Default no-op. When cascadeFromBootstrap is true, the harness deletes the
-# Bootstrap resource and waits for the cascade to clear all derived resources within
-# cascadeTimeout. Used to assert OCM teardown contracts.
+# Optional. Cleanup options.
 cleanup:
   cascadeFromBootstrap: false
   cascadeTimeout: 5m
 
-# Optional. kubectl commands to run on failure for diagnostics. Each entry
-# specifies a kubectl subcommand and a label for log grouping. When omitted,
-# a default set runs (controller pods/logs, kro pods/events, RGD conditions).
+# Optional. Diagnostics on failure or debug mode.
 debug:
   - kubectl: get pods -n ${CONTROLLER_NAMESPACE} -o wide
     label: controller-pods
-  - kubectl: logs -n ${CONTROLLER_NAMESPACE} deploy/ocm-k8s-toolkit-controller-manager --tail=80 --all-containers
-    label: controller-logs
   - kubectl: get helmrelease -A -o wide
     label: helmreleases
 ```
@@ -356,39 +314,24 @@ their folder:
 | `examples/helm/fluxcd/<name>/` | Flux | `kro`, `flux-source`, `flux-helm` | `Resource` → `OCIRepository` → `HelmRelease` |
 | `examples/helm/argocd/<name>/` | ArgoCD | `kro`, `argocd` | `Resource` → `Application` |
 
-A Flux scenario asserts the Flux-managed deployment:
+A Flux scenario waits for the Flux-managed deployment:
 
 ```yaml
-assert:
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      waitFor: [create, condition=Available]
-      pods:
-        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
-        condition: condition=Ready=true
+deploy:
+  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-simple-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-fluxcd-simple-podinfo"
 ```
 
-An ArgoCD scenario asserts both the `Application`'s sync/health status and
-the ArgoCD-managed deployment in `default-argocd`:
+An ArgoCD scenario waits for both the `Application`'s sync/health and the deployment:
 
 ```yaml
-assert:
-  resources:
-    - kind: applications.argoproj.io
-      name: ${SCENARIO_SIMPLE_NAME}
-      namespace: argocd
-      waitFor:
-        - create
-        - jsonpath={.status.sync.status}=Synced
-        - jsonpath={.status.health.status}=Healthy
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      namespace: default-argocd
-      waitFor: [create, condition=Available]
-      pods:
-        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
-        condition: condition=Ready=true
+deploy:
+  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=jsonpath={.status.sync.status}=Synced --for=jsonpath={.status.health.status}=Healthy applications.argoproj.io/helm-argocd-simple -n argocd"
+      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-argocd-simple-podinfo -n default-argocd"
 ```
 
 ArgoCD-managed releases use the suffix `-argocd` to avoid colliding with the
@@ -441,8 +384,21 @@ The runner executes the kubectl commands declared in `debug:` whenever
   an operator picks "Re-run with debug logging") or `ACTIONS_STEP_DEBUG=true`
   is exported into the runner environment.
 
-If you omit `debug:`, a default set runs (controller pods/logs, kro
-pods/events, RGD conditions). Override it to add scenario-specific
+**Scenario-level `debug:`** runs at the end of the scenario. **Per-step `debug:`**
+runs immediately when that specific deploy step fails (before the scenario aborts):
+
+```yaml
+deploy:
+  - apply: bootstrap.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/my-scenario"
+    debug:
+      - kubectl: get rgd my-scenario -o yaml
+      - kubectl: get events --field-selector involvedObject.name=my-scenario
+```
+
+If you omit scenario-level `debug:`, a default set runs (controller pods/logs,
+kro pods/events, RGD conditions). Override it to add scenario-specific
 diagnostics:
 
 ```yaml
@@ -451,8 +407,6 @@ debug:
     label: argocd-pods
   - kubectl: get applications.argoproj.io -A -o wide
     label: argocd-apps
-  - kubectl: logs -n ${CONTROLLER_NAMESPACE} deploy/ocm-k8s-toolkit-controller-manager --tail=80
-    label: controller-logs
 ```
 
 Each `kubectl:` value is passed directly to `kubectl` (split on whitespace).
@@ -463,10 +417,6 @@ To force the snapshot on a green run locally, prepend `RUNNER_DEBUG=1`:
 ```sh
 RUNNER_DEBUG=1 task kubernetes/controller:test/e2e -- helm/fluxcd/simple
 ```
-
-In CI, re-run the workflow with "Enable debug logging" checked — GitHub
-exports `RUNNER_DEBUG=1` automatically and the runner picks it up without
-any workflow-file changes.
 
 ---
 
