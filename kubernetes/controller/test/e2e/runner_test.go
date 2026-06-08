@@ -391,19 +391,6 @@ func runScenario(cfg *ScenarioConfig) {
 		Dir:        cfg.Dir,
 	}
 
-	if len(cfg.Requires) > 0 {
-		By("ensuring required components for " + cfg.Folder)
-		dir := componentsDir()
-		for _, name := range cfg.Requires {
-			script := filepath.Join(dir, name+".sh")
-			By(fmt.Sprintf("installing component %q (script %s)...", name, script))
-			cmd := exec.CommandContext(ctx, "bash", script)
-			cmd.Stdout = GinkgoWriter
-			cmd.Stderr = GinkgoWriter
-			Expect(cmd.Run()).To(Succeed(), "requires component %q (script %s) failed", name, script)
-		}
-	}
-
 	By("preparing OCM components for " + cfg.Folder)
 	for _, comp := range cfg.Prepare.Components {
 		signingKey := ""
