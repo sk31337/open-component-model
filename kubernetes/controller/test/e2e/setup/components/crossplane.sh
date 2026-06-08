@@ -64,11 +64,18 @@ fi
 
 # Grant provider-kubernetes SA cluster-admin so it can manage OCM, Flux, etc.
 # The SA name is dynamic: crossplane-contrib-provider-kubernetes-<revisionhash>
-PROVIDER_K8S_SA=$(kubectl get sa -n crossplane-system --no-headers \
-  -o custom-columns=NAME:.metadata.name \
-  | grep '^crossplane-contrib-provider-kubernetes-' | head -1)
+# Wait up to 60s for Crossplane to create the revision SA after the provider is Healthy.
+PROVIDER_K8S_SA=""
+for i in $(seq 1 12); do
+  PROVIDER_K8S_SA=$(kubectl get sa -n crossplane-system --no-headers \
+    -o custom-columns=NAME:.metadata.name 2>/dev/null \
+    | grep '^crossplane-contrib-provider-kubernetes-' | head -1 || true)
+  [ -n "$PROVIDER_K8S_SA" ] && break
+  echo "waiting for provider-kubernetes SA to appear (attempt ${i}/12)..."
+  sleep 5
+done
 if [ -z "$PROVIDER_K8S_SA" ]; then
-  echo "ERROR: could not find crossplane provider-kubernetes service account" >&2
+  echo "ERROR: could not find crossplane provider-kubernetes service account after 60s" >&2
   exit 1
 fi
 echo "Binding cluster-admin to provider-kubernetes SA: ${PROVIDER_K8S_SA}"
