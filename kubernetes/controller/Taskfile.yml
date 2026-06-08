@@ -160,6 +160,11 @@ tasks:
             "${focus_args[@]}" \
             '{{.TASKFILE_DIR}}/test/e2e/'
 
+  check-cluster:
+    desc: "Check the health of all resources on the current kubectl cluster context. Flags: --include-system, --verbose, --namespace <ns>"
+    cmds:
+      - 'bash {{.TASKFILE_DIR}}/hack/check-cluster.sh {{.CLI_ARGS}}'
+
   # Build
   build:
     desc: "Build the controller manager binary"
