@@ -361,3 +361,56 @@ check_pvc() {
 
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# Checker dispatch table: "group/Kind" -> function name
+# group is the API group (empty string for core/v1 resources -> use "v1")
+# Wildcard: "group/*" matches any Kind in that group.
+# ---------------------------------------------------------------------------
+declare -A CHECKER
+
+CHECKER["delivery.ocm.software/Component"]="check_conditions"
+CHECKER["delivery.ocm.software/Repository"]="check_conditions"
+CHECKER["delivery.ocm.software/Resource"]="check_conditions"
+CHECKER["delivery.ocm.software/Deployer"]="check_conditions"
+CHECKER["helm.toolkit.fluxcd.io/HelmRelease"]="check_conditions"
+CHECKER["source.toolkit.fluxcd.io/OCIRepository"]="check_conditions"
+CHECKER["source.toolkit.fluxcd.io/HelmChart"]="check_conditions"
+CHECKER["source.toolkit.fluxcd.io/GitRepository"]="check_conditions"
+CHECKER["source.toolkit.fluxcd.io/HelmRepository"]="check_conditions"
+CHECKER["source.toolkit.fluxcd.io/Bucket"]="check_conditions"
+CHECKER["source.toolkit.fluxcd.io/ExternalArtifact"]="check_conditions"
+CHECKER["kustomize.toolkit.fluxcd.io/Kustomization"]="check_conditions"
+CHECKER["kro.run/ResourceGraphDefinition"]="check_kro_rgd"
+CHECKER["kro.run/*"]="check_kro_instance"
+CHECKER["internal.kro.run/GraphRevision"]="check_conditions"
+CHECKER["argoproj.io/Application"]="check_argocd_app"
+CHECKER["argoproj.io/ApplicationSet"]="check_conditions"
+CHECKER["apps/Deployment"]="check_deployment"
+CHECKER["v1/Pod"]="check_pod"
+CHECKER["v1/Node"]="check_conditions"
+CHECKER["v1/PersistentVolumeClaim"]="check_pvc"
+CHECKER["pkg.crossplane.io/*"]="check_conditions"
+CHECKER["apiextensions.crossplane.io/*"]="check_conditions"
+CHECKER["kubernetes.crossplane.io/*"]="check_conditions"
+CHECKER["kubernetes.m.crossplane.io/*"]="check_conditions"
+CHECKER["protection.crossplane.io/*"]="check_conditions"
+CHECKER["ops.crossplane.io/*"]="check_conditions"
+
+# ---------------------------------------------------------------------------
+# resolve_checker <group> <kind>
+# Prints the function name to call. Order: exact, wildcard, fallback.
+# ---------------------------------------------------------------------------
+resolve_checker() {
+  local group="$1" kind="$2"
+  local key="${group}/${kind}"
+  local wildcard="${group}/*"
+
+  if [[ -n "${CHECKER[$key]+_}" ]]; then
+    echo "${CHECKER[$key]}"
+  elif [[ -n "${CHECKER[$wildcard]+_}" ]]; then
+    echo "${CHECKER[$wildcard]}"
+  else
+    echo "check_conditions"
+  fi
+}
