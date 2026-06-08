@@ -60,6 +60,7 @@ fi
 pids=()
 tmpfiles=()
 names=()
+trap 'rm -f "${tmpfiles[@]}"' EXIT
 
 for s in "${scripts[@]}"; do
   tmp=$(mktemp)
@@ -69,8 +70,6 @@ for s in "${scripts[@]}"; do
   names+=("$(basename "${s}")")
   echo ">>> components/$(basename "${s}") (pid $!)"
 done
-
-trap 'rm -f "${tmpfiles[@]}"' EXIT
 
 failed_idx=""
 for i in "${!pids[@]}"; do
