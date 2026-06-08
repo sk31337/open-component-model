@@ -337,6 +337,34 @@ check_pod() {
 }
 
 # ---------------------------------------------------------------------------
+# check_node — only Ready condition matters; pressure conditions are inverse-polarity
+# (DiskPressure: False = healthy, so check_conditions would falsely flag them)
+# ---------------------------------------------------------------------------
+check_node() {
+  local gk="$1" ns="$2" name="$3" ts="$4"
+  local json
+  json="$(cat)"
+  local age
+  age="$(age_seconds "$ts")"
+  local ref="${ns}/${name}"
+
+  local ready_status ready_reason ready_msg
+  ready_status="$(echo "$json" | jq -r '.status.conditions[] | select(.type=="Ready") | .status // ""')"
+  ready_reason="$(echo "$json"  | jq -r '.status.conditions[] | select(.type=="Ready") | .reason // ""')"
+  ready_msg="$(echo "$json"     | jq -r '.status.conditions[] | select(.type=="Ready") | .message // ""')"
+
+  if [[ "$ready_status" == "False" ]]; then
+    emit_unhealthy "$gk" "$ref" "$age" "Ready: False — ${ready_reason}: ${ready_msg}"
+  elif [[ "$ready_status" == "Unknown" ]]; then
+    if (( age < 120 )); then
+      emit_pending "$gk" "$ref" "$age" "Ready: Unknown — ${ready_reason}: ${ready_msg}"
+    else
+      emit_stuck "$gk" "$ref" "$age" "Ready: Unknown — ${ready_reason}: ${ready_msg}"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # check_pvc — phase must be Bound
 # ---------------------------------------------------------------------------
 check_pvc() {
@@ -364,7 +392,7 @@ check_pvc() {
 
 # ---------------------------------------------------------------------------
 # Checker dispatch table: "group/Kind" -> function name
-# group is the API group (empty string for core/v1 resources -> use "v1")
+# Callers must pass "v1" as the group for core API resources (apiVersion=="v1").
 # Wildcard: "group/*" matches any Kind in that group.
 # ---------------------------------------------------------------------------
 declare -A CHECKER
@@ -388,7 +416,7 @@ CHECKER["argoproj.io/Application"]="check_argocd_app"
 CHECKER["argoproj.io/ApplicationSet"]="check_conditions"
 CHECKER["apps/Deployment"]="check_deployment"
 CHECKER["v1/Pod"]="check_pod"
-CHECKER["v1/Node"]="check_conditions"
+CHECKER["v1/Node"]="check_node"
 CHECKER["v1/PersistentVolumeClaim"]="check_pvc"
 CHECKER["pkg.crossplane.io/*"]="check_conditions"
 CHECKER["apiextensions.crossplane.io/*"]="check_conditions"
