@@ -442,3 +442,85 @@ resolve_checker() {
     echo "check_conditions"
   fi
 }
+
+# ---------------------------------------------------------------------------
+# Resource types to skip — no meaningful status to check.
+# Keys are the plural resource names as returned by kubectl api-resources.
+# ---------------------------------------------------------------------------
+declare -A SKIP_TYPES
+for t in \
+  configmaps secrets serviceaccounts endpoints endpointslices \
+  events leases controllerrevisions \
+  rolebindings roles clusterroles clusterrolebindings \
+  networkpolicies podtemplates replicationcontrollers resourcequotas \
+  limitranges priorityclasses runtimeclasses storageclasses \
+  csidrivers csinodes ingressclasses ipaddresses servicecidrs \
+  deviceclasses resourceslices resourceclaimtemplates locks \
+  imageconfigs deploymentruntimeconfigs environmentconfigs \
+  componentstatuses poddisruptionbudgets csistoragecapacities \
+  volumeattributesclasses prioritylevelconfigurations flowschemas \
+  mutatingwebhookconfigurations validatingwebhookconfigurations \
+  validatingadmissionpolicies validatingadmissionpolicybindings \
+  apiservices certificatesigningrequests horizontalpodautoscalers \
+  persistentvolumes replicasets statefulsets daemonsets ingresses \
+  cronjobs namespaces nodes \
+  providerconfigusages usages appprojects \
+  compositionrevisions; do
+  SKIP_TYPES["$t"]=1
+done
+
+# ---------------------------------------------------------------------------
+# discover_resource_types
+# Prints lines of "name apiVersion kind" for each non-skipped listable type.
+# ---------------------------------------------------------------------------
+discover_resource_types() {
+  kubectl api-resources --verbs=list -o wide --no-headers 2>/dev/null \
+  | awk '{print $1, $3, $5}' \
+  | while read -r name apiversion kind; do
+      if [[ -z "${SKIP_TYPES[$name]+_}" ]]; then
+        echo "$name $apiversion $kind"
+      fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# check_resource_type <name> <apiVersion> <kind>
+# Fetches all instances of a resource type and runs the appropriate checker.
+# Writes output to stdout (called from background jobs).
+# ---------------------------------------------------------------------------
+check_resource_type() {
+  local resname="$1" apiversion="$2" kind="$3"
+
+  # Derive group from apiVersion (e.g. "delivery.ocm.software/v1alpha1" -> "delivery.ocm.software")
+  # Core resources have apiVersion "v1" -> group is "v1" for dispatch purposes
+  local group
+  if [[ "$apiversion" == *"/"* ]]; then
+    group="${apiversion%/*}"
+  else
+    group="$apiversion"  # "v1"
+  fi
+
+  local checker
+  checker="$(resolve_checker "$group" "$kind")"
+
+  local json
+  json="$(kubectl get "$resname" ${NAMESPACE_FLAG} -o json 2>/dev/null)" || return 0
+
+  local count
+  count="$(echo "$json" | jq '.items | length')"
+  (( count == 0 )) && return 0
+
+  local dot_printed=false
+  while IFS= read -r item; do
+    local ns item_name ts
+    ns="$(echo "$item" | jq -r '.metadata.namespace // "cluster"')"
+    item_name="$(echo "$item" | jq -r '.metadata.name')"
+    ts="$(echo "$item" | jq -r '.metadata.creationTimestamp')"
+
+    echo "$item" | "$checker" "${group}/${kind}" "$ns" "$item_name" "$ts"
+    dot_printed=true
+  done < <(echo "$json" | jq -c '.items[]')
+
+  # Emit a dot token to signal this type had instances (used by main loop for progress)
+  [[ "$dot_printed" == "true" ]] && echo "DOT"
+}
