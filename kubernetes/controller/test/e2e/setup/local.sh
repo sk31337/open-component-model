@@ -57,11 +57,40 @@ if [[ ${#scripts[@]} -eq 0 ]]; then
   exit 1
 fi
 
+pids=()
+tmpfiles=()
+names=()
+
 for s in "${scripts[@]}"; do
-  echo
-  echo ">>> components/$(basename "${s}")"
-  bash "${s}"
+  tmp=$(mktemp)
+  bash "${s}" >"${tmp}" 2>&1 &
+  pids+=($!)
+  tmpfiles+=("${tmp}")
+  names+=("$(basename "${s}")")
+  echo ">>> components/$(basename "${s}") (pid $!)"
 done
+
+trap 'rm -f "${tmpfiles[@]}"' EXIT
+
+failed_idx=""
+for i in "${!pids[@]}"; do
+  if ! wait "${pids[$i]}"; then
+    failed_idx="${i}"
+    break
+  fi
+done
+
+if [[ -n "${failed_idx}" ]]; then
+  for j in "${!pids[@]}"; do
+    if [[ "${j}" != "${failed_idx}" ]]; then
+      kill "${pids[$j]}" 2>/dev/null || true
+    fi
+  done
+  echo >&2
+  echo ">>> components/${names[$failed_idx]} FAILED — output:" >&2
+  cat "${tmpfiles[$failed_idx]}" >&2
+  exit 1
+fi
 
 echo
 echo "setup/local.sh complete (all components installed)."
