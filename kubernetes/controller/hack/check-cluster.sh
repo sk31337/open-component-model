@@ -165,3 +165,199 @@ check_conditions() {
 
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# check_kro_rgd — ResourceGraphDefinition: conditions + state must be Active
+# ---------------------------------------------------------------------------
+check_kro_rgd() {
+  local gk="$1" ns="$2" name="$3" ts="$4"
+  local json
+  json="$(cat)"
+  local age
+  age="$(age_seconds "$ts")"
+  local ref="${ns}/${name}"
+
+  local state
+  state="$(echo "$json" | jq -r '.status.state // ""')"
+
+  echo "$json" | check_conditions "$gk" "$ns" "$name" "$ts"
+  local rc=$?
+
+  if [[ "$state" != "Active" && "$state" != "" ]]; then
+    if (( rc == 0 )); then
+      if (( age < 120 )); then
+        emit_pending "$gk" "$ref" "$age" "state: ${state} (expected: Active)"
+      else
+        emit_stuck "$gk" "$ref" "$age" "state: ${state} (expected: Active)"
+      fi
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# check_kro_instance — kro-managed instances: conditions + state must be Ready
+# ---------------------------------------------------------------------------
+check_kro_instance() {
+  local gk="$1" ns="$2" name="$3" ts="$4"
+  local json
+  json="$(cat)"
+  local age
+  age="$(age_seconds "$ts")"
+  local ref="${ns}/${name}"
+
+  local state
+  state="$(echo "$json" | jq -r '.status.state // ""')"
+
+  echo "$json" | check_conditions "$gk" "$ns" "$name" "$ts"
+  local rc=$?
+
+  if [[ -n "$state" && "$state" != "Ready" ]]; then
+    if (( rc == 0 )); then
+      if (( age < 120 )); then
+        emit_pending "$gk" "$ref" "$age" "state: ${state} (expected: Ready)"
+      else
+        emit_stuck "$gk" "$ref" "$age" "state: ${state} (expected: Ready)"
+      fi
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# check_argocd_app — health.status + sync.status + conditions
+# ---------------------------------------------------------------------------
+check_argocd_app() {
+  local gk="$1" ns="$2" name="$3" ts="$4"
+  local json
+  json="$(cat)"
+  local age
+  age="$(age_seconds "$ts")"
+  local ref="${ns}/${name}"
+
+  local health sync
+  health="$(echo "$json" | jq -r '.status.health.status // ""')"
+  sync="$(echo "$json"   | jq -r '.status.sync.status // ""')"
+
+  echo "$json" | check_conditions "$gk" "$ns" "$name" "$ts"
+
+  local lines=()
+  if [[ -n "$health" && "$health" != "Healthy" && "$health" != "Progressing" ]]; then
+    lines+=("health: ${health}")
+  fi
+  # OutOfSync is a warning, not an error — still report when not Synced
+  if [[ -n "$sync" && "$sync" != "Synced" ]]; then
+    lines+=("sync: ${sync}")
+  fi
+
+  if [[ "${#lines[@]}" -gt 0 ]]; then
+    emit_unhealthy "$gk" "$ref" "$age" "${lines[@]}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# check_deployment — unavailableReplicas + Available condition
+# ---------------------------------------------------------------------------
+check_deployment() {
+  local gk="$1" ns="$2" name="$3" ts="$4"
+  local json
+  json="$(cat)"
+  local age
+  age="$(age_seconds "$ts")"
+  local ref="${ns}/${name}"
+
+  local unavail
+  unavail="$(echo "$json" | jq -r '.status.unavailableReplicas // 0')"
+
+  echo "$json" | check_conditions "$gk" "$ns" "$name" "$ts"
+
+  if (( unavail > 0 )); then
+    local desired
+    desired="$(echo "$json" | jq -r '.spec.replicas // 1')"
+    emit_unhealthy "$gk" "$ref" "$age" \
+      "unavailableReplicas: ${unavail} / ${desired}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# check_pod — phase + container error states
+# System namespace pods skipped unless --include-system
+# ---------------------------------------------------------------------------
+check_pod() {
+  local gk="$1" ns="$2" name="$3" ts="$4"
+
+  if [[ "$INCLUDE_SYSTEM" == "false" ]]; then
+    case "$ns" in
+      kube-system|local-path-storage|kube-node-lease|kube-public) return 0 ;;
+    esac
+  fi
+
+  local json
+  json="$(cat)"
+  local age
+  age="$(age_seconds "$ts")"
+  local ref="${ns}/${name}"
+
+  local phase
+  phase="$(echo "$json" | jq -r '.status.phase // ""')"
+
+  if [[ "$phase" == "Succeeded" ]]; then
+    return 0
+  fi
+
+  if [[ "$phase" != "Running" && -n "$phase" ]]; then
+    if (( age < 120 )); then
+      emit_pending "$gk" "$ref" "$age" "phase: ${phase}"
+    else
+      emit_stuck "$gk" "$ref" "$age" "phase: ${phase}"
+    fi
+    return 2
+  fi
+
+  # Check container states for error conditions
+  local bad_containers
+  bad_containers="$(echo "$json" | jq -r '
+    .status.containerStatuses[]? |
+    select(.state.waiting.reason != null) |
+    select(.state.waiting.reason | IN(
+      "CrashLoopBackOff","OOMKilled","Error",
+      "ImagePullBackOff","ErrImagePull","CreateContainerConfigError"
+    )) |
+    "\(.name): \(.state.waiting.reason) — \(.state.waiting.message // "")"
+  ')"
+
+  if [[ -n "$bad_containers" ]]; then
+    local lines=()
+    while IFS= read -r line; do
+      lines+=("container: $line")
+    done <<< "$bad_containers"
+    emit_unhealthy "$gk" "$ref" "$age" "${lines[@]}"
+    return 1
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# check_pvc — phase must be Bound
+# ---------------------------------------------------------------------------
+check_pvc() {
+  local gk="$1" ns="$2" name="$3" ts="$4"
+  local json
+  json="$(cat)"
+  local age
+  age="$(age_seconds "$ts")"
+  local ref="${ns}/${name}"
+
+  local phase
+  phase="$(echo "$json" | jq -r '.status.phase // ""')"
+
+  if [[ "$phase" != "Bound" && -n "$phase" ]]; then
+    if (( age < 120 )); then
+      emit_pending "$gk" "$ref" "$age" "phase: ${phase} (expected: Bound)"
+    else
+      emit_stuck "$gk" "$ref" "$age" "phase: ${phase} (expected: Bound)"
+    fi
+    return 2
+  fi
+
+  return 0
+}
