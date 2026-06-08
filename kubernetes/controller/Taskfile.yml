@@ -124,12 +124,12 @@ tasks:
         PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v "${focus_args[@]}"
 
   test/e2e/parallel:
-    desc: "Run e2e tests in parallel using the ginkgo CLI. Defaults to 4 processes. Pass --procs=N to override, or a focus via `--`, e.g. `task test/e2e/parallel -- helm/fluxcd/simple`."
+    desc: "Run e2e tests in parallel using the ginkgo CLI. Defaults to 20 processes. Pass --procs=N to override, or a focus via `--`, e.g. `task test/e2e/parallel -- helm/fluxcd/simple`."
     dotenv: ['{{.TASKFILE_DIR}}/test/e2e/hacks/.env']
     cmds:
       - task: helm/install
       - |
-        procs=4
+        procs=20
         focus_args=()
         cli='{{.CLI_ARGS}}'
         if [ -n "$cli" ]; then
@@ -153,7 +153,7 @@ tasks:
           fi
         fi
         PROJECT_DIR='{{.TASKFILE_DIR}}' \
-          '{{.GOBIN}}/ginkgo' \
+          "$(go env GOPATH)/bin/ginkgo" \
             --procs="${procs}" \
             --timeout=30m \
             -v \
