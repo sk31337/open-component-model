@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Install Crossplane, function-patch-and-transform, provider-kubernetes (in-cluster), and its ProviderConfig.
+set -euo pipefail
+
+CROSSPLANE_VERSION="${CROSSPLANE_VERSION:-2.3.1}"
+PROVIDER_KUBERNETES_VERSION="${PROVIDER_KUBERNETES_VERSION:-v1.2.1}"
+FUNCTION_P_AND_T_VERSION="${FUNCTION_P_AND_T_VERSION:-v0.10.6}"
+
+if kubectl get deployment crossplane -n crossplane-system >/dev/null 2>&1 \
+   && kubectl get deployment crossplane -n crossplane-system -o jsonpath='{.status.availableReplicas}' | grep -q '[1-9]'; then
+  echo "crossplane already installed and running, skipping"
+else
+  helm repo add crossplane-stable https://charts.crossplane.io/stable
+  helm repo update crossplane-stable
+
+  helm upgrade --install crossplane crossplane-stable/crossplane \
+    --namespace crossplane-system \
+    --create-namespace \
+    --version "${CROSSPLANE_VERSION}" \
+    --wait
+fi
+
+# Install function-patch-and-transform (required for Pipeline mode Compositions).
+if kubectl get function crossplane-contrib-function-patch-and-transform >/dev/null 2>&1; then
+  echo "function-patch-and-transform already installed, skipping"
+else
+  kubectl apply -f - <<EOF
+apiVersion: pkg.crossplane.io/v1beta1
+kind: Function
+metadata:
+  name: crossplane-contrib-function-patch-and-transform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/function-patch-and-transform:${FUNCTION_P_AND_T_VERSION}
+EOF
+
+  kubectl wait function/crossplane-contrib-function-patch-and-transform \
+    --for=condition=Installed=True \
+    --timeout=120s
+  kubectl wait function/crossplane-contrib-function-patch-and-transform \
+    --for=condition=Healthy=True \
+    --timeout=120s
+fi
+
+# Install provider-kubernetes for in-cluster Object management.
+if kubectl get provider crossplane-contrib-provider-kubernetes >/dev/null 2>&1; then
+  echo "provider-kubernetes already installed, skipping"
+else
+  kubectl apply -f - <<EOF
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: crossplane-contrib-provider-kubernetes
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/provider-kubernetes:${PROVIDER_KUBERNETES_VERSION}
+EOF
+
+  kubectl wait provider/crossplane-contrib-provider-kubernetes \
+    --for=condition=Installed=True \
+    --timeout=120s
+  kubectl wait provider/crossplane-contrib-provider-kubernetes \
+    --for=condition=Healthy=True \
+    --timeout=120s
+fi
+
+# Grant provider-kubernetes SA cluster-admin so it can manage OCM, Flux, etc.
+# The SA name is dynamic: crossplane-contrib-provider-kubernetes-<revisionhash>
+PROVIDER_K8S_SA=$(kubectl get sa -n crossplane-system --no-headers \
+  -o custom-columns=NAME:.metadata.name \
+  | grep '^crossplane-contrib-provider-kubernetes-' | head -1)
+if [ -z "$PROVIDER_K8S_SA" ]; then
+  echo "ERROR: could not find crossplane provider-kubernetes service account" >&2
+  exit 1
+fi
+echo "Binding cluster-admin to provider-kubernetes SA: ${PROVIDER_K8S_SA}"
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-provider-kubernetes-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: ${PROVIDER_K8S_SA}
+    namespace: crossplane-system
+EOF
+
+# Configure in-cluster credentials for provider-kubernetes.
+kubectl apply -f - <<EOF
+apiVersion: kubernetes.crossplane.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: kubernetes-provider
+spec:
+  credentials:
+    source: InjectedIdentity
+EOF
+
+# Grant the OCM controller manager permission to manage Crossplane XRDs and
+# Compositions so the Deployer's ApplySet conflict-detection can list them.
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: controller-manager-crossplane-e2e
+rules:
+  - apiGroups:
+      - apiextensions.crossplane.io
+    resources:
+      - compositeresourcedefinitions
+      - compositions
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: controller-manager-crossplane-e2e
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: controller-manager-crossplane-e2e
+subjects:
+  - kind: ServiceAccount
+    name: ocm-k8s-toolkit-controller-manager
+    namespace: ocm-k8s-toolkit-system
+EOF
