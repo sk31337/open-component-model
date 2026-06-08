@@ -475,7 +475,7 @@ done
 # ---------------------------------------------------------------------------
 discover_resource_types() {
   kubectl api-resources --verbs=list -o wide --no-headers 2>/dev/null \
-  | awk 'NF>=4 {print $1, $(NF-1), $NF}' \
+  | awk '{for(i=2;i<=NF;i++){if($i=="true"||$i=="false"){print $1,$(i-1),$(i+1);break}}}' \
   | while read -r name apiversion kind; do
       if [[ -z "${SKIP_TYPES[$name]+_}" ]]; then
         echo "$name $apiversion $kind"
@@ -561,6 +561,13 @@ main() {
     local dots
     dots="$(echo "$content" | grep -c '^DOT$' || true)"
     (( RESULT_OK += dots )) || true
+
+    # Count problem types from output text (subprocess globals don't propagate)
+    local n_unhealthy n_pending
+    n_unhealthy="$(echo "$content" | grep -c '^\[UNHEALTHY\]' || true)"
+    n_pending="$(echo "$content"   | grep -cE '^\[(PENDING|STUCK)\]' || true)"
+    (( RESULT_UNHEALTHY += n_unhealthy )) || true
+    (( RESULT_PENDING   += n_pending ))   || true
 
     # Print non-DOT lines (problem blocks) and a dot for healthy ones
     local problems
