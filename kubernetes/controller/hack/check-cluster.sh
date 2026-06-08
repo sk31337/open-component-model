@@ -87,3 +87,81 @@ emit_stuck() {
   printf '\n[STUCK] %s  %s  (age: %s)\n' "$gk" "$ref" "$(age_human "$age_secs")"
   for line in "$@"; do printf '  %s\n' "$line"; done
 }
+
+# ---------------------------------------------------------------------------
+# check_conditions <group/Kind> <namespace> <name> <creationTimestamp>
+# Reads resource JSON from stdin.
+# Returns 0 = healthy, 1 = unhealthy, 2 = pending/stuck.
+# ---------------------------------------------------------------------------
+check_conditions() {
+  local gk="$1" ns="$2" name="$3" ts="$4"
+  local ref="${ns}/${name}"
+  local age
+  age="$(age_seconds "$ts")"
+  local json
+  json="$(cat)"
+
+  local conditions
+  conditions="$(echo "$json" | jq -c '.status.conditions // []')"
+
+  local n_conditions
+  n_conditions="$(echo "$conditions" | jq 'length')"
+
+  # No conditions at all
+  if (( n_conditions == 0 )); then
+    if (( age < 30 )); then
+      return 0  # too young to judge
+    elif (( age < 120 )); then
+      emit_pending "$gk" "$ref" "$age" "conditions: (none yet)"
+      return 2
+    else
+      emit_stuck "$gk" "$ref" "$age" "conditions: (none — resource may not be reconciling)"
+      return 2
+    fi
+  fi
+
+  local bad_lines=()
+  local pending_lines=()
+  local healthy=true
+
+  while IFS= read -r cond; do
+    local ctype cstatus creason cmsg
+    ctype="$(echo "$cond" | jq -r '.type')"
+    cstatus="$(echo "$cond" | jq -r '.status')"
+    creason="$(echo "$cond" | jq -r '.reason // ""')"
+    cmsg="$(echo "$cond" | jq -r '.message // ""')"
+
+    if [[ "$cstatus" == "False" ]]; then
+      healthy=false
+      bad_lines+=("conditions:" "  ${ctype}: False — ${creason}: ${cmsg}")
+    elif [[ "$cstatus" == "Unknown" && "$ctype" == "Ready" ]]; then
+      healthy=false
+      if (( age < 120 )); then
+        pending_lines+=("conditions:" "  ${ctype}: Unknown — ${creason}: ${cmsg}")
+      else
+        pending_lines+=("conditions:" "  ${ctype}: Unknown (stuck) — ${creason}: ${cmsg}")
+      fi
+    fi
+  done < <(echo "$conditions" | jq -c '.[]')
+
+  if [[ "${#bad_lines[@]}" -gt 0 ]]; then
+    emit_unhealthy "$gk" "$ref" "$age" "${bad_lines[@]}"
+    return 1
+  fi
+
+  if [[ "${#pending_lines[@]}" -gt 0 ]]; then
+    if (( age < 120 )); then
+      emit_pending "$gk" "$ref" "$age" "${pending_lines[@]}"
+    else
+      emit_stuck "$gk" "$ref" "$age" "${pending_lines[@]}"
+    fi
+    return 2
+  fi
+
+  if [[ "$VERBOSE" == "true" ]]; then
+    printf '\n[OK] %s  %s  (age: %s)\n' "$gk" "$ref" "$(age_human "$age")"
+    echo "$json" | jq '.status'
+  fi
+
+  return 0
+}
