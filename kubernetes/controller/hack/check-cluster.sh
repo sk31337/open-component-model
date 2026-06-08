@@ -4,13 +4,13 @@
 # Usage: hack/check-cluster.sh [--namespace <ns>] [--include-system] [--verbose]
 set -euo pipefail
 
-NAMESPACE_FLAG="-A"
+NAMESPACE_ARGS=(-A)
 INCLUDE_SYSTEM=false
 VERBOSE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --namespace) NAMESPACE_FLAG="-n $2"; shift 2 ;;
+    --namespace) NAMESPACE_ARGS=(-n "$2"); shift 2 ;;
     --include-system) INCLUDE_SYSTEM=true; shift ;;
     --verbose) VERBOSE=true; shift ;;
     *) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -475,7 +475,7 @@ done
 # ---------------------------------------------------------------------------
 discover_resource_types() {
   kubectl api-resources --verbs=list -o wide --no-headers 2>/dev/null \
-  | awk '{print $1, $3, $5}' \
+  | awk 'NF>=4 {print $1, $(NF-1), $NF}' \
   | while read -r name apiversion kind; do
       if [[ -z "${SKIP_TYPES[$name]+_}" ]]; then
         echo "$name $apiversion $kind"
@@ -504,13 +504,12 @@ check_resource_type() {
   checker="$(resolve_checker "$group" "$kind")"
 
   local json
-  json="$(kubectl get "$resname" ${NAMESPACE_FLAG} -o json 2>/dev/null)" || return 0
+  json="$(kubectl get "$resname" "${NAMESPACE_ARGS[@]}" -o json 2>/dev/null)" || return 0
 
   local count
   count="$(echo "$json" | jq '.items | length')"
   (( count == 0 )) && return 0
 
-  local dot_printed=false
   while IFS= read -r item; do
     local ns item_name ts
     ns="$(echo "$item" | jq -r '.metadata.namespace // "cluster"')"
@@ -518,9 +517,8 @@ check_resource_type() {
     ts="$(echo "$item" | jq -r '.metadata.creationTimestamp')"
 
     echo "$item" | "$checker" "${group}/${kind}" "$ns" "$item_name" "$ts"
-    dot_printed=true
-  done < <(echo "$json" | jq -c '.items[]')
+  done < <(echo "$json" | jq -c '.items[]' 2>/dev/null || true)
 
   # Emit a dot token to signal this type had instances (used by main loop for progress)
-  [[ "$dot_printed" == "true" ]] && echo "DOT"
+  echo "DOT"
 }
