@@ -463,7 +463,7 @@ for t in \
   validatingadmissionpolicies validatingadmissionpolicybindings \
   apiservices certificatesigningrequests horizontalpodautoscalers \
   persistentvolumes replicasets statefulsets daemonsets ingresses \
-  cronjobs namespaces nodes \
+  cronjobs namespaces \
   providerconfigusages usages appprojects \
   compositionrevisions; do
   SKIP_TYPES["$t"]=1
@@ -508,7 +508,7 @@ check_resource_type() {
 
   local count
   count="$(echo "$json" | jq '.items | length')"
-  (( count == 0 )) && return 0
+  (( count == 0 )) && return 0 || true
 
   while IFS= read -r item; do
     local ns item_name ts
