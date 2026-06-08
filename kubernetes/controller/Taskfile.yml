@@ -123,6 +123,43 @@ tasks:
         fi
         PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v "${focus_args[@]}"
 
+  test/e2e/parallel:
+    desc: "Run e2e tests in parallel using the ginkgo CLI. Defaults to 4 processes. Pass --procs=N to override, or a focus via `--`, e.g. `task test/e2e/parallel -- helm/fluxcd/simple`."
+    dotenv: ['{{.TASKFILE_DIR}}/test/e2e/hacks/.env']
+    cmds:
+      - task: helm/install
+      - |
+        procs=4
+        focus_args=()
+        cli='{{.CLI_ARGS}}'
+        if [ -n "$cli" ]; then
+          # Allow --procs=N as the first arg to override parallelism.
+          case "$cli" in
+            --procs=*)
+              procs="${cli#--procs=}"
+              cli=""
+              ;;
+          esac
+        fi
+        if [ -n "$cli" ]; then
+          case "$cli" in
+            --focus=*) cli="${cli#--focus=}" ;;
+            "--focus "*) cli="${cli#--focus }" ;;
+          esac
+          if [[ "$cli" == ^* ]]; then
+            focus_args=(--focus="$cli")
+          else
+            focus_args=(--focus="^.*${cli}$")
+          fi
+        fi
+        PROJECT_DIR='{{.TASKFILE_DIR}}' \
+          '{{.GOBIN}}/ginkgo' \
+            --procs="${procs}" \
+            --timeout=30m \
+            -v \
+            "${focus_args[@]}" \
+            '{{.TASKFILE_DIR}}/test/e2e/'
+
   # Build
   build:
     desc: "Build the controller manager binary"
