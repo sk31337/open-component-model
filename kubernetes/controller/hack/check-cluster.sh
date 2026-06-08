@@ -522,3 +522,67 @@ check_resource_type() {
   # Emit a dot token to signal this type had instances (used by main loop for progress)
   echo "DOT"
 }
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+  local types
+  types="$(discover_resource_types)"
+
+  if [[ -z "$types" ]]; then
+    echo "No resource types found (is kubectl connected to a cluster?)" >&2
+    exit 1
+  fi
+
+  # Run each resource type check in parallel; collect output files
+  local job_outputs=()
+  while IFS= read -r line; do
+    local resname apiversion kind
+    read -r resname apiversion kind <<< "$line"
+    local outfile
+    outfile="$(mktemp "$TMPDIR_RESULTS/XXXXXX")"
+    job_outputs+=("$outfile")
+    check_resource_type "$resname" "$apiversion" "$kind" > "$outfile" 2>&1 &
+  done <<< "$types"
+
+  # Wait for all background jobs
+  wait
+
+  # Process output files: print dots for healthy types, print problem blocks
+  printf 'Checking: '
+  for outfile in "${job_outputs[@]}"; do
+    local content
+    content="$(cat "$outfile")"
+    if [[ -z "$content" ]]; then
+      continue
+    fi
+    # Count DOT tokens (healthy types that had instances)
+    local dots
+    dots="$(echo "$content" | grep -c '^DOT$' || true)"
+    (( RESULT_OK += dots )) || true
+
+    # Print non-DOT lines (problem blocks) and a dot for healthy ones
+    local problems
+    problems="$(echo "$content" | grep -v '^DOT$' || true)"
+    if [[ -n "$problems" ]]; then
+      printf '\n%s' "$problems"
+    fi
+    if (( dots > 0 )); then
+      printf '.'
+    fi
+  done
+  echo  # end the dots line
+
+  # Summary
+  echo
+  printf '✓ %d resources OK   ✗ %d unhealthy   ⏳ %d pending/stuck\n' \
+    "$RESULT_OK" "$RESULT_UNHEALTHY" "$RESULT_PENDING"
+
+  if (( RESULT_UNHEALTHY > 0 )); then
+    exit 1
+  fi
+  exit 0
+}
+
+main
