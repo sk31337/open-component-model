@@ -8,16 +8,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"golang.org/x/sync/errgroup"
 
 	"ocm.software/open-component-model/kubernetes/controller/test/utils"
 )
+
+// e2e_suite_test.go Ginkgo suite entry point — TestE2E, SynchronizedBeforeSuite, SynchronizedAfterSuite, collectAndInstallRequires
 
 const namespace = "ocm-k8s-toolkit-system"
 
@@ -51,14 +53,14 @@ var _ = SynchronizedBeforeSuite(
 		if t == "" {
 			t = "10m"
 		}
-		reg := os.Getenv("IMAGE_REGISTRY")
-		Expect(reg).NotTo(BeEmpty(), "IMAGE_REGISTRY must be set")
+		imageRegistry := os.Getenv("IMAGE_REGISTRY")
+		Expect(imageRegistry).NotTo(BeEmpty(), "IMAGE_REGISTRY must be set")
 
 		By("installing required components (proc 1)", func() {
 			collectAndInstallRequires(ctx)
 		})
 
-		payload, err := json.Marshal(suiteData{ImageRegistry: reg, Timeout: t})
+		payload, err := json.Marshal(suiteData{ImageRegistry: imageRegistry, Timeout: t})
 		Expect(err).NotTo(HaveOccurred())
 		return payload
 	},
@@ -172,17 +174,23 @@ func collectAndInstallRequires(ctx SpecContext) {
 		}
 	}
 
-	sort.Strings(ordered)
-
+	g, gctx := errgroup.WithContext(ctx)
 	for _, name := range ordered {
-		script := filepath.Join(compsDir, name+".sh")
-		By(fmt.Sprintf("installing component %q", name), func() {
-			cmd := exec.CommandContext(context.Background(), "bash", script)
+		name := name
+		g.Go(func() error {
+			defer GinkgoRecover()
+			script := filepath.Join(compsDir, name+".sh")
+			fmt.Fprintf(GinkgoWriter, "==> installing component %q\n", name)
+			cmd := exec.CommandContext(gctx, "bash", script)
 			cmd.Stdout = GinkgoWriter
 			cmd.Stderr = GinkgoWriter
-			Expect(cmd.Run()).To(Succeed(), "component script %s failed", script)
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("component script %s failed: %w", script, err)
+			}
+			return nil
 		})
 	}
+	Expect(g.Wait()).To(Succeed())
 }
 
 // scenarioMatchesFocus reports whether a scenario's folder matches any of the
