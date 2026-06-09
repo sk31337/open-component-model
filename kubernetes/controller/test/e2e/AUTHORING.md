@@ -127,13 +127,15 @@ Pick the location based on **who the scenario is for**:
 
 `<family>` groups related scenarios: `helm/`, `kustomize/`, `k8s-manifest/`,
 `applyset/`, `credentials/`. Within `helm/`, examples are split a second
-level by delivery tool: `helm/fluxcd/<scenario>/` for Flux-only and
-`helm/argocd/<scenario>/` for ArgoCD-only (each scenario uses one tool, not
-both — see DESIGN.md Q5b). `kustomize/` follows the same per-tool split:
-Flux variants live under `kustomize/fluxcd/<scenario>/` and ArgoCD variants
-under `kustomize/argocd/<scenario>/`. The runner walks both trees and stops
-descending at the first `e2e.yaml` it finds. Anything below that file is
-treated as scenario-private content.
+level by delivery tool (`helm/fluxcd/` or `helm/argocd/`) and then a third
+level by operator: `helm/fluxcd/kro/<scenario>/` for kro + Flux scenarios,
+`helm/fluxcd/crossplane/<scenario>/` for Crossplane + Flux scenarios, and
+`helm/argocd/kro/<scenario>/` for kro + ArgoCD scenarios (each scenario uses
+one tool, not both — see DESIGN.md Q5b). `kustomize/` follows the same
+per-tool split: Flux variants live under `kustomize/fluxcd/<scenario>/` and
+ArgoCD variants under `kustomize/argocd/<scenario>/`. The runner walks both
+trees and stops descending at the first `e2e.yaml` it finds. Anything below
+that file is treated as scenario-private content.
 
 If you cannot decide: ask yourself "would a user reading the examples folder
 benefit from seeing this?" If no, it belongs under `test/e2e/scenarios/`.
@@ -164,7 +166,7 @@ referenced from inside it.
 
 Two variables are exposed to your `e2e.yaml`:
 
-- `${SCENARIO_FOLDER}` — slash-joined family + folder, e.g. `helm/fluxcd/simple`.
+- `${SCENARIO_FOLDER}` — slash-joined family + folder, e.g. `helm/fluxcd/kro/simple`.
   Used for log lines and Ginkgo spec descriptions.
 - `${SCENARIO_SIMPLE_NAME}` — full path with `/` replaced by `-`, e.g.
   `helm-fluxcd-simple`. Safe to use in Kubernetes resource names. Use this
@@ -323,9 +325,9 @@ their folder:
 
 | Folder | Delivery tool | `requires:` | Key resources |
 |---|---|---|---|
-| `examples/helm/fluxcd/<name>/` | Flux | `kro`, `flux-source`, `flux-helm` | `Resource` → `OCIRepository` → `HelmRelease` |
+| `examples/helm/fluxcd/kro/<name>/` | kro + Flux | `kro`, `flux-source`, `flux-helm` | `Resource` → kro `RGD` → `OCIRepository` → `HelmRelease` |
 | `examples/helm/fluxcd/crossplane/<name>/` | Crossplane + Flux | `crossplane`, `flux-source`, `flux-helm` | OCM Deployer delivers XRD + Composition; Composition wires Flux chain |
-| `examples/helm/argocd/<name>/` | ArgoCD | `kro`, `argocd` | `Resource` → `Application` |
+| `examples/helm/argocd/kro/<name>/` | kro + ArgoCD | `kro`, `argocd` | `Resource` → kro `RGD` → `Application` |
 
 A Flux scenario waits for the Flux-managed deployment:
 
@@ -349,7 +351,7 @@ deploy:
 
 ArgoCD-managed releases use the suffix `-argocd` to avoid colliding with the
 Flux release name; the namespace is `default-argocd`. See
-[`examples/helm/fluxcd/simple/`](../../examples/helm/fluxcd/simple/) and [`examples/helm/argocd/simple/`](../../examples/helm/argocd/simple/) for the
+[`examples/helm/fluxcd/kro/simple/`](../../examples/helm/fluxcd/kro/simple/) and [`examples/helm/argocd/kro/simple/`](../../examples/helm/argocd/kro/simple/) for the
 canonical wiring of each tool.
 
 If you need a side-by-side parity demo (both tools deploying the same chart),
@@ -428,7 +430,7 @@ Each `kubectl:` value is passed directly to `kubectl` (split on whitespace).
 To force the snapshot on a green run locally, prepend `RUNNER_DEBUG=1`:
 
 ```sh
-RUNNER_DEBUG=1 task kubernetes/controller:test/e2e -- helm/fluxcd/simple
+RUNNER_DEBUG=1 task kubernetes/controller:test/e2e -- helm/fluxcd/kro/simple
 ```
 
 ---
@@ -437,7 +439,7 @@ RUNNER_DEBUG=1 task kubernetes/controller:test/e2e -- helm/fluxcd/simple
 
 ```sh
 # Teardown + fresh cluster + run one scenario (full clean slate)
-task kubernetes/controller:test/e2e/fresh -- helm/fluxcd/simple
+task kubernetes/controller:test/e2e/fresh -- helm/fluxcd/kro/simple
 
 # Provision a fresh kind cluster (components installed on demand by the runner)
 task kubernetes/controller:test/e2e/setup/local
@@ -449,7 +451,7 @@ task kubernetes/controller:test/e2e/setup/local -- --all-components
 task kubernetes/controller:test/e2e
 
 # Run one scenario (exact match — won't run nested-signed when you say nested)
-task kubernetes/controller:test/e2e -- helm/fluxcd/simple
+task kubernetes/controller:test/e2e -- helm/fluxcd/kro/simple
 
 # Tear down the cluster and registry when done
 task kubernetes/controller:test/e2e/teardown
@@ -479,6 +481,6 @@ See DESIGN.md §"Operator UX" for the full command table.
 
 - [`DESIGN.md`](./DESIGN.md) — full schema, locked decisions, migration plan.
 - [`hooks/registry.go`](./hooks/registry.go) — list of named hooks.
-- [`examples/helm/fluxcd/simple/`](../../examples/helm/fluxcd/simple/) — canonical Flux helm reference.
-- [`examples/helm/argocd/simple/`](../../examples/helm/argocd/simple/) — canonical ArgoCD helm reference.
+- [`examples/helm/fluxcd/kro/simple/`](../../examples/helm/fluxcd/kro/simple/) — canonical Flux helm reference.
+- [`examples/helm/argocd/kro/simple/`](../../examples/helm/argocd/kro/simple/) — canonical ArgoCD helm reference.
 - [`test/e2e/scenarios/applyset/pruning/`](./scenarios/applyset/pruning/) — canonical test-only reference.

@@ -112,21 +112,25 @@ kubernetes/controller/
     README.md
     helm/
       fluxcd/                                 # Flux HelmRelease delivery
-        simple/
-        simple-nested-status/
-        nested/
-        nested-signed/                        # ships ocm.software signing keypair
-        signing/                              # ships ocm.software signing keypair
-        configuration-localization/
+        kro/                                  # kro-based scenarios
+          simple/
+          simple-nested-status/
+          nested/
+          nested-signed/                      # ships ocm.software signing keypair
+          signing/                            # ships ocm.software signing keypair
+          configuration-localization/
         crossplane/                           # Crossplane Composition delivery
           simple/
+          fnc-kro-1/
+          fnc-kro-2/
       argocd/                                 # ArgoCD Application delivery
-        simple/
-        simple-nested-status/
-        nested/
-        nested-signed/                        # ships ocm.software signing keypair
-        signing/                              # ships ocm.software signing keypair
-        configuration-localization/
+        kro/                                  # kro-based scenarios
+          simple/
+          simple-nested-status/
+          nested/
+          nested-signed/                      # ships ocm.software signing keypair
+          signing/                            # ships ocm.software signing keypair
+          configuration-localization/
     kustomize/                                # split by delivery tool
       fluxcd/                                 # Flux Kustomization delivery
         simple/
@@ -176,7 +180,7 @@ references (bootstrap, component-constructor, rgd, instance, k8s-manifest, signi
 ### Naming
 
 Scenarios are identified by their **slash-separated path relative to their root**.
-`${SCENARIO_FOLDER}` exposes that name verbatim (`helm/fluxcd/simple`,
+`${SCENARIO_FOLDER}` exposes that name verbatim (`helm/fluxcd/kro/simple`,
 `credentials/basic-auth`); `${SCENARIO_SIMPLE_NAME}` is the dashed form
 (`helm-fluxcd-simple`, `credentials-basic-auth`) for embedding in Kubernetes
 resource names, where `/` is invalid.
@@ -337,9 +341,9 @@ references cause a load-time error.
 
 | Variable | Value | Example |
 |---|---|---|
-| `${SCENARIO_FOLDER}` | path relative to root, slash-separated | `helm/fluxcd/simple` |
+| `${SCENARIO_FOLDER}` | path relative to root, slash-separated | `helm/fluxcd/kro/simple` |
 | `${SCENARIO_SIMPLE_NAME}` | scenario folder with `/` → `-` (k8s-safe) | `helm-fluxcd-simple` |
-| `${SCENARIO_DIR}` | absolute path to scenario folder | `/.../examples/helm/fluxcd/simple` |
+| `${SCENARIO_DIR}` | absolute path to scenario folder | `/.../examples/helm/fluxcd/kro/simple` |
 | `${IMAGE_REGISTRY}` | full URL incl. scheme | `http://image-registry:5000` |
 | `${IMAGE_REGISTRY_HOST}` | host:port, no scheme | `image-registry:5000` |
 | `${PROTECTED_REGISTRY_BASIC_AUTH}` | basic-auth registry URL | `http://localhost:31002` |
@@ -492,7 +496,7 @@ graph TD
 
     D3 --> E1["shard 0: applyset/pruning"]
     D3 --> E2["shard 1: credentials/basic-auth"]
-    D3 --> E3["shard 2: helm/argocd/simple"]
+    D3 --> E3["shard 2: helm/argocd/kro/simple"]
     D3 --> E4["..."]
     D3 --> E5["shard N: kustomize/fluxcd/simple"]
 
@@ -518,13 +522,13 @@ Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
 | Command | Effect |
 |---|---|
 | `task test/e2e` | run all scenarios |
-| `task test/e2e -- helm/fluxcd/simple` | run one scenario |
+| `task test/e2e -- helm/fluxcd/kro/simple` | run one scenario |
 | `task test/e2e -- helm/fluxcd/` | run all six Flux helm scenarios |
 | `task test/e2e -- helm/argocd/` | run all six ArgoCD helm scenarios |
 | `task test/e2e -- helm/` | run all twelve helm scenarios |
 | `task test/e2e -- credentials/` | run both credentials scenarios |
 | `task test/e2e -- examples` | run only the `Context("examples")` block (18 demos) |
-| `task test/e2e/fresh -- helm/fluxcd/simple` | teardown + setup + run one scenario from scratch |
+| `task test/e2e/fresh -- helm/fluxcd/kro/simple` | teardown + setup + run one scenario from scratch |
 | `task test/e2e/setup/local` | provision kind cluster (components installed on demand by runner) |
 | `task test/e2e/setup/local -- --all-components` | provision kind cluster + pre-install all components |
 | `task test/e2e/teardown` | delete kind cluster and registry |
@@ -535,7 +539,7 @@ The retired `task test/e2e/example NAME=foo` is replaced by `task test/e2e -- fo
 ## Worked examples
 
 <details>
-<summary>1a. Flux-only helm demo (<code>examples/helm/fluxcd/simple/e2e.yaml</code>)</summary>
+<summary>1a. Flux-only helm demo (<code>examples/helm/fluxcd/kro/simple/e2e.yaml</code>)</summary>
 
 ```yaml
 requires: [kro, flux-source, flux-helm]
@@ -555,7 +559,7 @@ deploy:
 </details>
 
 <details>
-<summary>1b. ArgoCD-only helm demo (<code>examples/helm/argocd/simple/e2e.yaml</code>)</summary>
+<summary>1b. ArgoCD-only helm demo (<code>examples/helm/argocd/kro/simple/e2e.yaml</code>)</summary>
 
 ```yaml
 requires: [argocd]
@@ -690,7 +694,7 @@ deploy:
 | Q3 | Component provisioning | Opaque scripts under `setup/components/<name>.sh` | New components = drop a script; harness has no taxonomy to migrate. |
 | Q4 | Cluster lifecycle | Persistent local, ephemeral CI shards | Optimises both audiences: dev iteration speed, CI hermeticity. |
 | Q5 | Folder layout | Audience-split: `examples/` (demos) vs `test/e2e/scenarios/` (test-only), family-grouped | Honors the audience split; one home per scenario, no duplication. |
-| Q5b | Helm sub-grouping | Within `examples/helm/`, split by delivery tool: `helm/fluxcd/<name>/` and `helm/argocd/<name>/`. Each scenario uses **only** its named tool. | Removes the implicit "Flux + ArgoCD always shipped together" coupling; gives readers an unambiguous reference for each tool; the runner can skip the unused stack via `requires:`. |
+| Q5b | Helm sub-grouping | Within `examples/helm/`, split by delivery tool (`helm/fluxcd/`, `helm/argocd/`) and then by operator (`kro/`, `crossplane/`). Each scenario uses **only** its named tool and operator. | Removes the implicit "Flux + ArgoCD always shipped together" coupling; gives readers an unambiguous reference for each tool/operator combination; the runner can skip the unused stack via `requires:`. |
 | Q6 | Interpreter | Generic runner + named Go hooks (chainable arrays) | Imperative escape hatch without per-scenario Go file. |
 | Q7a | `requires:` shape | Opaque list, validated against script existence | Avoids schema lock-in as the component taxonomy evolves. |
 | Q7b | `prepare:` shape | Structured `components: []` block | The full preparation matrix is small and finite; structure beats hooks. |

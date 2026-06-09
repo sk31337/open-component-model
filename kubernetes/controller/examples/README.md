@@ -23,19 +23,23 @@ Examples are grouped by delivery family:
 examples/
 ├── helm/                    # Helm chart delivery, split by delivery tool
 │   ├── fluxcd/              # Flux HelmRelease
-│   │   ├── simple/
-│   │   ├── signing/
-│   │   ├── nested/
-│   │   ├── nested-signed/
-│   │   ├── simple-nested-status/
-│   │   └── configuration-localization/
+│   │   ├── kro/             # kro-based scenarios
+│   │   │   ├── simple/
+│   │   │   ├── signing/
+│   │   │   ├── nested/
+│   │   │   ├── nested-signed/
+│   │   │   ├── simple-nested-status/
+│   │   │   └── configuration-localization/
+│   │   └── crossplane/      # Crossplane Composition delivery
+│   │       └── simple/
 │   └── argocd/              # ArgoCD Application
-│       ├── simple/
-│       ├── signing/
-│       ├── nested/
-│       ├── nested-signed/
-│       ├── simple-nested-status/
-│       └── configuration-localization/
+│       └── kro/             # kro-based scenarios
+│           ├── simple/
+│           ├── signing/
+│           ├── nested/
+│           ├── nested-signed/
+│           ├── simple-nested-status/
+│           └── configuration-localization/
 ├── kustomize/               # Kustomize delivery, split by delivery tool
 │   ├── fluxcd/              # Flux Kustomization
 │   │   ├── simple/
@@ -46,11 +50,6 @@ examples/
 └── k8s-manifest/            # raw manifest delivery
     └── simple/
 ```
-
-> **Migration note.** The grouped layout above is the target state described in
-> `DESIGN.md`. Some folders may still sit flat at the top level during the
-> migration; treat the family grouping as the authoritative shape going
-> forward.
 
 ---
 
@@ -64,27 +63,35 @@ two parallel variants — one under `helm/fluxcd/` using Flux's `OCIRepository` 
 `HelmRelease`, and one under `helm/argocd/` using an ArgoCD `Application`.
 Pick the variant that matches your delivery tool.
 
-#### `helm/fluxcd/` — Flux HelmRelease
+#### `helm/fluxcd/kro/` — Flux HelmRelease (kro)
 
-OCM resource → `OCIRepository` → `HelmRelease`.
+OCM resource → kro `ResourceGraphDefinition` → `OCIRepository` → `HelmRelease`.
 
 | Folder | Shows |
 |---|---|
-| `simple/` | Smallest end-to-end: chart from OCM, Flux release. Start here. |
+| `simple/` | Smallest end-to-end: chart from OCM, kro + Flux release. Start here. |
 | `signing/` | Signed component; controller verifies the signature before resource access. |
 | `nested/` | Component reference chain — chart resource lives in a referenced component. |
 | `nested-signed/` | Signed nested component; signature traverses the reference. |
 | `simple-nested-status/` | Same as `simple/` but uses the nested `oci:` status field shape (`additional.oci.{registry,repository,tag,digest}`) instead of flat fields. |
 | `configuration-localization/` | OCM configuration + localization rules rewriting image references and env vars at delivery time, applied via `HelmRelease.spec.values`. |
 
-#### `helm/argocd/` — ArgoCD Application
+#### `helm/fluxcd/crossplane/` — Flux HelmRelease (Crossplane)
 
-OCM resource → ArgoCD `Application` (Helm OCI source) → release in
+OCM Deployer → Crossplane XRD + Composition → `OCIRepository` → `HelmRelease`.
+
+| Folder | Shows |
+|---|---|
+| `simple/` | Crossplane Composition wiring the Flux delivery chain; no provider-kubernetes Object wrappers. |
+
+#### `helm/argocd/kro/` — ArgoCD Application (kro)
+
+OCM resource → kro `ResourceGraphDefinition` → ArgoCD `Application` → release in
 `default-argocd`.
 
 | Folder | Shows |
 |---|---|
-| `simple/` | Smallest end-to-end: chart from OCM, ArgoCD release. Start here. |
+| `simple/` | Smallest end-to-end: chart from OCM, kro + ArgoCD release. Start here. |
 | `signing/` | Signed component; controller verifies the signature before resource access. |
 | `nested/` | Component reference chain — chart resource lives in a referenced component. |
 | `nested-signed/` | Signed nested component; signature traverses the reference. |
@@ -137,7 +144,7 @@ locally:
 task kubernetes/controller:test/e2e
 
 # A single example (regex over family/tool/scenario)
-task kubernetes/controller:test/e2e -- --focus="helm/fluxcd/simple"
+task kubernetes/controller:test/e2e -- --focus="helm/fluxcd/kro/simple"
 
 # A whole family
 task kubernetes/controller:test/e2e -- --focus="^helm/"
@@ -155,9 +162,11 @@ full command surface.
 
 1. Decide on the family (`helm/`, `kustomize/`, `k8s-manifest/`) — or propose a
    new one in your PR description if none fit. For `helm/` and `kustomize/`,
-   also pick the delivery tool sub-folder (`fluxcd/` or `argocd/`). Add the
-   scenario under both if it should exist for each delivery tool.
-2. Create `examples/<family>[/<tool>]/<scenario>/` with at minimum:
+   also pick the delivery tool sub-folder (`fluxcd/` or `argocd/`). Within
+   `helm/fluxcd/` and `helm/argocd/`, also pick the operator sub-folder (`kro/`
+   for kro-based scenarios, `crossplane/` for Crossplane-based). Add the
+   scenario under both delivery tool variants if it should exist for each tool.
+2. Create `examples/<family>[/<tool>][/<operator>]/<scenario>/` with at minimum:
    - `component-constructor.yaml`
    - `bootstrap.yaml`
    - `e2e.yaml` (declares how the e2e runner deploys and asserts)
