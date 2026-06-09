@@ -1,0 +1,30 @@
+requires:
+  - crossplane
+  - flux-source
+  - flux-helm
+
+deploy:
+  - apply: bootstrap.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Established=true xrd/helmfluxcdcrossplanefnckro2s.examples.ocm.software"
+  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-crossplane-fnc-kro-2-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-fluxcd-crossplane-fnc-kro-2-podinfo"
+debug:
+  - kubectl: get pods -n flux-system -o wide
+    label: flux-pods
+  - kubectl: get events -n flux-system --sort-by=.lastTimestamp
+    label: flux-events
+  - kubectl: get helmrelease -A -o wide
+    label: helmreleases
+  - kubectl: get ocirepository -A -o wide
+    label: ocirepositories
+  - kubectl: get xrd -A -o wide
+    label: xrds
+  - kubectl: get composition -A -o wide
+    label: compositions
+  - kubectl: get helmfluxcdcrossplanefnckro2s -A -o wide
+    label: instances
+  - kubectl: get resource.delivery.ocm.software -A -o wide
+    label: ocm-resources
