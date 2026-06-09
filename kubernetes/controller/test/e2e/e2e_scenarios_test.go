@@ -9,6 +9,8 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+// Ginkgo spec tree — Describe("scenarios", ...), discoverAndLoad, projectDir
+
 // projectDir is the repository's controller root, used to resolve the two
 // scenario discovery roots. It mirrors the existing examplesDir lookup in
 // e2e_suite_test.go so callers control it via EXAMPLES_DIR/PROJECT_DIR.

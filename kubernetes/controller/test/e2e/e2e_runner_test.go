@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+// Unit tests for the execution engine functions (pure Go testing package, no Ginkgo)
+
 func TestSubstituteVars(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

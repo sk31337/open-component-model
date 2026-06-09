@@ -54,12 +54,18 @@ func DeployResource(ctx context.Context, manifestFilePath string) error {
 		return err
 	}
 	DeferCleanup(func(ctx SpecContext) error {
-		cmd = exec.CommandContext(ctx, "kubectl", "delete", "--ignore-not-found", "-f", manifestFilePath)
+		cmd = exec.CommandContext(ctx, "kubectl", "delete", "--ignore-not-found", "--wait=true", "-f", manifestFilePath)
 		_, err := Run(cmd)
 		if err != nil {
 			GinkgoLogr.V(3).Info("WARNING: failed to delete resource", "manifest", manifestFilePath)
+			return err
 		}
-
+		cmd = exec.CommandContext(ctx, "kubectl", "wait", "--for=delete", "--timeout=5m", "-f", manifestFilePath)
+		_, err = Run(cmd)
+		if err != nil {
+			GinkgoLogr.V(3).Info("WARNING: failed waiting for delete resource", "manifest", manifestFilePath)
+			return err
+		}
 		return err
 	})
 

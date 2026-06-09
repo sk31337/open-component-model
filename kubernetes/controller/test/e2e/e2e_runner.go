@@ -22,6 +22,8 @@ import (
 	"ocm.software/open-component-model/kubernetes/controller/test/utils"
 )
 
+// Scenario execution engine — ScenarioConfig, runScenario, walkScenarios, loadScenario, etc.
+
 // e2eYamlFile is the per-scenario contract filename. Its presence in a
 // directory marks that directory as a scenario root; the walker stops
 // descending past it.
