@@ -119,10 +119,14 @@ kubernetes/controller/
           nested-signed/                      # ships ocm.software signing keypair
           signing/                            # ships ocm.software signing keypair
           configuration-localization/
-        crossplane/                           # Crossplane Composition delivery
+        crossplane/                           # Crossplane delivery
           simple/
-          fnc-kro-1/
-          fnc-kro-2/
+          signing/
+          nested/
+          nested-signed/
+          simple-nested-status/
+          configuration-localization/
+          simple-fnc-kro/                     # function-kro variant
       argocd/                                 # ArgoCD Application delivery
         kro/                                  # kro-based scenarios
           simple/
@@ -130,6 +134,13 @@ kubernetes/controller/
           nested/
           nested-signed/                      # ships ocm.software signing keypair
           signing/                            # ships ocm.software signing keypair
+          configuration-localization/
+        crossplane/                           # Crossplane delivery
+          simple/
+          signing/
+          nested/
+          nested-signed/
+          simple-nested-status/
           configuration-localization/
     kustomize/                                # split by delivery tool
       fluxcd/                                 # Flux Kustomization delivery

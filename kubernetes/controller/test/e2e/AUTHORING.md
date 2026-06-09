@@ -129,9 +129,10 @@ Pick the location based on **who the scenario is for**:
 `applyset/`, `credentials/`. Within `helm/`, examples are split a second
 level by delivery tool (`helm/fluxcd/` or `helm/argocd/`) and then a third
 level by operator: `helm/fluxcd/kro/<scenario>/` for kro + Flux scenarios,
-`helm/fluxcd/crossplane/<scenario>/` for Crossplane + Flux scenarios, and
-`helm/argocd/kro/<scenario>/` for kro + ArgoCD scenarios (each scenario uses
-one tool, not both — see DESIGN.md Q5b). `kustomize/` follows the same
+`helm/fluxcd/crossplane/<scenario>/` for Crossplane + Flux scenarios (including
+the `simple-fnc-kro/` function-kro variant), and `helm/argocd/kro/<scenario>/`
+and `helm/argocd/crossplane/<scenario>/` for the ArgoCD equivalents
+(each scenario uses one tool, not both — see DESIGN.md Q5b). `kustomize/` follows the same
 per-tool split: Flux variants live under `kustomize/fluxcd/<scenario>/` and
 ArgoCD variants under `kustomize/argocd/<scenario>/`. The runner walks both
 trees and stops descending at the first `e2e.yaml` it finds. Anything below
@@ -327,7 +328,9 @@ their folder:
 |---|---|---|---|
 | `examples/helm/fluxcd/kro/<name>/` | kro + Flux | `kro`, `flux-source`, `flux-helm` | `Resource` → kro `RGD` → `OCIRepository` → `HelmRelease` |
 | `examples/helm/fluxcd/crossplane/<name>/` | Crossplane + Flux | `crossplane`, `flux-source`, `flux-helm` | OCM Deployer delivers XRD + Composition; Composition wires Flux chain |
+| `examples/helm/fluxcd/crossplane/simple-fnc-kro/` | Crossplane function-kro + Flux | `crossplane`, `function-kro`, `flux-source`, `flux-helm` | OCM Deployer delivers function-kro ResourceGraph; pipeline wires Flux chain |
 | `examples/helm/argocd/kro/<name>/` | kro + ArgoCD | `kro`, `argocd` | `Resource` → kro `RGD` → `Application` |
+| `examples/helm/argocd/crossplane/<name>/` | Crossplane + ArgoCD | `crossplane`, `argocd` | OCM Deployer delivers XRD + Composition; Composition wires ArgoCD `Application` |
 
 A Flux scenario waits for the Flux-managed deployment:
 
