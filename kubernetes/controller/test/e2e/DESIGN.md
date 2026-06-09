@@ -6,7 +6,7 @@ It is the source of truth for the harness; update it when the design changes.
 
 ## Status
 
-- **State:** implemented. Stages 1–5 are complete; the sharded CI workflow is active.
+- **State:** implemented. All stages are complete; the sharded CI workflow is active.
 - **Replaces:** the monolithic `e2e_examples_test.go` / `e2e_credentials_test.go` /
   `e2e_applyset_test.go` files plus the single `hacks/setup.sh` script.
 - **Supersedes:** `task test/e2e/example NAME=...` (removed).
@@ -118,6 +118,8 @@ kubernetes/controller/
         nested-signed/                        # ships ocm.software signing keypair
         signing/                              # ships ocm.software signing keypair
         configuration-localization/
+        crossplane/                           # Crossplane Composition delivery
+          simple/
       argocd/                                 # ArgoCD Application delivery
         simple/
         simple-nested-status/
@@ -136,8 +138,10 @@ kubernetes/controller/
       simple/
   test/e2e/
     DESIGN.md                                 # this file
-    e2e_suite_test.go                         # BeforeSuite, env parsing, hook validation
-    e2e_runner.go                             # walker, registerScenarios, runScenario
+    e2e_suite_test.go                         # SynchronizedBeforeSuite, component install, hook validation
+    e2e_runner.go                             # ScenarioConfig, walkScenarios, loadScenario, runScenario
+    e2e_runner_test.go                        # unit tests for runner functions (no Ginkgo)
+    e2e_scenarios_test.go                     # Ginkgo spec tree: discoverAndLoad, Describe("scenarios")
     cmd/
       shard/main.go                           # CI shard helper (Q14)
     setup/
@@ -145,6 +149,7 @@ kubernetes/controller/
       components/                             # one script per component (Q3, Q7a)
         cluster.sh                            # always invoked
         kro.sh
+        crossplane.sh
         flux-source.sh
         flux-helm.sh
         flux-kustomize.sh
@@ -233,7 +238,7 @@ requires:
 # Each entry runs the equivalent of the current PrepareOCMComponent helper.
 prepare:
   components:
-    - constructor: component-constructor.yaml      # optional, scenario-relative path
+    - constructor: component-constructor.yaml      # optional; auto-detected if file exists in scenario dir
       signingKey: ocm.software                     # optional; private key path
       ocmConfig: .ocmconfig                        # optional; --config for `ocm transfer`
       copyResources: true                          # optional; adds --copy-resources to transfer
@@ -375,10 +380,11 @@ sequenceDiagram
 
 ## The runner
 
-[`runner_test.go`](./runner_test.go) exposes a single entry point `runScenario(cfg)`. The Ginkgo suite
-calls it once per discovered scenario. See
-[`e2e_scenarios_test.go`](./e2e_scenarios_test.go) and
-[`runner_test.go`](./runner_test.go) for the full implementation.
+[`e2e_runner.go`](./e2e_runner.go) is the execution engine: `ScenarioConfig`, `walkScenarios`,
+`loadScenario`, `runScenario`, and all supporting helpers. [`e2e_runner_test.go`](./e2e_runner_test.go)
+covers these with pure Go unit tests (no Ginkgo). The Ginkgo spec tree lives in
+[`e2e_scenarios_test.go`](./e2e_scenarios_test.go), which calls `discoverAndLoad` at package-init
+time and registers one `It()` per discovered scenario via `runScenario`.
 
 ### Debug commands
 
@@ -401,7 +407,7 @@ force diagnostics on success.
 
 If a scenario omits `debug:`, a built-in default set runs (controller
 pods/logs, kro pods/events, RGD conditions) — see `defaultDebugCommands` in
-[`runner_test.go`](./runner_test.go). The detection helper is `isWorkflowDebug`
+[`e2e_runner.go`](./e2e_runner.go). The detection helper is `isWorkflowDebug`
 in the same file.
 
 ### Hook registry
@@ -488,7 +494,7 @@ graph TD
     D3 --> E2["shard 1: credentials/basic-auth"]
     D3 --> E3["shard 2: helm/argocd/simple"]
     D3 --> E4["..."]
-    D3 --> E5["shard 19: kustomize/fluxcd/simple"]
+    D3 --> E5["shard N: kustomize/fluxcd/simple"]
 
     subgraph "each shard (parallel)"
         S1["kind create cluster"] --> S2["requires: install components"]
@@ -511,13 +517,13 @@ Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
 
 | Command | Effect |
 |---|---|
-| `task test/e2e` | run all 20 scenarios |
+| `task test/e2e` | run all scenarios |
 | `task test/e2e -- helm/fluxcd/simple` | run one scenario |
 | `task test/e2e -- helm/fluxcd/` | run all six Flux helm scenarios |
 | `task test/e2e -- helm/argocd/` | run all six ArgoCD helm scenarios |
 | `task test/e2e -- helm/` | run all twelve helm scenarios |
 | `task test/e2e -- credentials/` | run both credentials scenarios |
-| `task test/e2e -- examples` | run only the `Context("examples")` block (17 demos) |
+| `task test/e2e -- examples` | run only the `Context("examples")` block (18 demos) |
 | `task test/e2e/fresh -- helm/fluxcd/simple` | teardown + setup + run one scenario from scratch |
 | `task test/e2e/setup/local` | provision kind cluster (components installed on demand by runner) |
 | `task test/e2e/setup/local -- --all-components` | provision kind cluster + pre-install all components |
@@ -534,30 +540,17 @@ The retired `task test/e2e/example NAME=foo` is replaced by `task test/e2e -- fo
 ```yaml
 requires: [kro, flux-source, flux-helm]
 
-prepare:
-  components:
-    - constructor: component-constructor.yaml
-
 deploy:
   - apply: bootstrap.yaml
-  - waitFor:
-      kind: rgd
-      name: ${SCENARIO_SIMPLE_NAME}
-      conditions: [create, condition=Ready=true]
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/${SCENARIO_SIMPLE_NAME}"
   - apply: instance.yaml
-
-assert:
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      waitFor: [create, condition=Available]
-      pods:
-        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
-        condition: Ready=true
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo"
 ```
 
-The `rgd.yaml` declares only the OCM `Resource` → `OCIRepository` → `HelmRelease`
-chain. No ArgoCD `Application`. `argocd` is *not* in `requires:`.
+`component-constructor.yaml` is auto-detected. `argocd` is *not* in `requires:`.
 
 </details>
 
@@ -565,41 +558,42 @@ chain. No ArgoCD `Application`. `argocd` is *not* in `requires:`.
 <summary>1b. ArgoCD-only helm demo (<code>examples/helm/argocd/simple/e2e.yaml</code>)</summary>
 
 ```yaml
-requires: [kro, argocd]
-
-prepare:
-  components:
-    - constructor: component-constructor.yaml
+requires: [argocd]
 
 deploy:
   - apply: bootstrap.yaml
-  - waitFor:
-      kind: rgd
-      name: ${SCENARIO_SIMPLE_NAME}
-      conditions: [create, condition=Ready=true]
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/${SCENARIO_SIMPLE_NAME}"
   - apply: instance.yaml
-
-assert:
-  resources:
-    - kind: applications.argoproj.io
-      name: ${SCENARIO_SIMPLE_NAME}
-      namespace: argocd
-      waitFor: [create]
-      jsonPath:
-        '{.status.sync.status}': Synced
-        '{.status.health.status}': Healthy
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-argocd-podinfo
-      namespace: default-argocd
-      waitFor: [create, condition=Available]
-      pods:
-        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-argocd-podinfo
-        condition: Ready=true
+    waitFor:
+      - kubectl: "--for=create --for=jsonpath={.status.sync.status}=Synced --for=jsonpath={.status.health.status}=Healthy applications.argoproj.io/${SCENARIO_SIMPLE_NAME} -n argocd"
+      - kubectl: "--for=create --for=condition=Available deployment.apps/${SCENARIO_SIMPLE_NAME}-argocd-podinfo -n default-argocd"
 ```
 
-The `rgd.yaml` declares only the OCM `Resource` chain feeding an ArgoCD
-`Application`. No `OCIRepository` or `HelmRelease`. `flux-source`/`flux-helm`
-are *not* in `requires:`.
+No `OCIRepository` or `HelmRelease`. `flux-source`/`flux-helm` are *not* in `requires:`.
+
+</details>
+
+<details>
+<summary>1c. Crossplane Composition demo (<code>examples/helm/fluxcd/crossplane/simple/e2e.yaml</code>)</summary>
+
+```yaml
+requires:
+  - crossplane
+  - flux-source
+  - flux-helm
+
+deploy:
+  - apply: bootstrap.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Established=true xrd/helmfluxcdsimples.examples.ocm.software"
+  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-crossplane-simple-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-fluxcd-crossplane-simple-podinfo"
+```
+
+The OCM Deployer delivers the XRD and Composition; the first `waitFor` gates on the XRD becoming Established before the instance is applied.
 
 </details>
 
@@ -639,32 +633,46 @@ postAssertHooks:
 <summary>3. Protected-registry credentials (<code>test/e2e/scenarios/credentials/basic-auth/e2e.yaml</code>)</summary>
 
 ```yaml
-timeout: 5m
-
 requires: [protected-registry-basic-auth, kro, flux-source, flux-helm]
 
 prepare:
   components:
-    - constructor: component-constructor.yaml
-      ocmConfig: .ocmconfig
+    - ocmConfig: .ocmconfig
       registry: ${PROTECTED_REGISTRY_BASIC_AUTH}
 
 deploy:
   - apply: bootstrap.yaml
-  - waitFor:
-      kind: rgd
-      name: basic-auth
-      conditions: [create, condition=Ready=true]
-  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/basic-auth -n default"
+  - apply: bootstrap-instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/basic-auth-podinfo -n default"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=basic-auth-podinfo -n default"
+```
 
-assert:
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      waitFor: [create, condition=Available]
-      pods:
-        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
-        condition: Ready=true
+`constructor:` is omitted — auto-detected from `component-constructor.yaml`.
+
+</details>
+
+<details>
+<summary>4. Docker-config-json registry credentials (<code>test/e2e/scenarios/credentials/docker-config-json/e2e.yaml</code>)</summary>
+
+```yaml
+requires: [protected-registry-docker-config-json, kro, flux-source, flux-helm]
+
+prepare:
+  components:
+    - ocmConfig: .ocmconfig
+      registry: ${PROTECTED_REGISTRY_DOCKER_CONFIG_JSON}
+
+deploy:
+  - apply: bootstrap.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/docker-config-json -n default"
+  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/docker-config-json-podinfo -n default"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=docker-config-json-podinfo -n default"
 ```
 
 </details>
@@ -705,33 +713,29 @@ assert:
 
 ## Migration plan 
 
-<summary>Migration plan (Stages 1–6)</summary>
+<summary>Migration plan (Stages 1–6, all complete)</summary>
 
-Implementation lands in stages so the suite stays green throughout.
+All stages have landed. The legacy test files (`e2e_examples_test.go`,
+`e2e_credentials_test.go`, `e2e_applyset_test.go`) and the monolithic
+`hacks/setup.sh` have been removed. The record below is preserved for historical
+context only.
 
-### Stage 1 — runner skeleton (no scenarios moved yet)
+### Stage 1 — runner skeleton
 
 - Land `e2e_runner.go`, `walkScenarios`, `mustLoadE2EYaml`, the variable substitution
   helper, and the `runScenario` orchestration loop.
 - Land `test/e2e/hooks/registry.go` with an empty `Registry` map.
 - Land `cmd/shard` (CI shard helper).
-- Refactor `e2e_suite_test.go` to call the new `BeforeSuite` (env parsing, hook
-  validation pass — vacuously passes with no scenarios yet).
-- The legacy `e2e_examples_test.go` / `e2e_credentials_test.go` /
-  `e2e_applyset_test.go` files continue to run against the existing flat layout.
-  Both code paths coexist in this stage.
+- Refactor `e2e_suite_test.go` to call the new `BeforeSuite`.
 
 ### Stage 2 — split setup into per-component scripts
 
 - Decompose `hacks/setup.sh` into `setup/local.sh` + `setup/components/*.sh`.
-- `setup/local.sh` invokes every component script in order (matches today's behavior).
 - Each component script must be idempotent.
-- No test changes; existing tests still pass.
 
 ### Stage 3 — migrate examples scenarios
 
 - Move each user-facing example into the family-grouped layout under `examples/`.
-- Each split scenario's `rgd.yaml` declares only the resources for *its* delivery tool.
 - Author `e2e.yaml` for each migrated scenario.
 - Delete the legacy `e2e_examples_test.go`.
 
@@ -752,6 +756,6 @@ Implementation lands in stages so the suite stays green throughout.
 - Update README and any docs that linked `examples/<name>/` to the new paths.
 - Remove `hacks/` if `setup.sh` is the only thing left.
 
-Each stage is independently mergeable and leaves the suite passing.
+Each stage was independently mergeable and left the suite passing.
 
 </details>

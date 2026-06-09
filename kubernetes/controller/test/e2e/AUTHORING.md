@@ -182,7 +182,7 @@ against the fixed list. Unknown variables are a hard error at parse time.
 
 ## Minimal `e2e.yaml`
 
-Smallest viable scenario — bootstrap a kro RGD, wait for a deployment:
+Smallest viable scenario — bootstrap OCM resources, wait for a deployment:
 
 ```yaml
 requires:
@@ -199,8 +199,10 @@ deploy:
       - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-simple-podinfo"
 ```
 
-That's the whole file. The runner handles OCM component transfer (defaults to
-`component-constructor.yaml`), namespace scoping, log dumping on failure, and cleanup.
+That's the whole file. When `component-constructor.yaml` exists in the scenario
+folder, the runner transfers the OCM component automatically — no `prepare:` block
+required. `constructor:` inside `prepare.components[]` is also optional for the
+same reason.
 
 
 <details>
@@ -286,18 +288,28 @@ postAssertHooks:
   - verifySignedComponent
 ```
 
-Each name must exist in [`kubernetes/controller/test/e2e/hooks/registry.go`](./hooks/registry.go).
-Hooks run in array order. The six phases — `preDeployHooks`, `postDeployHooks`,
-`preAssertHooks`, `postAssertHooks`, `preCleanupHooks`, `postCleanupHooks` — are
-documented in DESIGN.md.
+If you need to write a hook, the hook function is registered in [`kubernetes/controller/test/e2e/hooks/registry.go`](./hooks/registry.go).
 
-A hook is a Go function:
+A hook is a Go function with the signature:
 
 ```go
-func createBasicAuthSecret(ctx context.Context, s *hooks.Scenario) error {
+func myHook(ctx context.Context, s *hooks.Scenario) error {
     // s.Folder, s.SimpleName, s.Dir
 }
 ```
+
+Add it to the `Registry` map in `hooks/registry.go`:
+
+```go
+var Registry = map[string]HookFunc{
+    "myHook": myHook,
+    // ...
+}
+```
+
+Hooks run in array order. The six phases — `preDeployHooks`, `postDeployHooks`,
+`preAssertHooks`, `postAssertHooks`, `preCleanupHooks`, `postCleanupHooks` — are
+documented in DESIGN.md.
 
 Adding a hook is a code change. Reviewers will push back on hooks that
 duplicate something `assert.resources` or `assert.fieldEquals` could express.
@@ -309,9 +321,10 @@ duplicate something `assert.resources` or `assert.fieldEquals` could express.
 Helm scenarios pick exactly one delivery tool — Flux or ArgoCD — based on
 their folder:
 
-| Folder | Delivery tool | `requires:` | rgd.yaml resources |
+| Folder | Delivery tool | `requires:` | Key resources |
 |---|---|---|---|
 | `examples/helm/fluxcd/<name>/` | Flux | `kro`, `flux-source`, `flux-helm` | `Resource` → `OCIRepository` → `HelmRelease` |
+| `examples/helm/fluxcd/crossplane/<name>/` | Crossplane + Flux | `crossplane`, `flux-source`, `flux-helm` | OCM Deployer delivers XRD + Composition; Composition wires Flux chain |
 | `examples/helm/argocd/<name>/` | ArgoCD | `kro`, `argocd` | `Resource` → `Application` |
 
 A Flux scenario waits for the Flux-managed deployment:
