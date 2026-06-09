@@ -140,3 +140,110 @@ subjects:
     name: ocm-k8s-toolkit-controller-manager
     namespace: ocm-k8s-toolkit-system
 EOF
+
+FUNCTION_KRO_VERSION="${FUNCTION_KRO_VERSION:-v0.2.1}"
+FUNCTION_AUTO_READY_VERSION="${FUNCTION_AUTO_READY_VERSION:-v0.6.3}"
+
+# Install function-kro (CEL-based resource graph composition).
+if kubectl get function crossplane-contrib-function-kro >/dev/null 2>&1; then
+  echo "function-kro already installed, skipping"
+else
+  kubectl apply -f - <<EOF
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: crossplane-contrib-function-kro
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-kro:${FUNCTION_KRO_VERSION}
+EOF
+
+  kubectl wait function/crossplane-contrib-function-kro \
+    --for=condition=Installed=True \
+    --timeout=120s
+  kubectl wait function/crossplane-contrib-function-kro \
+    --for=condition=Healthy=True \
+    --timeout=120s
+fi
+
+# Install function-auto-ready (marks XRs ready when all composed resources are ready).
+if kubectl get function crossplane-contrib-function-auto-ready >/dev/null 2>&1; then
+  echo "function-auto-ready already installed, skipping"
+else
+  kubectl apply -f - <<EOF
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: crossplane-contrib-function-auto-ready
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-auto-ready:${FUNCTION_AUTO_READY_VERSION}
+EOF
+
+  kubectl wait function/crossplane-contrib-function-auto-ready \
+    --for=condition=Installed=True \
+    --timeout=120s
+  kubectl wait function/crossplane-contrib-function-auto-ready \
+    --for=condition=Healthy=True \
+    --timeout=120s
+fi
+
+# Grant the Crossplane SA permission to manage OCM and Flux resources directly
+# (needed when function-kro creates composed resources without provider-kubernetes Objects).
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-ocm-flux-composed
+rules:
+  - apiGroups:
+      - delivery.ocm.software
+    resources:
+      - resources
+      - resources/status
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - source.toolkit.fluxcd.io
+    resources:
+      - ocirepositories
+      - ocirepositories/status
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - helm.toolkit.fluxcd.io
+    resources:
+      - helmreleases
+      - helmreleases/status
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-ocm-flux-composed
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crossplane-ocm-flux-composed
+subjects:
+  - kind: ServiceAccount
+    name: crossplane
+    namespace: crossplane-system
+EOF
