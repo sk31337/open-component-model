@@ -6,11 +6,11 @@ requires:
 deploy:
   - apply: bootstrap.yaml
     waitFor:
-      - kubectl: "--for=create --for=condition=Established=true xrd/helmfluxcdcrossplanefnckro2s.examples.ocm.software"
+      - kubectl: "--for=create --for=condition=Established=true xrd/helmfluxcdcrossplanenestedresources.examples.ocm.software"
   - apply: instance.yaml
     waitFor:
-      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-crossplane-fnc-kro-2-podinfo"
-      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-fluxcd-crossplane-fnc-kro-2-podinfo"
+      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-crossplane-nested-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-fluxcd-crossplane-nested-podinfo"
 debug:
   - kubectl: get pods -n flux-system -o wide
     label: flux-pods
@@ -24,7 +24,7 @@ debug:
     label: xrds
   - kubectl: get composition -A -o wide
     label: compositions
-  - kubectl: get helmfluxcdcrossplanefnckro2s -A -o wide
+  - kubectl: get helmfluxcdcrossplanenestedresources -A -o wide
     label: instances
-  - kubectl: get resource.delivery.ocm.software -A -o wide
-    label: ocm-resources
+  - kubectl: get object.kubernetes.crossplane.io -A -o wide
+    label: objects

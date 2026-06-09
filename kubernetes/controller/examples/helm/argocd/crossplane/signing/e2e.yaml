@@ -1,0 +1,34 @@
+requires:
+  - crossplane
+  - argocd
+
+prepare:
+  components:
+    - signingKey: ocm.software
+
+deploy:
+  - apply: bootstrap.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Established=true xrd/helmargocdcrossplanesignings.examples.ocm.software"
+  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=jsonpath={.status.sync.status}=Synced --for=jsonpath={.status.health.status}=Healthy applications.argoproj.io/helm-argocd-crossplane-signing -n argocd"
+      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-argocd-crossplane-signing-podinfo -n default-argocd"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-argocd-crossplane-signing-podinfo -n default-argocd"
+debug:
+  - kubectl: get pods -n argocd -o wide
+    label: argocd-pods
+  - kubectl: get events -n argocd --sort-by=.lastTimestamp
+    label: argocd-events
+  - kubectl: get applications.argoproj.io -A -o wide
+    label: argocd-apps
+  - kubectl: logs -n argocd -l app.kubernetes.io/name=argocd-application-controller --tail=50
+    label: argocd-controller-logs
+  - kubectl: get xrd -A -o wide
+    label: xrds
+  - kubectl: get composition -A -o wide
+    label: compositions
+  - kubectl: get helmargocdcrossplanesignings -A -o wide
+    label: instances
+  - kubectl: get object.kubernetes.crossplane.io -A -o wide
+    label: objects

@@ -30,10 +30,23 @@ examples/
 │   │   │   ├── nested-signed/
 │   │   │   ├── simple-nested-status/
 │   │   │   └── configuration-localization/
-│   │   └── crossplane/      # Crossplane Composition delivery
-│   │       └── simple/
+│   │   └── crossplane/          # Crossplane delivery
+│   │       ├── simple/
+│   │       ├── signing/
+│   │       ├── nested/
+│   │       ├── nested-signed/
+│   │       ├── simple-nested-status/
+│   │       ├── configuration-localization/
+│   │       └── simple-fnc-kro/  # function-kro variant
 │   └── argocd/              # ArgoCD Application
-│       └── kro/             # kro-based scenarios
+│       ├── kro/             # kro-based scenarios
+│       │   ├── simple/
+│       │   ├── signing/
+│       │   ├── nested/
+│       │   ├── nested-signed/
+│       │   ├── simple-nested-status/
+│       │   └── configuration-localization/
+│       └── crossplane/          # Crossplane delivery
 │           ├── simple/
 │           ├── signing/
 │           ├── nested/
@@ -78,11 +91,17 @@ OCM resource → kro `ResourceGraphDefinition` → `OCIRepository` → `HelmRele
 
 #### `helm/fluxcd/crossplane/` — Flux HelmRelease (Crossplane)
 
-OCM Deployer → Crossplane XRD + Composition → `OCIRepository` → `HelmRelease`.
+OCM Deployer → Crossplane XRD + Composition (or function-kro `ResourceGraph`) → `OCIRepository` → `HelmRelease`.
 
 | Folder | Shows |
 |---|---|
-| `simple/` | Crossplane Composition wiring the Flux delivery chain; no provider-kubernetes Object wrappers. |
+| `simple/` | Crossplane Composition wiring the Flux delivery chain. Start here. |
+| `signing/` | Signed component; controller verifies the signature before resource access. |
+| `nested/` | Component reference chain — chart resource lives in a referenced component. |
+| `nested-signed/` | Signed nested component; signature traverses the reference. |
+| `simple-nested-status/` | Same as `simple/` but uses the nested `oci:` status field shape. |
+| `configuration-localization/` | OCM configuration + localization rewriting image references at delivery time. |
+| `simple-fnc-kro/` | Crossplane pipeline using `function-kro` ResourceGraph with CEL expressions instead of a static Composition. |
 
 #### `helm/argocd/kro/` — ArgoCD Application (kro)
 
@@ -97,6 +116,19 @@ OCM resource → kro `ResourceGraphDefinition` → ArgoCD `Application` → rele
 | `nested-signed/` | Signed nested component; signature traverses the reference. |
 | `simple-nested-status/` | Same as `simple/` but uses the nested `oci:` status field shape (`additional.oci.{registry,repository,tag,digest}`) instead of flat fields. |
 | `configuration-localization/` | OCM configuration + localization applied via `Application.spec.source.helm.parameters` (the ArgoCD equivalent of `HelmRelease.spec.values`). |
+
+#### `helm/argocd/crossplane/` — ArgoCD Application (Crossplane)
+
+OCM Deployer → Crossplane XRD + Composition → ArgoCD `Application` → release in `default-argocd`.
+
+| Folder | Shows |
+|---|---|
+| `simple/` | Crossplane Composition wiring the ArgoCD delivery chain. Start here. |
+| `signing/` | Signed component; controller verifies the signature before resource access. |
+| `nested/` | Component reference chain — chart resource lives in a referenced component. |
+| `nested-signed/` | Signed nested component; signature traverses the reference. |
+| `simple-nested-status/` | Same as `simple/` but uses the nested `oci:` status field shape. |
+| `configuration-localization/` | OCM configuration + localization rewriting image references at delivery time. |
 
 ### `kustomize/` — Kustomize delivery, split by delivery tool
 
@@ -164,7 +196,7 @@ full command surface.
    new one in your PR description if none fit. For `helm/` and `kustomize/`,
    also pick the delivery tool sub-folder (`fluxcd/` or `argocd/`). Within
    `helm/fluxcd/` and `helm/argocd/`, also pick the operator sub-folder (`kro/`
-   for kro-based scenarios, `crossplane/` for Crossplane-based). Add the
+   for kro-based scenarios, `crossplane/` for Crossplane scenarios). Add the
    scenario under both delivery tool variants if it should exist for each tool.
 2. Create `examples/<family>[/<tool>][/<operator>]/<scenario>/` with at minimum:
    - `component-constructor.yaml`
