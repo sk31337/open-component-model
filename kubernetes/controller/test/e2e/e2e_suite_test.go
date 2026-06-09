@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,10 +47,10 @@ type suiteData struct {
 var _ = SynchronizedBeforeSuite(
 	// Proc 1 only: install all required components for the active scenarios,
 	// then broadcast shared configuration to every process.
-	func(ctx SpecContext) []byte {
-		t := os.Getenv("RESOURCE_TIMEOUT")
-		if t == "" {
-			t = "10m"
+	func(ctx SpecContext) {
+		timeout := os.Getenv("RESOURCE_TIMEOUT")
+		if timeout == "" {
+			timeout = "10m"
 		}
 		imageRegistry := os.Getenv("IMAGE_REGISTRY")
 		Expect(imageRegistry).NotTo(BeEmpty(), "IMAGE_REGISTRY must be set")
@@ -59,17 +58,6 @@ var _ = SynchronizedBeforeSuite(
 		By("installing required components (proc 1)", func() {
 			collectAndInstallRequires(ctx)
 		})
-
-		payload, err := json.Marshal(suiteData{ImageRegistry: imageRegistry, Timeout: t})
-		Expect(err).NotTo(HaveOccurred())
-		return payload
-	},
-	// All procs: unpack shared configuration, verify the controller is running.
-	func(ctx SpecContext, data []byte) {
-		var sd suiteData
-		Expect(json.Unmarshal(data, &sd)).To(Succeed())
-		imageRegistry = sd.ImageRegistry
-		timeout = sd.Timeout
 
 		By("validating controller-manager is running", func() {
 			verifyControllerUp := func(ctx context.Context) error {
@@ -109,6 +97,9 @@ var _ = SynchronizedBeforeSuite(
 			}
 			EventuallyWithOffset(1, verifyControllerUp, time.Minute, time.Second).WithContext(ctx).Should(Succeed())
 		})
+	},
+	// All procs: unpack shared configuration, verify the controller is running.
+	func(ctx SpecContext, data []byte) {
 	},
 )
 
