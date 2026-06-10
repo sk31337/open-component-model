@@ -8,8 +8,10 @@ if kubectl get deployment helm-controller -n flux-system >/dev/null 2>&1 \
   exit 0
 fi
 
-kubectl wait deployment source-controller -n flux-system \
-  --for=condition=Available \
-  --timeout=120s
+if kubectl get deployment source-controller -n flux-system >/dev/null 2>&1; then
+  kubectl wait deployment source-controller -n flux-system \
+    --for=condition=Available \
+    --timeout=120s
+fi
 
 flux install --components=helm-controller
