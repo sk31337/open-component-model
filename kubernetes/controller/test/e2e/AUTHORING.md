@@ -45,7 +45,11 @@ classDiagram
         +Cleanup CleanupSpec
         +Debug []DebugCmd
         +PreDeployHooks []string
+        +PostDeployHooks []string
+        +PreAssertHooks []string
         +PostAssertHooks []string
+        +PreCleanupHooks []string
+        +PostCleanupHooks []string
     }
 
     class HookRegistry {
@@ -57,8 +61,8 @@ classDiagram
     }
 
     class SetupScripts {
-        +cluster.sh
         +kro.sh
+        +crossplane.sh
         +flux-source.sh
         +flux-helm.sh
         +flux-kustomize.sh
@@ -328,7 +332,7 @@ their folder:
 |---|---|---|---|
 | `examples/helm/fluxcd/kro/<name>/` | kro + Flux | `kro`, `flux-source`, `flux-helm` | `Resource` → kro `RGD` → `OCIRepository` → `HelmRelease` |
 | `examples/helm/fluxcd/crossplane/<name>/` | Crossplane + Flux | `crossplane`, `flux-source`, `flux-helm` | OCM Deployer delivers XRD + Composition; Composition wires Flux chain |
-| `examples/helm/fluxcd/crossplane/simple-fnc-kro/` | Crossplane function-kro + Flux | `crossplane`, `function-kro`, `flux-source`, `flux-helm` | OCM Deployer delivers function-kro ResourceGraph; pipeline wires Flux chain |
+| `examples/helm/fluxcd/crossplane/simple-fnc-kro/` | Crossplane function-kro + Flux | `crossplane`, `flux-source`, `flux-helm` | OCM Deployer delivers function-kro ResourceGraph; pipeline wires Flux chain |
 | `examples/helm/argocd/kro/<name>/` | kro + ArgoCD | `kro`, `argocd` | `Resource` → kro `RGD` → `Application` |
 | `examples/helm/argocd/crossplane/<name>/` | Crossplane + ArgoCD | `crossplane`, `argocd` | OCM Deployer delivers XRD + Composition; Composition wires ArgoCD `Application` |
 

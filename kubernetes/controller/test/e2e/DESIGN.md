@@ -161,8 +161,8 @@ kubernetes/controller/
       shard/main.go                           # CI shard helper (Q14)
     setup/
       local.sh                                # entry: cluster + all components
+      cluster.sh                              # kind cluster + registry + RBAC (always invoked by local.sh)
       components/                             # one script per component (Q3, Q7a)
-        cluster.sh                            # always invoked
         kro.sh
         crossplane.sh
         flux-source.sh
@@ -216,11 +216,11 @@ requires: [kro, flux-source, flux-helm]
 
 deploy:
   - apply: bootstrap.yaml
-  - waitFor:
-      kind: rgd
-      name: ${SCENARIO_SIMPLE_NAME}
-      conditions: [create, condition=Ready=true]
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/${SCENARIO_SIMPLE_NAME}"
   - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo"
 
 assert:
   resources:
@@ -534,9 +534,9 @@ Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
 |---|---|
 | `task test/e2e` | run all scenarios |
 | `task test/e2e -- helm/fluxcd/kro/simple` | run one scenario |
-| `task test/e2e -- helm/fluxcd/` | run all six Flux helm scenarios |
-| `task test/e2e -- helm/argocd/` | run all six ArgoCD helm scenarios |
-| `task test/e2e -- helm/` | run all twelve helm scenarios |
+| `task test/e2e -- helm/fluxcd/` | run all thirteen Flux helm scenarios |
+| `task test/e2e -- helm/argocd/` | run all twelve ArgoCD helm scenarios |
+| `task test/e2e -- helm/` | run all 25 helm scenarios |
 | `task test/e2e -- credentials/` | run both credentials scenarios |
 | `task test/e2e -- examples` | run only the `Context("examples")` block (18 demos) |
 | `task test/e2e/fresh -- helm/fluxcd/kro/simple` | teardown + setup + run one scenario from scratch |
