@@ -50,67 +50,53 @@ spec:
         resources:
           - name: resourceChart
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha2
-              kind: Object
+              apiVersion: delivery.ocm.software/v1alpha1
+              kind: Resource
+              metadata:
+                namespace: default
               spec:
-                forProvider:
-                  manifest:
-                    apiVersion: delivery.ocm.software/v1alpha1
-                    kind: Resource
-                    metadata:
-                      namespace: default
-                    spec:
-                      componentRef:
-                        name: helm-fluxcd-crossplane-simple-nested-status-component
-                      resource:
-                        byReference:
-                          resource:
-                            name: helm-resource
-                      additionalStatusFields:
-                        oci: resource.access.toOCI()
-                providerConfigRef:
-                  name: kubernetes-provider
+                componentRef:
+                  name: helm-fluxcd-crossplane-simple-nested-status-component
+                resource:
+                  byReference:
+                    resource:
+                      name: helm-resource
+                additionalStatusFields:
+                  oci: resource.access.toOCI()
             patches:
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.prefix
-                toFieldPath: spec.forProvider.manifest.metadata.name
+                toFieldPath: metadata.name
                 transforms:
                   - type: string
                     string:
                       type: Format
                       fmt: "%s-resource-chart"
               - type: ToCompositeFieldPath
-                fromFieldPath: status.atProvider.manifest.status.additional.oci.registry
+                fromFieldPath: status.additional.oci.registry
                 toFieldPath: status.ociRegistry
               - type: ToCompositeFieldPath
-                fromFieldPath: status.atProvider.manifest.status.additional.oci.repository
+                fromFieldPath: status.additional.oci.repository
                 toFieldPath: status.ociRepository
               - type: ToCompositeFieldPath
-                fromFieldPath: status.atProvider.manifest.status.additional.oci.digest
+                fromFieldPath: status.additional.oci.digest
                 toFieldPath: status.ociDigest
           - name: ocirepository
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha2
-              kind: Object
+              apiVersion: source.toolkit.fluxcd.io/v1
+              kind: OCIRepository
+              metadata:
+                namespace: default
               spec:
-                forProvider:
-                  manifest:
-                    apiVersion: source.toolkit.fluxcd.io/v1
-                    kind: OCIRepository
-                    metadata:
-                      namespace: default
-                    spec:
-                      interval: 1m0s
-                      insecure: true
-                      layerSelector:
-                        mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
-                        operation: copy
-                providerConfigRef:
-                  name: kubernetes-provider
+                interval: 1m0s
+                insecure: true
+                layerSelector:
+                  mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+                  operation: copy
             patches:
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.prefix
-                toFieldPath: spec.forProvider.manifest.metadata.name
+                toFieldPath: metadata.name
                 transforms:
                   - type: string
                     string:
@@ -124,34 +110,27 @@ spec:
                   strategy: string
                   string:
                     fmt: "oci://%s/%s"
-                toFieldPath: spec.forProvider.manifest.spec.url
+                toFieldPath: spec.url
               - type: FromCompositeFieldPath
                 fromFieldPath: status.ociDigest
-                toFieldPath: spec.forProvider.manifest.spec.ref.digest
+                toFieldPath: spec.ref.digest
           - name: helmrelease
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha2
-              kind: Object
+              apiVersion: helm.toolkit.fluxcd.io/v2
+              kind: HelmRelease
+              metadata:
+                namespace: default
               spec:
-                forProvider:
-                  manifest:
-                    apiVersion: helm.toolkit.fluxcd.io/v2
-                    kind: HelmRelease
-                    metadata:
-                      namespace: default
-                    spec:
-                      releaseName: helm-fluxcd-crossplane-simple-nested-status
-                      interval: 1m
-                      timeout: 5m
-                      chartRef:
-                        kind: OCIRepository
-                        namespace: default
-                providerConfigRef:
-                  name: kubernetes-provider
+                releaseName: helm-fluxcd-crossplane-simple-nested-status
+                interval: 1m
+                timeout: 5m
+                chartRef:
+                  kind: OCIRepository
+                  namespace: default
             patches:
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.prefix
-                toFieldPath: spec.forProvider.manifest.metadata.name
+                toFieldPath: metadata.name
                 transforms:
                   - type: string
                     string:
@@ -159,9 +138,12 @@ spec:
                       fmt: "%s-helm-release"
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.prefix
-                toFieldPath: spec.forProvider.manifest.spec.chartRef.name
+                toFieldPath: spec.chartRef.name
                 transforms:
                   - type: string
                     string:
                       type: Format
                       fmt: "%s-oci-repository"
+    - step: auto-ready
+      functionRef:
+        name: crossplane-contrib-function-auto-ready

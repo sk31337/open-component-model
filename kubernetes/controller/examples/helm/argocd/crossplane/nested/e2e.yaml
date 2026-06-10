@@ -5,9 +5,18 @@ requires:
 deploy:
   - apply: bootstrap.yaml
     waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true repository/helm-argocd-crossplane-nested-repository -n default"
+      - kubectl: "--for=create --for=condition=Ready=true component/helm-argocd-crossplane-nested-component -n default"
+  - apply: resource.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true resource/helm-argocd-crossplane-nested-resource-xrd -n default"
+  - apply: deployer.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true deployer/helm-argocd-crossplane-nested-deployer"
       - kubectl: "--for=create --for=condition=Established=true xrd/helmargocdcrossplanenestedresources.examples.ocm.software"
   - apply: instance.yaml
     waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true helmargocdcrossplanenestedresources/helm-argocd-crossplane-nested"
       - kubectl: "--for=create --for=jsonpath={.status.sync.status}=Synced --for=jsonpath={.status.health.status}=Healthy applications.argoproj.io/helm-argocd-crossplane-nested -n argocd"
       - kubectl: "--for=create --for=condition=Available deployment.apps/helm-argocd-crossplane-nested-podinfo -n default-argocd"
       - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-argocd-crossplane-nested-podinfo -n default-argocd"

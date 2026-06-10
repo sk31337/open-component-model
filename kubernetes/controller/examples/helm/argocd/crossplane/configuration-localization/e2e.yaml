@@ -9,9 +9,18 @@ prepare:
 deploy:
   - apply: bootstrap.yaml
     waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true repository/helm-argocd-crossplane-configuration-localization-repository -n default"
+      - kubectl: "--for=create --for=condition=Ready=true component/helm-argocd-crossplane-configuration-localization-component -n default"
+  - apply: resource.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true resource/helm-argocd-crossplane-configuration-localization-resource-xrd -n default"
+  - apply: deployer.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true deployer/helm-argocd-crossplane-configuration-localization-deployer"
       - kubectl: "--for=create --for=condition=Established=true xrd/helmargocdcrossplaneconfigurationlocalizations.examples.ocm.software"
   - apply: instance.yaml
     waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true helmargocdcrossplaneconfigurationlocalizations/helm-argocd-crossplane-configuration-localization"
       - kubectl: "--for=create --for=jsonpath={.status.sync.status}=Synced --for=jsonpath={.status.health.status}=Healthy applications.argoproj.io/helm-argocd-crossplane-configuration-localization -n argocd"
       - kubectl: "--for=create --for=condition=Available deployment.apps/helm-argocd-crossplane-configuration-localization-podinfo -n default-argocd"
       - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-argocd-crossplane-configuration-localization-podinfo -n default-argocd"

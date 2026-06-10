@@ -6,9 +6,18 @@ requires:
 deploy:
   - apply: bootstrap.yaml
     waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true repository/helm-fluxcd-crossplane-simple-repository -n default"
+      - kubectl: "--for=create --for=condition=Ready=true component/helm-fluxcd-crossplane-simple-component -n default"
+  - apply: resource.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true resource/helm-fluxcd-crossplane-simple-resource-xrd -n default"
+  - apply: deployer.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true deployer/helm-fluxcd-crossplane-simple-deployer"
       - kubectl: "--for=create --for=condition=Established=true xrd/helmfluxcdsimples.examples.ocm.software"
   - apply: instance.yaml
     waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true helmfluxcdsimples/helm-fluxcd-crossplane-simple"
       - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-crossplane-simple-podinfo"
       - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-fluxcd-crossplane-simple-podinfo"
 debug:

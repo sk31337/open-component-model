@@ -48,86 +48,59 @@ spec:
         apiVersion: kro.fn.crossplane.io/v1beta1
         kind: ResourceGraph
         status:
-          ociRegistry: ${resourceChart.status.atProvider.manifest.status.additional.registry}
-          ociRepository: ${resourceChart.status.atProvider.manifest.status.additional.repository}
-          ociDigest: ${resourceChart.status.atProvider.manifest.status.additional.digest}
+          ociRegistry: ${resourceChart.status.additional.registry}
+          ociRepository: ${resourceChart.status.additional.repository}
+          ociDigest: ${resourceChart.status.additional.digest}
         resources:
           - id: resourceChart
             template:
-              apiVersion: kubernetes.crossplane.io/v1alpha2
-              kind: Object
+              apiVersion: delivery.ocm.software/v1alpha1
+              kind: Resource
               metadata:
                 name: ${schema.spec.prefix + "-resource-chart"}
+                namespace: default
               spec:
-                forProvider:
-                  manifest:
-                    apiVersion: delivery.ocm.software/v1alpha1
-                    kind: Resource
-                    metadata:
-                      name: ${schema.spec.prefix + "-resource-chart"}
-                      namespace: default
-                    spec:
-                      componentRef:
-                        name: helm-fluxcd-crossplane-fnc-kro-1-component
-                      resource:
-                        byReference:
-                          resource:
-                            name: helm-resource
-                      additionalStatusFields:
-                        registry: resource.access.toOCI().registry
-                        repository: resource.access.toOCI().repository
-                        digest: resource.access.toOCI().digest
-                providerConfigRef:
-                  name: kubernetes-provider
+                componentRef:
+                  name: helm-fluxcd-crossplane-fnc-kro-1-component
+                resource:
+                  byReference:
+                    resource:
+                      name: helm-resource
+                additionalStatusFields:
+                  registry: resource.access.toOCI().registry
+                  repository: resource.access.toOCI().repository
+                  digest: resource.access.toOCI().digest
           - id: ocirepository
             template:
-              apiVersion: kubernetes.crossplane.io/v1alpha2
-              kind: Object
+              apiVersion: source.toolkit.fluxcd.io/v1
+              kind: OCIRepository
               metadata:
                 name: ${schema.spec.prefix + "-oci-repository"}
+                namespace: default
               spec:
-                forProvider:
-                  manifest:
-                    apiVersion: source.toolkit.fluxcd.io/v1
-                    kind: OCIRepository
-                    metadata:
-                      name: ${schema.spec.prefix + "-oci-repository"}
-                      namespace: default
-                    spec:
-                      interval: 1m0s
-                      insecure: true
-                      url: ${"oci://" + resourceChart.status.atProvider.manifest.status.additional.registry + "/" + resourceChart.status.atProvider.manifest.status.additional.repository}
-                      ref:
-                        digest: ${resourceChart.status.atProvider.manifest.status.additional.digest}
-                      layerSelector:
-                        mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
-                        operation: copy
-                providerConfigRef:
-                  name: kubernetes-provider
+                interval: 1m0s
+                insecure: true
+                url: ${"oci://" + resourceChart.status.additional.registry + "/" + resourceChart.status.additional.repository}
+                ref:
+                  digest: ${resourceChart.status.additional.digest}
+                layerSelector:
+                  mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+                  operation: copy
           - id: helmrelease
             template:
-              apiVersion: kubernetes.crossplane.io/v1alpha2
-              kind: Object
+              apiVersion: helm.toolkit.fluxcd.io/v2
+              kind: HelmRelease
               metadata:
                 name: ${schema.spec.prefix + "-helm-release"}
+                namespace: default
               spec:
-                forProvider:
-                  manifest:
-                    apiVersion: helm.toolkit.fluxcd.io/v2
-                    kind: HelmRelease
-                    metadata:
-                      name: ${schema.spec.prefix + "-helm-release"}
-                      namespace: default
-                    spec:
-                      releaseName: helm-fluxcd-crossplane-fnc-kro-1
-                      interval: 1m
-                      timeout: 5m
-                      chartRef:
-                        kind: OCIRepository
-                        name: ${schema.spec.prefix + "-oci-repository"}
-                        namespace: default
-                providerConfigRef:
-                  name: kubernetes-provider
+                releaseName: helm-fluxcd-crossplane-fnc-kro-1
+                interval: 1m
+                timeout: 5m
+                chartRef:
+                  kind: OCIRepository
+                  name: ${schema.spec.prefix + "-oci-repository"}
+                  namespace: default
     - step: auto-ready
       functionRef:
         name: crossplane-contrib-function-auto-ready

@@ -185,7 +185,7 @@ func collectAndInstallRequires(ctx SpecContext) {
 			if err != nil {
 				return fmt.Errorf("component script %s failed: %w", script, err)
 			}
-			_, err = fmt.Fprintf(GinkgoWriter, "==> component %q\n%s", name, buf.String())
+			_, err = fmt.Fprintf(GinkgoWriter, "\n------------------------------------------\n==> component %q\n%s", name, buf.String())
 			if err != nil {
 				Fail("failed to write to GinkgoWriter: " + err.Error())
 			}

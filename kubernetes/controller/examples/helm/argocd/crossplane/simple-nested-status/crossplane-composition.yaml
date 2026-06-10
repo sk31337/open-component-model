@@ -50,82 +50,75 @@ spec:
         resources:
           - name: resourceChart
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha2
-              kind: Object
+              apiVersion: delivery.ocm.software/v1alpha1
+              kind: Resource
+              metadata:
+                namespace: default
               spec:
-                forProvider:
-                  manifest:
-                    apiVersion: delivery.ocm.software/v1alpha1
-                    kind: Resource
-                    metadata:
-                      namespace: default
-                    spec:
-                      componentRef:
-                        name: helm-argocd-crossplane-simple-nested-status-component
-                      resource:
-                        byReference:
-                          resource:
-                            name: helm-resource
-                      additionalStatusFields:
-                        oci: resource.access.toOCI()
-                providerConfigRef:
-                  name: kubernetes-provider
+                componentRef:
+                  name: helm-argocd-crossplane-simple-nested-status-component
+                resource:
+                  byReference:
+                    resource:
+                      name: helm-resource
+                additionalStatusFields:
+                  oci: resource.access.toOCI()
             patches:
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.prefix
-                toFieldPath: spec.forProvider.manifest.metadata.name
+                toFieldPath: metadata.name
                 transforms:
                   - type: string
                     string:
                       type: Format
                       fmt: "%s-resource-chart"
               - type: ToCompositeFieldPath
-                fromFieldPath: status.atProvider.manifest.status.additional.oci.registry
+                fromFieldPath: status.additional.oci.registry
                 toFieldPath: status.ociRegistry
               - type: ToCompositeFieldPath
-                fromFieldPath: status.atProvider.manifest.status.additional.oci.repository
+                fromFieldPath: status.additional.oci.repository
                 toFieldPath: status.ociRepository
               - type: ToCompositeFieldPath
-                fromFieldPath: status.atProvider.manifest.status.additional.oci.tag
+                fromFieldPath: status.additional.oci.tag
                 toFieldPath: status.ociTag
           - name: argocdApplication
             base:
-              apiVersion: kubernetes.crossplane.io/v1alpha2
-              kind: Object
+              apiVersion: argoproj.io/v1alpha1
+              kind: Application
+              metadata:
+                namespace: argocd
+                finalizers:
+                  - resources-finalizer.argocd.argoproj.io
               spec:
-                forProvider:
-                  manifest:
-                    apiVersion: argoproj.io/v1alpha1
-                    kind: Application
-                    metadata:
-                      namespace: argocd
-                      finalizers:
-                        - resources-finalizer.argocd.argoproj.io
-                    spec:
-                      project: default
-                      source:
-                        chart: podinfo
-                        helm:
-                          releaseName: PLACEHOLDER
-                        path: .
-                      destination:
-                        server: https://kubernetes.default.svc
-                        namespace: default-argocd
-                      syncPolicy:
-                        automated:
-                          prune: true
-                          selfHeal: true
-                        syncOptions:
-                          - CreateNamespace=true
-                providerConfigRef:
-                  name: kubernetes-provider
+                project: default
+                source:
+                  chart: podinfo
+                  helm:
+                    releaseName: PLACEHOLDER
+                  path: .
+                destination:
+                  server: https://kubernetes.default.svc
+                  namespace: default-argocd
+                syncPolicy:
+                  automated:
+                    prune: true
+                    selfHeal: true
+                  syncOptions:
+                    - CreateNamespace=true
+            # ArgoCD Application has no status.conditions[type=Ready], so function-auto-ready
+            # would never mark it ready. This MatchString check on status.health.status lets
+            # function-patch-and-transform signal readiness to function-auto-ready directly.
+            readinessChecks:
+              - type: MatchString
+                fieldPath: status.health.status
+                matchString: Healthy
             patches:
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.prefix
-                toFieldPath: spec.forProvider.manifest.metadata.name
+                toFieldPath: metadata.name
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.prefix
-                toFieldPath: spec.forProvider.manifest.spec.source.helm.releaseName
+                toFieldPath: spec.source.helm.releaseName
               - type: CombineFromComposite
                 combine:
                   variables:
@@ -134,7 +127,10 @@ spec:
                   strategy: string
                   string:
                     fmt: "oci://%s/%s"
-                toFieldPath: spec.forProvider.manifest.spec.source.repoURL
+                toFieldPath: spec.source.repoURL
               - type: FromCompositeFieldPath
                 fromFieldPath: status.ociTag
-                toFieldPath: spec.forProvider.manifest.spec.source.targetRevision
+                toFieldPath: spec.source.targetRevision
+    - step: auto-ready
+      functionRef:
+        name: crossplane-contrib-function-auto-ready
