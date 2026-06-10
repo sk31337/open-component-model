@@ -186,8 +186,8 @@ EOF
     --timeout=120s
 fi
 
-# Grant the Crossplane SA permission to manage OCM and Flux resources directly
-# (needed when function-kro creates composed resources without provider-kubernetes Objects).
+# Grant the Crossplane SA permission to manage OCM, Flux, and ArgoCD resources directly
+# (needed when compositions create composed resources without provider-kubernetes Objects).
 kubectl apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -225,6 +225,19 @@ rules:
     resources:
       - helmreleases
       - helmreleases/status
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - applications
+      - applications/status
     verbs:
       - create
       - delete

@@ -8,4 +8,8 @@ if kubectl get deployment kustomize-controller -n flux-system >/dev/null 2>&1 \
   exit 0
 fi
 
-flux install --components=source-controller,kustomize-controller
+kubectl wait deployment source-controller -n flux-system \
+  --for=condition=Available \
+  --timeout=120s
+
+flux install --components=kustomize-controller

@@ -32,8 +32,7 @@ RESULT_UNHEALTHY=0
 RESULT_PENDING=0
 
 # Temp dir for parallel job output — cleaned up on exit
-TMPDIR_RESULTS="${TMPDIR:-/tmp}/check-cluster-$$"
-mkdir -p "$TMPDIR_RESULTS" || { echo "ERROR: Could not create temp directory" >&2; exit 1; }
+TMPDIR_RESULTS="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_RESULTS"' EXIT
 
 # ---------------------------------------------------------------------------
