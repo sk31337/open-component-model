@@ -1,37 +1,33 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	"golang.org/x/sync/errgroup"
 
 	"ocm.software/open-component-model/kubernetes/controller/test/utils"
 )
 
-// e2e_suite_test.go Ginkgo suite entry point — TestE2E, SynchronizedBeforeSuite, SynchronizedAfterSuite, collectAndInstallRequires
-
 const namespace = "ocm-k8s-toolkit-system"
 
 var (
-	// imageRegistry is the OCI registry the e2e suite pushes and pulls from.
-	imageRegistry string
-	// timeout is the kubectl wait timeout for suite-wide resource waits.
-	timeout string
-	// controllerPodName is captured per-process for log collection.
+	imageRegistry     string
+	timeout           string
 	controllerPodName string
 )
 
-// Run e2e tests using the Ginkgo runner.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	fmt.Fprintf(GinkgoWriter, "Starting ocm-k8s-toolkit suite\n")
@@ -47,12 +43,12 @@ type suiteData struct {
 var _ = SynchronizedBeforeSuite(
 	// Proc 1 only: install all required components for the active scenarios,
 	// then broadcast shared configuration to every process.
-	func(ctx SpecContext) {
-		timeout := os.Getenv("RESOURCE_TIMEOUT")
+	func(ctx SpecContext) []byte {
+		timeout = os.Getenv("RESOURCE_TIMEOUT")
 		if timeout == "" {
 			timeout = "10m"
 		}
-		imageRegistry := os.Getenv("IMAGE_REGISTRY")
+		imageRegistry = os.Getenv("IMAGE_REGISTRY")
 		Expect(imageRegistry).NotTo(BeEmpty(), "IMAGE_REGISTRY must be set")
 
 		By("installing required components (proc 1)", func() {
@@ -97,9 +93,17 @@ var _ = SynchronizedBeforeSuite(
 			}
 			EventuallyWithOffset(1, verifyControllerUp, time.Minute, time.Second).WithContext(ctx).Should(Succeed())
 		})
+
+		data, err := json.Marshal(suiteData{ImageRegistry: imageRegistry, Timeout: timeout})
+		Expect(err).NotTo(HaveOccurred())
+		return data
 	},
-	// All procs: unpack shared configuration, verify the controller is running.
+	// All procs: unpack shared configuration broadcast from proc 1.
 	func(ctx SpecContext, data []byte) {
+		var sd suiteData
+		Expect(json.Unmarshal(data, &sd)).To(Succeed())
+		imageRegistry = sd.ImageRegistry
+		timeout = sd.Timeout
 	},
 )
 
@@ -169,38 +173,18 @@ func collectAndInstallRequires(ctx SpecContext) {
 	for _, name := range ordered {
 		name := name
 		g.Go(func() error {
-			defer GinkgoRecover()
 			script := filepath.Join(compsDir, name+".sh")
-			fmt.Fprintf(GinkgoWriter, "==> installing component %q\n", name)
+			var buf bytes.Buffer
 			cmd := exec.CommandContext(gctx, "bash", script)
-			cmd.Stdout = GinkgoWriter
-			cmd.Stderr = GinkgoWriter
-			if err := cmd.Run(); err != nil {
+			cmd.Stdout = &buf
+			cmd.Stderr = &buf
+			err := cmd.Run()
+			fmt.Fprintf(GinkgoWriter, "==> component %q\n%s", name, buf.String())
+			if err != nil {
 				return fmt.Errorf("component script %s failed: %w", script, err)
 			}
 			return nil
 		})
 	}
 	Expect(g.Wait()).To(Succeed())
-}
-
-// scenarioMatchesFocus reports whether a scenario's folder matches any of the
-// Ginkgo focus patterns. An empty patterns list means "match everything".
-// Matching is against the full Ginkgo spec name ("should run <folder>") using
-// the same regexp the Taskfile produces (^.*<pattern>$).
-func scenarioMatchesFocus(folder string, patterns []string) bool {
-	if len(patterns) == 0 {
-		return true
-	}
-	specName := "should run " + folder
-	for _, pat := range patterns {
-		re, err := regexp.Compile(pat)
-		if err != nil {
-			continue
-		}
-		if re.MatchString(specName) {
-			return true
-		}
-	}
-	return false
 }

@@ -22,16 +22,8 @@ import (
 	"ocm.software/open-component-model/kubernetes/controller/test/utils"
 )
 
-// Scenario execution engine — ScenarioConfig, runScenario, walkScenarios, loadScenario, etc.
-
-// e2eYamlFile is the per-scenario contract filename. Its presence in a
-// directory marks that directory as a scenario root; the walker stops
-// descending past it.
 const e2eYamlFile = "e2e.yaml"
 
-// ScenarioConfig is the parsed and variable-substituted shape of an
-// e2e.yaml. Field documentation lives in DESIGN.md §"The e2e.yaml schema";
-// keep the two in sync.
 type ScenarioConfig struct {
 	// Folder, SimpleName, Dir are not loaded from YAML; they are populated
 	// by the loader from the scenario's path on disk.
@@ -139,9 +131,7 @@ type CleanupSpec struct {
 // contains an e2e.yaml. The walker stops descending into a directory once it
 // finds an e2e.yaml there: nested scenarios are illegal.
 //
-// A non-existent root is treated as "no scenarios", not an error. This is
-// what Stage 1 needs — neither examples/ nor test/e2e/scenarios/ has been
-// migrated yet, so callers must tolerate empty results.
+// A non-existent root returns nil, nil.
 func walkScenarios(root string) ([]string, error) {
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return nil, nil
@@ -168,15 +158,6 @@ func walkScenarios(root string) ([]string, error) {
 	return found, nil
 }
 
-// loadScenario parses scenarioDir/e2e.yaml, applies ${VAR} substitution, and
-// validates that every referenced hook resolves against hooks.Registry and
-// that every `requires:` entry has a matching script under componentsDir.
-//
-// root is the discovery root (e.g. .../examples or .../test/e2e/scenarios)
-// used to derive the scenario's slash-separated Folder name. componentsDir
-// is the absolute path to test/e2e/setup/components used to validate
-// `requires:` entries — pass "" to skip that check (used by unit tests that
-// stub the harness).
 func loadScenario(scenarioDir, root, componentsDir string, vars map[string]string) (*ScenarioConfig, error) {
 	folder, err := filepath.Rel(root, scenarioDir)
 	if err != nil {
@@ -185,8 +166,6 @@ func loadScenario(scenarioDir, root, componentsDir string, vars map[string]strin
 	folder = filepath.ToSlash(folder)
 	simpleName := strings.ReplaceAll(folder, "/", "-")
 
-	// Per-scenario variables augment the caller-supplied set. We copy first
-	// so two scenarios sharing the same vars map cannot trample each other.
 	merged := make(map[string]string, len(vars)+3)
 	for k, v := range vars {
 		merged[k] = v
@@ -237,7 +216,7 @@ func loadScenario(scenarioDir, root, componentsDir string, vars map[string]strin
 }
 
 // validateWaitFor checks that each waitFor entry uses either the kubectl
-// shorthand OR the structured kind/name/conditions fields, never both.
+// shorthand OR the structured kind/name/conditions fields, not both.
 func validateWaitFor(cfg *ScenarioConfig) error {
 	for i, step := range cfg.Deploy {
 		for j, w := range step.WaitFor {
@@ -254,9 +233,6 @@ func validateWaitFor(cfg *ScenarioConfig) error {
 	return nil
 }
 
-// validateRequires returns an error naming any `requires:` entry that has no
-// matching `<name>.sh` under componentsDir. DESIGN.md §"Setup composition":
-// each requires entry is the basename of a script in test/e2e/setup/components.
 func validateRequires(cfg *ScenarioConfig, componentsDir string) error {
 	var missing []string
 	for _, name := range cfg.Requires {
@@ -273,9 +249,6 @@ func validateRequires(cfg *ScenarioConfig, componentsDir string) error {
 	return nil
 }
 
-// validateHookRefs returns an error naming any hook reference in cfg that
-// does not resolve against hooks.Registry. All six phase arrays are checked
-// at once so a scenario with multiple typos surfaces all of them.
 func validateHookRefs(cfg *ScenarioConfig) error {
 	phases := map[string][]string{
 		"preDeployHooks":   cfg.PreDeployHooks,
@@ -300,13 +273,9 @@ func validateHookRefs(cfg *ScenarioConfig) error {
 	return nil
 }
 
-// varRef matches ${NAME} where NAME is letters, digits, and underscores.
-// It deliberately does not match ${NAME:-default} or any other shell-ism;
-// the schema is fixed-list envsubst, not bash.
+// varRef matches ${NAME} — fixed-list envsubst, not bash expansions.
 var varRef = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 
-// substituteVars expands every ${NAME} reference in s against vars. An
-// unknown reference is a hard error — DESIGN.md §"Templated variables".
 func substituteVars(s string, vars map[string]string) (string, error) {
 	var unknown []string
 	out := varRef.ReplaceAllStringFunc(s, func(match string) string {
@@ -334,18 +303,8 @@ func substituteVars(s string, vars map[string]string) (string, error) {
 	return out, nil
 }
 
-// controllerNamespace is the kubernetes namespace the controller-manager
-// runs in. Mirrored here so e2e_runner.go (a non-test file) can reference
-// it without depending on symbols declared in *_test.go files.
 const controllerNamespace = "ocm-k8s-toolkit-system"
 
-// builtinVars returns the harness-level variables (everything except the
-// per-scenario ${SCENARIO_*} set, which loadScenario adds).
-//
-// The protected-registry variables expose the externally-reachable URL the
-// `ocm transfer` step pushes to. The bootstrap.yaml manifests reference the
-// in-cluster URL directly and do not template it; that mirrors the legacy
-// test fixtures, which hard-code the kube-internal hostname.
 func builtinVars() map[string]string {
 	registry := os.Getenv("IMAGE_REGISTRY")
 	host := registry
@@ -360,31 +319,15 @@ func builtinVars() map[string]string {
 	}
 }
 
-// runScenario executes one parsed scenario against the live cluster.
-// It is invoked from inside an It() body, so it relies on Ginkgo's Expect
-// machinery for assertions and on test/utils helpers for kubectl/ocm calls.
-//
-// The execution order mirrors DESIGN.md §"Per-scenario lifecycle":
-//
-//	prepare → preDeployHooks → deploy → postDeployHooks
-//	        → preAssertHooks → assert → postAssertHooks
-//	        → preCleanupHooks → (DeferCleanup runs)  → postCleanupHooks
-//
-// Cleanup itself is delegated to DeployResource's DeferCleanup, so the
-// declarative cleanup section in e2e.yaml is currently advisory; the
-// CascadeFromBootstrap flag is honored implicitly by the order in which
-// deploy steps are applied (bootstrap first → its DeferCleanup deletes
-// last).
-func runScenario(cfg *ScenarioConfig) {
-	ctx := context.Background()
+func runScenario(ctx SpecContext, cfg *ScenarioConfig) {
 	timeout := scenarioTimeout(cfg)
 	imageRegistry := os.Getenv("IMAGE_REGISTRY")
 
-	DeferCleanup(func() {
+	DeferCleanup(func(ctx SpecContext) {
 		if !CurrentSpecReport().Failed() && !isWorkflowDebug() {
 			return
 		}
-		runDebugCommands(cfg)
+		runDebugCommands(ctx, cfg)
 	})
 
 	scenarioCtx := &hooks.Scenario{
@@ -423,7 +366,7 @@ func runScenario(cfg *ScenarioConfig) {
 		})).To(Succeed(), "PrepareOCMComponent failed for %s", comp.Constructor)
 	}
 
-	dispatchHooks("preDeployHooks", cfg.PreDeployHooks, scenarioCtx)
+	dispatchHooks(ctx, "preDeployHooks", cfg.PreDeployHooks, scenarioCtx)
 
 	By("deploying scenario " + cfg.Folder)
 	for i, step := range cfg.Deploy {
@@ -431,11 +374,11 @@ func runScenario(cfg *ScenarioConfig) {
 			manifest := filepath.Join(cfg.Dir, step.Apply)
 			err := utils.DeployResource(ctx, manifest)
 			if err != nil {
-				runStepDebug(cfg.Deploy[i].Debug)
+				runStepDebug(ctx, cfg.Deploy[i].Debug)
 				Expect(err).NotTo(HaveOccurred(), "kubectl apply -f %s failed", manifest)
 			}
-			if isWorkflowDebug() == true {
-				runStepDebug(cfg.Deploy[i].Debug)
+			if isWorkflowDebug() {
+				runStepDebug(ctx, cfg.Deploy[i].Debug)
 			}
 		}
 		for _, w := range step.WaitFor {
@@ -449,7 +392,7 @@ func runScenario(cfg *ScenarioConfig) {
 				cmd := exec.CommandContext(ctx, "kubectl", append([]string{"wait"}, args...)...)
 				out, err := utils.Run(cmd)
 				if err != nil {
-					runStepDebug(cfg.Deploy[i].Debug)
+					runStepDebug(ctx, cfg.Deploy[i].Debug)
 					Expect(err).NotTo(HaveOccurred(), "kubectl wait %s failed: %s", w.Kubectl, string(out))
 				}
 			} else {
@@ -461,7 +404,7 @@ func runScenario(cfg *ScenarioConfig) {
 				for _, cond := range w.Conditions {
 					err := utils.WaitForResource(ctx, cond, t, args...)
 					if err != nil {
-						runStepDebug(cfg.Deploy[i].Debug)
+						runStepDebug(ctx, cfg.Deploy[i].Debug)
 						Expect(err).NotTo(HaveOccurred(), "wait %s on %s failed", cond, resource)
 					}
 				}
@@ -469,8 +412,8 @@ func runScenario(cfg *ScenarioConfig) {
 		}
 	}
 
-	dispatchHooks("postDeployHooks", cfg.PostDeployHooks, scenarioCtx)
-	dispatchHooks("preAssertHooks", cfg.PreAssertHooks, scenarioCtx)
+	dispatchHooks(ctx, "postDeployHooks", cfg.PostDeployHooks, scenarioCtx)
+	dispatchHooks(ctx, "preAssertHooks", cfg.PreAssertHooks, scenarioCtx)
 
 	By("asserting scenario " + cfg.Folder)
 	for _, kc := range cfg.Assert.Kubectl {
@@ -489,10 +432,8 @@ func runScenario(cfg *ScenarioConfig) {
 		)
 	}
 
-	dispatchHooks("postAssertHooks", cfg.PostAssertHooks, scenarioCtx)
-	dispatchHooks("preCleanupHooks", cfg.PreCleanupHooks, scenarioCtx)
-	// Actual delete happens via DeferCleanup registered by DeployResource;
-	// postCleanupHooks queue a DeferCleanup so they run after that.
+	dispatchHooks(ctx, "postAssertHooks", cfg.PostAssertHooks, scenarioCtx)
+	dispatchHooks(ctx, "preCleanupHooks", cfg.PreCleanupHooks, scenarioCtx)
 	for _, name := range cfg.PostCleanupHooks {
 		hook, ok := hooks.Resolve(name)
 		Expect(ok).To(BeTrue(), "unknown postCleanupHooks reference %q", name)
@@ -502,8 +443,6 @@ func runScenario(cfg *ScenarioConfig) {
 	}
 }
 
-// scenarioTimeout returns the timeout to pass to kubectl wait for this
-// scenario. cfg.Timeout overrides the suite-wide default.
 func scenarioTimeout(cfg *ScenarioConfig) string {
 	if cfg.Timeout != "" {
 		return cfg.Timeout
@@ -514,8 +453,6 @@ func scenarioTimeout(cfg *ScenarioConfig) string {
 	return "10m"
 }
 
-// assertResource runs the kubectl wait sequence for a single AssertResource
-// and, if Pods is set, additionally waits for matching pods.
 func assertResource(ctx context.Context, res AssertResource, timeout string) {
 	resource := res.Kind + "/" + res.Name
 	args := []string{resource}
@@ -540,14 +477,11 @@ func assertResource(ctx context.Context, res AssertResource, timeout string) {
 	}
 }
 
-// dispatchHooks runs every named hook in order. The scenario is rejected at
-// load time if any name is unknown, so a missing hook here is a runner bug,
-// not a user error.
-func dispatchHooks(phase string, names []string, scenario *hooks.Scenario) {
+func dispatchHooks(ctx context.Context, phase string, names []string, scenario *hooks.Scenario) {
 	for _, name := range names {
 		hook, ok := hooks.Resolve(name)
 		Expect(ok).To(BeTrue(), "%s references unknown hook %q (load-time validation should have caught this)", phase, name)
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(ctx)
 		err := hook(ctx, scenario)
 		cancel()
 		Expect(err).NotTo(HaveOccurred(), "%s[%q] failed", phase, name)
@@ -562,23 +496,16 @@ var defaultDebugCommands = []DebugCmd{
 	{Kubectl: "get rgd -o custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type==\"Ready\")].status,READY_MSG:.status.conditions[?(@.type==\"Ready\")].message", Label: "rgd-conditions"},
 }
 
-// isWorkflowDebug reports whether the GitHub Actions workflow is running in
-// debug mode. GitHub sets RUNNER_DEBUG=1 when the user picks "Re-run with
-// debug logging" and ACTIONS_STEP_DEBUG=true when step-level debug is
-// enabled via repo/secret configuration. Either flag is sufficient — the
-// runner then runs the scenario's debug: commands on success as well as on
-// failure, so a debug-mode re-run yields a cluster snapshot without having
-// to manufacture a failure.
 func isWorkflowDebug() bool {
 	return os.Getenv("RUNNER_DEBUG") == "1" ||
 		strings.EqualFold(os.Getenv("ACTIONS_STEP_DEBUG"), "true")
 }
 
-func runStepDebug(cmds []DebugCmd) {
+func runStepDebug(ctx context.Context, cmds []DebugCmd) {
 	if len(cmds) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for _, d := range cmds {
 		label := d.Label
@@ -598,12 +525,12 @@ func runStepDebug(cmds []DebugCmd) {
 	}
 }
 
-func runDebugCommands(cfg *ScenarioConfig) {
+func runDebugCommands(ctx context.Context, cfg *ScenarioConfig) {
 	cmds := cfg.Debug
 	if len(cmds) == 0 {
 		cmds = defaultDebugCommands
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for _, d := range cmds {
 		label := d.Label
@@ -623,8 +550,7 @@ func runDebugCommands(cfg *ScenarioConfig) {
 	}
 }
 
-// fileExists reports whether path exists and is a regular file. Used to
-// auto-detect the per-scenario `ocm.software` private key.
+// fileExists reports whether path exists and is a regular file.
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -633,10 +559,6 @@ func fileExists(path string) bool {
 	return !info.IsDir()
 }
 
-// componentsDir returns the absolute path to test/e2e/setup/components,
-// the directory that holds every component's idempotent install script.
-// Resolution mirrors projectDir(): SETUP_COMPONENTS_DIR > PROJECT_DIR >
-// cwd, layered with the canonical "test/e2e/setup/components" suffix.
 func componentsDir() string {
 	if dir := os.Getenv("SETUP_COMPONENTS_DIR"); dir != "" {
 		return dir
@@ -650,4 +572,23 @@ func componentsDir() string {
 		base = cwd
 	}
 	return filepath.Join(base, "test", "e2e", "setup", "components")
+}
+
+// scenarioMatchesFocus reports whether a scenario's folder matches any of the
+// Ginkgo focus patterns. An empty patterns list means "match everything".
+func scenarioMatchesFocus(folder string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	specName := "should run " + folder
+	for _, pat := range patterns {
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			continue
+		}
+		if re.MatchString(specName) {
+			return true
+		}
+	}
+	return false
 }

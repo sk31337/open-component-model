@@ -9,11 +9,8 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// Ginkgo spec tree — Describe("scenarios", ...), discoverAndLoad, projectDir
-
 // projectDir is the repository's controller root, used to resolve the two
-// scenario discovery roots. It mirrors the existing examplesDir lookup in
-// e2e_suite_test.go so callers control it via EXAMPLES_DIR/PROJECT_DIR.
+// scenario discovery roots.
 func projectDir() string {
 	if dir := os.Getenv("PROJECT_DIR"); dir != "" {
 		return dir
@@ -25,10 +22,6 @@ func projectDir() string {
 	return cwd
 }
 
-// discoverAndLoad walks `root` for e2e.yaml files and loads each one. It
-// is called at package init time (when Ginkgo collects the spec tree), so
-// the build cannot tolerate dynamic Expect() failures here — we panic on
-// load errors with a clear message and let Ginkgo surface it.
 func discoverAndLoad(root string) []*ScenarioConfig {
 	dirs, err := walkScenarios(root)
 	if err != nil {
@@ -55,8 +48,8 @@ var _ = Describe("scenarios", func() {
 	Context("examples", func() {
 		for _, cfg := range discoverAndLoad(examplesRoot) {
 			cfg := cfg
-			It("should run "+cfg.Folder, func(_ SpecContext) {
-				runScenario(cfg)
+			It("should run "+cfg.Folder, func(ctx SpecContext) {
+				runScenario(ctx, cfg)
 			})
 		}
 	})
@@ -64,8 +57,8 @@ var _ = Describe("scenarios", func() {
 	Context("scenarios", func() {
 		for _, cfg := range discoverAndLoad(scenariosRoot) {
 			cfg := cfg
-			It("should run "+cfg.Folder, func(_ SpecContext) {
-				runScenario(cfg)
+			It("should run "+cfg.Folder, func(ctx SpecContext) {
+				runScenario(ctx, cfg)
 			})
 		}
 	})
