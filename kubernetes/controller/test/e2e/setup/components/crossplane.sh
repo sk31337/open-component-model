@@ -142,7 +142,7 @@ subjects:
 EOF
 
 FUNCTION_KRO_VERSION="${FUNCTION_KRO_VERSION:-v0.2.1}"
-FUNCTION_AUTO_READY_VERSION="${FUNCTION_AUTO_READY_VERSION:-v0.6.3}"
+FUNCTION_AUTO_READY_VERSION="${FUNCTION_AUTO_READY_VERSION:-v0.6.5}"
 
 # Install function-kro (CEL-based resource graph composition).
 if kubectl get function crossplane-contrib-function-kro >/dev/null 2>&1; then
@@ -154,7 +154,7 @@ kind: Function
 metadata:
   name: crossplane-contrib-function-kro
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/function-kro:${FUNCTION_KRO_VERSION}
+  package: xpkg.upbound.io/crossplane-contrib/function-kro:${FUNCTION_KRO_VERSION}
 EOF
 
   kubectl wait function/crossplane-contrib-function-kro \
@@ -175,7 +175,7 @@ kind: Function
 metadata:
   name: crossplane-contrib-function-auto-ready
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/function-auto-ready:${FUNCTION_AUTO_READY_VERSION}
+  package: xpkg.upbound.io/crossplane-contrib/function-auto-ready:${FUNCTION_AUTO_READY_VERSION}
 EOF
 
   kubectl wait function/crossplane-contrib-function-auto-ready \
