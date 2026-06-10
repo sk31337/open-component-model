@@ -30,7 +30,10 @@ var (
 
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
-	fmt.Fprintf(GinkgoWriter, "Starting ocm-k8s-toolkit suite\n")
+	_, err := fmt.Fprintf(GinkgoWriter, "Starting ocm-k8s-toolkit suite\n")
+	if err != nil {
+		Fail("failed to write to GinkgoWriter: " + err.Error())
+	}
 	RunSpecs(t, "e2e suite")
 }
 
@@ -179,10 +182,14 @@ func collectAndInstallRequires(ctx SpecContext) {
 			cmd.Stdout = &buf
 			cmd.Stderr = &buf
 			err := cmd.Run()
-			fmt.Fprintf(GinkgoWriter, "==> component %q\n%s", name, buf.String())
 			if err != nil {
 				return fmt.Errorf("component script %s failed: %w", script, err)
 			}
+			_, err = fmt.Fprintf(GinkgoWriter, "==> component %q\n%s", name, buf.String())
+			if err != nil {
+				Fail("failed to write to GinkgoWriter: " + err.Error())
+			}
+
 			return nil
 		})
 	}
