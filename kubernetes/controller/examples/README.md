@@ -130,6 +130,37 @@ OCM Deployer → Crossplane XRD + Composition → ArgoCD `Application` → relea
 | `simple-nested-status/` | Same as `simple/` but uses the nested `oci:` status field shape. |
 | `configuration-localization/` | OCM configuration + localization rewriting image references at delivery time. |
 
+> **File layout note.** Like all Crossplane scenarios, these split bootstrap into
+> `bootstrap.yaml` / `resource.yaml` / `deployer.yaml` — see the note under
+> [`helm/fluxcd/crossplane/`](#helmfluxcdcrossplane--flux-helmrelease-crossplane)
+> above for the rationale.
+
+> **Why every Composition here has a `readinessChecks` block.**
+> Crossplane's `function-auto-ready` determines whether a composite is `Ready` by
+> looking for a `status.conditions[type=Ready]` entry on each composed resource.
+> ArgoCD `Application` objects do **not** expose that condition — they use
+> `status.health.status` (`Healthy`/`Degraded`) and `status.sync.status`
+> (`Synced`/`OutOfSync`) instead. Without an explicit `readinessChecks` override,
+> `function-auto-ready` can never observe readiness on the `Application` resource,
+> so the composite stays `Ready=False` indefinitely even when ArgoCD has
+> successfully deployed and the workload is running.
+>
+> The fix is a `readinessChecks` block on the `argocdApplication` resource in each
+> Composition, telling `function-patch-and-transform` to evaluate readiness via a
+> `MatchString` check on `status.health.status`:
+>
+> ```yaml
+> readinessChecks:
+>   - type: MatchString
+>     fieldPath: status.health.status
+>     matchString: Healthy
+> ```
+>
+> This pattern is required for **every** `helm/argocd/crossplane/` Composition. The
+> Flux equivalents (`helm/fluxcd/crossplane/`) do not need it because Flux
+> `HelmRelease` objects expose a standard `Ready` condition that `function-auto-ready`
+> reads natively.
+
 ### `kustomize/` — Kustomize delivery, split by delivery tool
 
 OCM publishes the kustomize tree (and any referenced image resources); the
