@@ -1,6 +1,5 @@
 requires:
   - crossplane
-  - function-kro
   - flux-source
   - flux-helm
 
