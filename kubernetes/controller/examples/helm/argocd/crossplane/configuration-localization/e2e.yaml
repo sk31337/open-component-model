@@ -35,6 +35,8 @@ assert:
       value: helm-argocd-crossplane-configuration-localization
 
 debug:
+  - kubectl: describe resource,components -A
+    label: describe-resources-components
   - kubectl: get pods -n argocd -o wide
     label: argocd-pods
   - kubectl: get events -n argocd --sort-by=.lastTimestamp
