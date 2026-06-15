@@ -146,15 +146,7 @@ deploy:
   - apply: bootstrap.yaml
   - apply: rgd.yaml
     waitFor:
-      - kind: rgd
-        name: ${SCENARIO_SIMPLE_NAME}
-        conditions: [create, condition=Ready=true]
-
-assert:
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      waitFor: [create, condition=Available]
+      - kubectl: "--for=create --for=condition=Ready=true rgd/${SCENARIO_SIMPLE_NAME}"
 `
 	r.NoError(os.WriteFile(filepath.Join(scenarioDir, "e2e.yaml"), []byte(yaml), 0o644))
 
@@ -166,9 +158,7 @@ assert:
 	r.Equal([]string{"kro", "flux-source"}, cfg.Requires)
 	r.Len(cfg.Deploy, 2)
 	r.NotEmpty(cfg.Deploy[1].WaitFor)
-	r.Equal("helm-simple", cfg.Deploy[1].WaitFor[0].Name)
-	r.Len(cfg.Assert.Resources, 1)
-	r.Equal("helm-simple-podinfo", cfg.Assert.Resources[0].Name)
+	r.Equal("--for=create --for=condition=Ready=true rgd/helm-simple", cfg.Deploy[1].WaitFor[0].Kubectl)
 }
 
 func TestLoadScenarioUnknownHookRejected(t *testing.T) {
@@ -265,7 +255,6 @@ func TestBuiltinVarsRegistryHostStripsScheme(t *testing.T) {
 			r := require.New(t)
 			t.Setenv("IMAGE_REGISTRY", tt.registry)
 			got := builtinVars()
-			r.Equal(tt.registry, got["IMAGE_REGISTRY"])
 			r.Equal(tt.wantHost, got["IMAGE_REGISTRY_HOST"])
 		})
 	}

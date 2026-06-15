@@ -24,17 +24,22 @@ graph LR
         W --> C["ScenarioConfig[]"]
     end
 
+    subgraph "BeforeSuite (proc 1)"
+        C --> BS["collectAndInstallRequires"]
+        BS --> REQ["requires: install components"]
+    end
+
     subgraph "Per-Scenario Execution"
-        C --> R["runScenario(cfg)"]
-        R --> REQ["requires: install components"]
-        REQ --> PREP["prepare: transfer OCM components"]
+        REQ --> R["runScenario(cfg)"]
+        R --> PREP["prepare: transfer OCM components"]
         PREP --> HOOKS1["preDeployHooks"]
         HOOKS1 --> DEP["deploy: apply + waitFor"]
         DEP --> HOOKS2["postDeployHooks"]
         HOOKS2 --> HOOKS3["preAssertHooks"]
-        HOOKS3 --> ASS["assert: resources + fieldEquals"]
+        HOOKS3 --> ASS["assert: fieldEquals"]
         ASS --> HOOKS4["postAssertHooks"]
-        HOOKS4 --> CLN["cleanup + postCleanupHooks"]
+        HOOKS4 --> HOOKS5["preCleanupHooks"]
+        HOOKS5 --> CLN["cleanup + postCleanupHooks"]
     end
 
     subgraph "On Failure or Debug Mode"
@@ -55,17 +60,13 @@ flowchart TD
     FLAG -- "yes" --> ALL["install all components/*.sh"]
     FLAG -- "no (default)" --> DONE1["cluster ready — components deferred"]
 
-    subgraph "Runner (per scenario)"
-        RUN["runScenario()"] --> REQ["for name in requires:"]
-        REQ --> CHK{{"component running?"}}
-        CHK -- "yes" --> SKIP["skip (already installed)"]
-        CHK -- "no" --> INST["bash components/<name>.sh"]
-        INST --> NEXT["next component"]
-        SKIP --> NEXT
+    subgraph "BeforeSuite (proc 1): collectAndInstallRequires"
+        BS["walk both roots, filter by focus"] --> UNION["union requires: entries across matching scenarios"]
+        UNION --> PARALLEL["run each unique component script once (errgroup)"]
     end
 
-    DONE1 --> RUN
-    ALL --> RUN
+    DONE1 --> BS
+    ALL --> BS
 ```
 </details>
 
@@ -107,7 +108,7 @@ walker, and the same runner.
 
 ```
 kubernetes/controller/
-  Taskfile.yml                                # E2E_TIMEOUT default, focus passthrough
+  Taskfile.yml                                # RESOURCE_TIMEOUT default, focus passthrough
   examples/                                   # user-facing demos (also tested)
     README.md
     helm/
@@ -153,7 +154,7 @@ kubernetes/controller/
       simple/
   test/e2e/
     DESIGN.md                                 # this file
-    e2e_suite_test.go                         # SynchronizedBeforeSuite, component install, hook validation
+    e2e_suite_test.go                         # SynchronizedBeforeSuite, component install
     e2e_runner.go                             # ScenarioConfig, walkScenarios, loadScenario, runScenario
     e2e_runner_test.go                        # unit tests for runner functions (no Ginkgo)
     e2e_scenarios_test.go                     # Ginkgo spec tree: discoverAndLoad, Describe("scenarios")
@@ -191,8 +192,7 @@ references (bootstrap, component-constructor, rgd, instance, k8s-manifest, signi
 ### Naming
 
 Scenarios are identified by their **slash-separated path relative to their root**.
-`${SCENARIO_FOLDER}` exposes that name verbatim (`helm/fluxcd/kro/simple`,
-`credentials/basic-auth`); `${SCENARIO_SIMPLE_NAME}` is the dashed form
+`${SCENARIO_SIMPLE_NAME}` is the dashed form
 (`helm-fluxcd-simple`, `credentials-basic-auth`) for embedding in Kubernetes
 resource names, where `/` is invalid.
 
@@ -209,9 +209,6 @@ Nested scenarios are illegal and cause a load-time error. Directories without an
 Minimal example:
 
 ```yaml
-apiVersion: e2e.ocm.software/v1
-kind: Scenario
-
 requires: [kro, flux-source, flux-helm]
 
 deploy:
@@ -221,23 +218,14 @@ deploy:
   - apply: instance.yaml
     waitFor:
       - kubectl: "--for=create --for=condition=Available deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo"
-
-assert:
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      waitFor: [create, condition=Available]
 ```
 
 <details>
 <summary>Full schema reference with all fields</summary>
 
 ```yaml
-apiVersion: e2e.ocm.software/v1
-kind: Scenario
-
-# Optional. Overrides the global E2E_TIMEOUT for this scenario.
-# Applies to deploy[].waitFor and assert.resources[] waits.
+# Optional. Overrides the global RESOURCE_TIMEOUT for this scenario.
+# Applies to deploy[].waitFor timeouts.
 timeout: 5m
 
 # Required. Components the harness must install before the scenario runs. Each name
@@ -256,11 +244,12 @@ prepare:
     - constructor: component-constructor.yaml      # optional; auto-detected if file exists in scenario dir
       signingKey: ocm.software                     # optional; private key path
       ocmConfig: .ocmconfig                        # optional; --config for `ocm transfer`
+      registry: ${PROTECTED_REGISTRY_BASIC_AUTH}   # optional; overrides IMAGE_REGISTRY for this component
       copyResources: true                          # optional; adds --copy-resources to transfer
 
 # Optional. Hooks (named Go functions) chained in array order. Each phase wraps the
-# corresponding harness step. Resolved against test/e2e/hooks/registry.go at load
-# time; missing hooks fail BeforeSuite.
+# corresponding harness step. Resolved against test/e2e/hooks/registry.go at
+# Ginkgo describe-registration time (log.Fatalf on unknown names).
 preDeployHooks: []
 postDeployHooks: []
 preAssertHooks: []
@@ -268,65 +257,30 @@ postAssertHooks: []
 preCleanupHooks: []
 postCleanupHooks: []
 
-# Required. Ordered deploy steps. Each step is one of:
-#   - apply only:                  - apply: <path>
-#   - waitFor only:                - waitFor: { ... }
-#   - apply followed by wait:      - apply: <path>
-#                                    waitFor: { ... }
-#                                    debug: { ... }
+# Required. Ordered deploy steps. Each step may have:
+#   - apply: <path>          — runs kubectl apply -f
+#   - waitFor: [...]         — each entry is a kubectl wait invocation
 # A wait failure is a deploy-step failure (not an assertion failure): assert: does
 # not run, cleanup still does.
 deploy:
   - apply: bootstrap.yaml
-    waitFor:                                          # waitFor-only: the Deployer creates the RGD
-    - kind: rgd                                       # mandatory
-      name: ${SCENARIO_SIMPLE_NAME}                 # mandatory
-      timeout: 2m                                   # optional, overrides scenario-level timeout
-      namespace: default                           # optional
-      conditions:                                  # mandatory; any kubectl wait condition
-        - create
-        - condition=Ready=true
-    debug:                                            # optional; kubectl command to run on failure or debug mode for this apply step
-    - kubectl: get rgd ${SCENARIO_SIMPLE_NAME} -n default -o yaml         
-    - kubectl: get events -n default --field-selector involvedObject.name=${SCENARIO_SIMPLE_NAME} -o yaml    
-    - waitFor: # -kind/name/conditions array OR kubectl array is mandatory;  
-      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=basic-auth-podinfo -n default --timeout=5m" # which translates to `kubectl wait --for=condition=Ready=true pod -l app.kubernetes.io/name=basic-auth-podinfo -n default --timeout=5m`
-        
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true rgd/${SCENARIO_SIMPLE_NAME}"
+        timeout: 2m                                # optional, overrides scenario-level timeout
+  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo"
 
-# Optional. Final-state validation, run after deploy completes. Not needed, if the deploy's waitFor conditions are sufficient to guarantee the scenario's success criteria.
-assert:    
-  kubectl: 
-    - "wait --for=condition=Ready=true pod -l app.kubernetes.io/name=basic-auth-podinfo -n default --timeout=5m"
-    # which translates to `kubectl wait --for=condition=Ready=true pod -l app.kubernetes.io/name=basic-auth-podinfo -n default --timeout=5m`
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      namespace: default                           # optional
-      waitFor: [create, condition=Available]
-      pods:                                        # optional pod-readiness check
-        selector: app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
-        condition: Ready=true
-    - kind: applications.argoproj.io
-      name: ${SCENARIO_SIMPLE_NAME}
-      namespace: argocd
-      waitFor: [create]
-      jsonPath:                                    # field-equality on status
-        '{.status.sync.status}': Synced
-        '{.status.health.status}': Healthy
-
+# Optional. Final-state validation, run after deploy completes. Not needed if
+# the deploy's waitFor conditions are sufficient to guarantee success criteria.
+assert:
   # Optional. Field-equality checks against rendered cluster state, expressed as
   # `kubectl get <resource> -o jsonpath=<jsonPath>` == <value>.
   fieldEquals:
     - resource: pod -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo
       jsonPath: '{.items[0].spec.containers[0].image}'
       value: ${IMAGE_REGISTRY_HOST}/stefanprodan/podinfo:6.9.1
-
-# Optional. Default no-op. When cascadeFromBootstrap is true, the harness deletes the
-# Bootstrap resource and waits for the cascade to clear all derived resources within
-# cascadeTimeout. Used to assert OCM teardown contracts.
-cleanup:
-  cascadeFromBootstrap: false
-  cascadeTimeout: 5m
 
 # Optional. kubectl commands to run for diagnostics. Each entry specifies a
 # kubectl subcommand and a label for log grouping. When omitted, a default set
@@ -352,10 +306,7 @@ references cause a load-time error.
 
 | Variable | Value | Example |
 |---|---|---|
-| `${SCENARIO_FOLDER}` | path relative to root, slash-separated | `helm/fluxcd/kro/simple` |
 | `${SCENARIO_SIMPLE_NAME}` | scenario folder with `/` → `-` (k8s-safe) | `helm-fluxcd-simple` |
-| `${SCENARIO_DIR}` | absolute path to scenario folder | `/.../examples/helm/fluxcd/kro/simple` |
-| `${IMAGE_REGISTRY}` | full URL incl. scheme | `http://image-registry:5000` |
 | `${IMAGE_REGISTRY_HOST}` | host:port, no scheme | `image-registry:5000` |
 | `${PROTECTED_REGISTRY_BASIC_AUTH}` | basic-auth registry URL | `http://localhost:31002` |
 | `${PROTECTED_REGISTRY_DOCKER_CONFIG_JSON}` | dcj registry URL | `http://localhost:31003` |
@@ -374,14 +325,12 @@ sequenceDiagram
     participant OCM as OCM CLI
     participant Hooks as hooks/registry.go
 
-    Runner->>Runner: load e2e.yaml + validate hooks
-    Runner->>Cluster: requires: bash components/<name>.sh
     Runner->>OCM: prepare: ocm transfer ctf → registry
     Runner->>Hooks: preDeployHooks
     Runner->>Cluster: deploy: kubectl apply + waitFor
     Runner->>Hooks: postDeployHooks
     Runner->>Hooks: preAssertHooks
-    Runner->>Cluster: assert: kubectl wait + jsonpath checks
+    Runner->>Cluster: assert: jsonpath checks
     Runner->>Hooks: postAssertHooks
     Runner->>Hooks: preCleanupHooks
     Runner->>Cluster: cleanup: DeferCleanup (kubectl delete)
@@ -428,10 +377,11 @@ in the same file.
 ### Hook registry
 
 Hooks are registered as a single map literal in
-[`test/e2e/hooks/registry.go`](./hooks/registry.go). `BeforeSuite` walks every
-loaded scenario, resolves every name in every `*Hooks` array against the registry,
-and fails the suite (with scenario file path and bad name) if any reference is
-unknown. This catches typos before any cluster work begins.
+[`test/e2e/hooks/registry.go`](./hooks/registry.go). `discoverAndLoad` is called
+at Ginkgo `Describe()` registration time (package-init). For each scenario,
+`loadScenario` → `validateHookRefs` resolves every name in every `*Hooks` array
+against the registry and calls `log.Fatalf` (aborting the process) if any
+reference is unknown. This catches typos before any cluster work begins.
 
 ## Setup composition
 
@@ -450,14 +400,14 @@ task test/e2e/setup/local
 task test/e2e/setup/local -- --all-components
 ```
 
-Per-scenario, the runner calls only the scripts named in `requires:`. When
-`--all-components` was used, these calls are idempotent no-ops (each script
-detects the component is already running and exits immediately). Without
-`--all-components`, the runner's `requires:` invocation is the actual install path.
+Before any scenario runs, `SynchronizedBeforeSuite` (proc 1) calls
+`collectAndInstallRequires`: it walks both roots, unions the `requires:` entries
+across all focus-matching scenarios, and runs each unique component script exactly
+once via an errgroup. When `--all-components` was used at cluster-setup time,
+these script invocations are idempotent no-ops.
 
 Each component script must be **idempotent**: invoking it on a cluster that already has
-the component installed must succeed without changes. This lets the runner re-invoke a
-script as a no-op when an earlier scenario already required it.
+the component installed must succeed without changes.
 
 ## CI sharding
 
@@ -538,12 +488,12 @@ Single Taskfile target, optional positional regex passed to Ginkgo `--focus=`:
 | `task test/e2e -- helm/argocd/` | run all twelve ArgoCD helm scenarios |
 | `task test/e2e -- helm/` | run all 25 helm scenarios |
 | `task test/e2e -- credentials/` | run both credentials scenarios |
-| `task test/e2e -- examples` | run only the `Context("examples")` block (18 demos) |
+| `task test/e2e -- examples` | run only the `Context("examples")` block (30 demos) |
 | `task test/e2e/fresh -- helm/fluxcd/kro/simple` | teardown + setup + run one scenario from scratch |
 | `task test/e2e/setup/local` | provision kind cluster (components installed on demand by runner) |
 | `task test/e2e/setup/local -- --all-components` | provision kind cluster + pre-install all components |
 | `task test/e2e/teardown` | delete kind cluster and registry |
-| `E2E_TIMEOUT=10m task test/e2e` | bump global timeout |
+| `RESOURCE_TIMEOUT=10m task test/e2e` | bump global timeout |
 
 The retired `task test/e2e/example NAME=foo` is replaced by `task test/e2e -- foo`.
 
@@ -601,14 +551,25 @@ requires:
 deploy:
   - apply: bootstrap.yaml
     waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true repository/${SCENARIO_SIMPLE_NAME}-repository -n default"
+      - kubectl: "--for=create --for=condition=Ready=true component/${SCENARIO_SIMPLE_NAME}-component -n default"
+  - apply: resource.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true resource/${SCENARIO_SIMPLE_NAME}-resource-xrd -n default"
+  - apply: deployer.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true deployer/${SCENARIO_SIMPLE_NAME}-deployer"
       - kubectl: "--for=create --for=condition=Established=true xrd/helmfluxcdsimples.examples.ocm.software"
   - apply: instance.yaml
     waitFor:
-      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-crossplane-simple-podinfo"
-      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-fluxcd-crossplane-simple-podinfo"
+      - kubectl: "--for=create --for=condition=Ready=true helmfluxcdsimples/${SCENARIO_SIMPLE_NAME}"
+      - kubectl: "--for=create --for=condition=Available deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo"
 ```
 
-The OCM Deployer delivers the XRD and Composition; the first `waitFor` gates on the XRD becoming Established before the instance is applied.
+The OCM Deployer delivers the XRD and Composition; `bootstrap.yaml` covers the OCM stack,
+`resource.yaml` and `deployer.yaml` wire the Crossplane delivery, and `instance.yaml` creates
+the XR instance.
 
 </details>
 
@@ -616,8 +577,6 @@ The OCM Deployer delivers the XRD and Composition; the first `waitFor` gates on 
 <summary>2. Multi-stage test choreography (<code>test/e2e/scenarios/applyset/pruning/e2e.yaml</code>)</summary>
 
 ```yaml
-timeout: 5m
-
 requires: []                       # only controller-manager (always present)
 
 prepare:
@@ -628,16 +587,15 @@ prepare:
 deploy:
   - apply: bootstrap.yaml
   - apply: bootstrap-deployer.yaml
-
-assert:
-  resources:
-    - kind: deployment.apps
-      name: ${SCENARIO_SIMPLE_NAME}-podinfo
-      waitFor: [create, condition=Available]
+    waitFor:
+      - kubectl: "--for=create --for=condition=Available deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo"
+      - kubectl: "--for=create --for=condition=Available deployment.apps/${SCENARIO_SIMPLE_NAME}-podinfo-2"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=${SCENARIO_SIMPLE_NAME}-podinfo-2"
 
 postAssertHooks:
   - applysetPatchToV2          # kubectl patch component … semver=2.0.0
-  - applysetAssertPruning      # v1 resources gone, v2 resources present
+  - applysetAssertPruning      # podinfo-2 deployment is pruned, podinfo remains
   - applysetDeleteDeployer     # kubectl delete deployer
   - applysetAssertCascade      # all derived resources gone
 ```
@@ -710,17 +668,17 @@ deploy:
 | Q7a | `requires:` shape | Opaque list, validated against script existence | Avoids schema lock-in as the component taxonomy evolves. |
 | Q7b | `prepare:` shape | Structured `components: []` block | The full preparation matrix is small and finite; structure beats hooks. |
 | Q7c | Hook phases | Six (pre/post × deploy/assert/cleanup) | Symmetric seams cover known needs (`applyset-pruning`, future cleanup). |
-| Q7d | Assertion DSL | Generic `resources: []` + `fieldEquals: []` | No baked naming conventions; all scenarios written the same way. |
+| Q7d | Assertion DSL | `fieldEquals: []` only | Simple field-equality covers all active scenarios; `resources[]` and `assert.kubectl[]` were dead weight. |
 | Q7e | Templating | `${VAR}` envsubst, fixed list | Stays declarative; rejects Go templates' Turing-complete invitation. |
-| Q8 | Cleanup | Default no-op; opt-in `cleanup.cascadeFromBootstrap` | Cleanup-as-assertion (deliberate) over cleanup-as-housekeeping (silent). |
+| Q8 | Cleanup | Default no-op; per-spec `DeferCleanup` deletes applied manifests | `cascadeFromBootstrap` was speculative and unused; removed. |
 | Q9 | Registration & discovery | Recursive walk, `e2e.yaml`-presence discriminator, slash-named, descend-stops-at-first-`e2e.yaml` | Auto-discovery; family grouping in folders; no manual registration. |
-| Q10 | `deploy:` shape | Ordered step list with discriminator-key + combined `apply`+`waitFor` shorthand | Author controls intermediate waits; common case stays terse. |
-| Q11 | Timeout layering | Global default + scenario override | Step-level was speculative; scenario-level handles all observed variation. |
-| Q12 | Global timeout source | `E2E_TIMEOUT` env var, defaulted in Taskfile | Operator surface is the Taskfile, not Go code. |
+| Q10 | `deploy:` shape | Ordered step list with `apply`+`waitFor` | Author controls intermediate waits; common case stays terse. |
+| Q11 | Timeout layering | Global default + scenario override + per-waitFor override | Scenario-level handles the common case; per-step `timeout:` covers outlier waits without bumping the whole scenario. |
+| Q12 | Global timeout source | `RESOURCE_TIMEOUT` env var (`scenarioTimeout()` in runner); `go test -timeout` controls the Go test binary wall-clock limit | Operator surface is the runner env var; 10m default when unset. |
 | Q13 | Invocation | Ginkgo `--focus=` via Taskfile `{{.CLI_ARGS}}` | Reuses Ginkgo's existing matcher; no harness regex code. |
 | Q14 | CI sharding | Dynamic `cmd/shard`, one shard per scenario by default | Self-updating as scenarios are added/removed; pass `--shards=N` to group into fewer buckets. |
 | Q15 | `description:` field | Omitted; optional `README.md` next to `e2e.yaml` | Folder name is self-documenting; descriptions invite marketing copy. |
-| Q16 | Hook registry | Map literal in `hooks/registry.go`, validated at `BeforeSuite` | Single source of truth; typos surface before any cluster work. |
+| Q16 | Hook registry | Map literal in `hooks/registry.go`, validated at Ginkgo describe-registration time (`log.Fatalf` on unknown name) | Single source of truth; typos surface before any cluster work. |
 
 </details>
 

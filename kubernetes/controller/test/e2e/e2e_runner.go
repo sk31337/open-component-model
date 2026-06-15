@@ -36,7 +36,6 @@ type ScenarioConfig struct {
 	Prepare  PrepareSpec  `json:"prepare,omitempty"`
 	Deploy   []DeployStep `json:"deploy,omitempty"`
 	Assert   AssertSpec   `json:"assert,omitempty"`
-	Cleanup  CleanupSpec  `json:"cleanup,omitempty"`
 	Debug    []DebugCmd   `json:"debug,omitempty"`
 
 	PreDeployHooks   []string `json:"preDeployHooks,omitempty"`
@@ -67,7 +66,6 @@ type PrepareComponent struct {
 type DeployStep struct {
 	Apply   string      `json:"apply,omitempty"`
 	WaitFor WaitForList `json:"waitFor,omitempty"`
-	Debug   []DebugCmd  `json:"debug,omitempty"`
 }
 
 type WaitForList []WaitForSpec
@@ -88,43 +86,18 @@ func (w *WaitForList) UnmarshalJSON(data []byte) error {
 }
 
 type WaitForSpec struct {
-	Kind       string   `json:"kind,omitempty"`
-	Name       string   `json:"name,omitempty"`
-	Namespace  string   `json:"namespace,omitempty"`
-	Timeout    string   `json:"timeout,omitempty"`
-	Conditions []string `json:"conditions,omitempty"`
-	Kubectl    string   `json:"kubectl,omitempty"`
+	Kubectl string `json:"kubectl,omitempty"`
+	Timeout string `json:"timeout,omitempty"`
 }
 
 type AssertSpec struct {
-	Kubectl     []string         `json:"kubectl,omitempty"`
-	Resources   []AssertResource `json:"resources,omitempty"`
-	FieldEquals []FieldEquals    `json:"fieldEquals,omitempty"`
-}
-
-type AssertResource struct {
-	Kind      string            `json:"kind"`
-	Name      string            `json:"name"`
-	Namespace string            `json:"namespace,omitempty"`
-	WaitFor   []string          `json:"waitFor,omitempty"`
-	JSONPath  map[string]string `json:"jsonPath,omitempty"`
-	Pods      *PodCheck         `json:"pods,omitempty"`
-}
-
-type PodCheck struct {
-	Selector  string `json:"selector"`
-	Condition string `json:"condition"`
+	FieldEquals []FieldEquals `json:"fieldEquals,omitempty"`
 }
 
 type FieldEquals struct {
 	Resource string `json:"resource"`
 	JSONPath string `json:"jsonPath"`
 	Value    string `json:"value"`
-}
-
-type CleanupSpec struct {
-	CascadeFromBootstrap bool   `json:"cascadeFromBootstrap,omitempty"`
-	CascadeTimeout       string `json:"cascadeTimeout,omitempty"`
 }
 
 // walkScenarios returns the absolute paths of every directory under root that
@@ -166,13 +139,11 @@ func loadScenario(scenarioDir, root, componentsDir string, vars map[string]strin
 	folder = filepath.ToSlash(folder)
 	simpleName := strings.ReplaceAll(folder, "/", "-")
 
-	merged := make(map[string]string, len(vars)+3)
+	merged := make(map[string]string, len(vars)+1)
 	for k, v := range vars {
 		merged[k] = v
 	}
-	merged["SCENARIO_FOLDER"] = folder
 	merged["SCENARIO_SIMPLE_NAME"] = simpleName
-	merged["SCENARIO_DIR"] = scenarioDir
 
 	raw, err := os.ReadFile(filepath.Join(scenarioDir, e2eYamlFile))
 	if err != nil {
@@ -202,10 +173,6 @@ func loadScenario(scenarioDir, root, componentsDir string, vars map[string]strin
 		return nil, fmt.Errorf("scenario %s: %w", folder, err)
 	}
 
-	if err := validateWaitFor(&cfg); err != nil {
-		return nil, fmt.Errorf("scenario %s: %w", folder, err)
-	}
-
 	if componentsDir != "" {
 		if err := validateRequires(&cfg, componentsDir); err != nil {
 			return nil, fmt.Errorf("scenario %s: %w", folder, err)
@@ -213,24 +180,6 @@ func loadScenario(scenarioDir, root, componentsDir string, vars map[string]strin
 	}
 
 	return &cfg, nil
-}
-
-// validateWaitFor checks that each waitFor entry uses either the kubectl
-// shorthand OR the structured kind/name/conditions fields, not both.
-func validateWaitFor(cfg *ScenarioConfig) error {
-	for i, step := range cfg.Deploy {
-		for j, w := range step.WaitFor {
-			hasKubectl := w.Kubectl != ""
-			hasStructured := w.Kind != "" || w.Name != "" || len(w.Conditions) > 0
-			if hasKubectl && hasStructured {
-				return fmt.Errorf("deploy[%d].waitFor[%d]: cannot mix 'kubectl' with 'kind'/'name'/'conditions'", i, j)
-			}
-			if !hasKubectl && !hasStructured {
-				return fmt.Errorf("deploy[%d].waitFor[%d]: must specify either 'kubectl' or 'kind'+'name'+'conditions'", i, j)
-			}
-		}
-	}
-	return nil
 }
 
 func validateRequires(cfg *ScenarioConfig, componentsDir string) error {
@@ -307,11 +256,8 @@ const controllerNamespace = "ocm-k8s-toolkit-system"
 
 func builtinVars() map[string]string {
 	registry := os.Getenv("IMAGE_REGISTRY")
-	host := registry
-	host = strings.TrimPrefix(host, "https://")
-	host = strings.TrimPrefix(host, "http://")
+	host := strings.TrimPrefix(strings.TrimPrefix(registry, "https://"), "http://")
 	return map[string]string{
-		"IMAGE_REGISTRY":                        registry,
 		"IMAGE_REGISTRY_HOST":                   host,
 		"CONTROLLER_NAMESPACE":                  controllerNamespace,
 		"PROTECTED_REGISTRY_BASIC_AUTH":         os.Getenv("PROTECTED_REGISTRY_URL"),
@@ -369,46 +315,22 @@ func runScenario(ctx SpecContext, cfg *ScenarioConfig) {
 	dispatchHooks(ctx, "preDeployHooks", cfg.PreDeployHooks, scenarioCtx)
 
 	By("deploying scenario " + cfg.Folder)
-	for i, step := range cfg.Deploy {
+	for _, step := range cfg.Deploy {
 		if step.Apply != "" {
 			manifest := filepath.Join(cfg.Dir, step.Apply)
 			err := utils.DeployResource(ctx, manifest)
-			if err != nil {
-				runStepDebug(ctx, cfg.Deploy[i].Debug)
-				Expect(err).NotTo(HaveOccurred(), "kubectl apply -f %s failed", manifest)
-			}
-			if isWorkflowDebug() {
-				runStepDebug(ctx, cfg.Deploy[i].Debug)
-			}
+			Expect(err).NotTo(HaveOccurred(), "kubectl apply -f %s failed", manifest)
 		}
 		for _, w := range step.WaitFor {
 			t := timeout
 			if w.Timeout != "" {
 				t = w.Timeout
 			}
-			if w.Kubectl != "" {
-				args := strings.Fields(w.Kubectl)
-				args = append(args, "--timeout="+t)
-				cmd := exec.CommandContext(ctx, "kubectl", append([]string{"wait"}, args...)...)
-				out, err := utils.Run(cmd)
-				if err != nil {
-					runStepDebug(ctx, cfg.Deploy[i].Debug)
-					Expect(err).NotTo(HaveOccurred(), "kubectl wait %s failed: %s", w.Kubectl, string(out))
-				}
-			} else {
-				resource := w.Kind + "/" + w.Name
-				args := []string{resource}
-				if w.Namespace != "" {
-					args = append(args, "-n", w.Namespace)
-				}
-				for _, cond := range w.Conditions {
-					err := utils.WaitForResource(ctx, cond, t, args...)
-					if err != nil {
-						runStepDebug(ctx, cfg.Deploy[i].Debug)
-						Expect(err).NotTo(HaveOccurred(), "wait %s on %s failed", cond, resource)
-					}
-				}
-			}
+			args := strings.Fields(w.Kubectl)
+			args = append(args, "--timeout="+t)
+			cmd := exec.CommandContext(ctx, "kubectl", append([]string{"wait"}, args...)...)
+			out, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "kubectl wait %s failed: %s", w.Kubectl, string(out))
 		}
 	}
 
@@ -416,15 +338,6 @@ func runScenario(ctx SpecContext, cfg *ScenarioConfig) {
 	dispatchHooks(ctx, "preAssertHooks", cfg.PreAssertHooks, scenarioCtx)
 
 	By("asserting scenario " + cfg.Folder)
-	for _, kc := range cfg.Assert.Kubectl {
-		args := strings.Fields(kc)
-		cmd := exec.CommandContext(ctx, "kubectl", args...)
-		out, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "assert kubectl %s failed: %s", kc, string(out))
-	}
-	for _, res := range cfg.Assert.Resources {
-		assertResource(ctx, res, timeout)
-	}
 	for _, fe := range cfg.Assert.FieldEquals {
 		Expect(utils.CompareResourceField(ctx, fe.Resource, fe.JSONPath, fe.Value)).To(
 			Succeed(),
@@ -453,30 +366,6 @@ func scenarioTimeout(cfg *ScenarioConfig) string {
 	return "10m"
 }
 
-func assertResource(ctx context.Context, res AssertResource, timeout string) {
-	resource := res.Kind + "/" + res.Name
-	args := []string{resource}
-	if res.Namespace != "" {
-		args = append(args, "-n", res.Namespace)
-	}
-	for _, cond := range res.WaitFor {
-		Expect(utils.WaitForResource(ctx, cond, timeout, args...)).To(
-			Succeed(),
-			"wait %s on %s failed", cond, resource,
-		)
-	}
-	if res.Pods != nil {
-		podArgs := []string{"pod", "-l", res.Pods.Selector}
-		if res.Namespace != "" {
-			podArgs = append(podArgs, "-n", res.Namespace)
-		}
-		Expect(utils.WaitForResource(ctx, res.Pods.Condition, timeout, podArgs...)).To(
-			Succeed(),
-			"pod wait %s on selector %s failed", res.Pods.Condition, res.Pods.Selector,
-		)
-	}
-}
-
 func dispatchHooks(ctx context.Context, phase string, names []string, scenario *hooks.Scenario) {
 	for _, name := range names {
 		hook, ok := hooks.Resolve(name)
@@ -499,30 +388,6 @@ var defaultDebugCommands = []DebugCmd{
 func isWorkflowDebug() bool {
 	return os.Getenv("RUNNER_DEBUG") == "1" ||
 		strings.EqualFold(os.Getenv("ACTIONS_STEP_DEBUG"), "true")
-}
-
-func runStepDebug(ctx context.Context, cmds []DebugCmd) {
-	if len(cmds) == 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	for _, d := range cmds {
-		label := d.Label
-		if label == "" {
-			label = d.Kubectl
-		}
-		args := strings.Fields(d.Kubectl)
-		cmd := exec.CommandContext(ctx, "kubectl", args...)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			GinkgoLogr.Info(fmt.Sprintf("[STEP-DEBUG] %s: error: %v", label, err))
-		} else {
-			for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-				GinkgoLogr.Info(fmt.Sprintf("[STEP-DEBUG] %s: %s", label, line))
-			}
-		}
-	}
 }
 
 func runDebugCommands(ctx context.Context, cfg *ScenarioConfig) {

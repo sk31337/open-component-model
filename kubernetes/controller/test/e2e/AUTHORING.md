@@ -27,8 +27,6 @@ classDiagram
         +loadScenario(dir, root, compsDir, vars) *ScenarioConfig
         +runScenario(cfg)
         +substituteVars(s, vars) string
-        +waitForSpec(ctx, spec, timeout)
-        +assertResource(ctx, res, timeout)
         +dispatchHooks(phase, names, scenario)
         +runDebugCommands(cfg)
     }
@@ -42,7 +40,6 @@ classDiagram
         +Prepare PrepareSpec
         +Deploy []DeployStep
         +Assert AssertSpec
-        +Cleanup CleanupSpec
         +Debug []DebugCmd
         +PreDeployHooks []string
         +PostDeployHooks []string
@@ -169,18 +166,16 @@ referenced from inside it.
 
 ## Naming
 
-Two variables are exposed to your `e2e.yaml`:
+One variable is exposed to your `e2e.yaml`:
 
-- `${SCENARIO_FOLDER}` — slash-joined family + folder, e.g. `helm/fluxcd/kro/simple`.
-  Used for log lines and Ginkgo spec descriptions.
 - `${SCENARIO_SIMPLE_NAME}` — full path with `/` replaced by `-`, e.g.
   `helm-fluxcd-simple`. Safe to use in Kubernetes resource names. Use this
   anywhere a name lands on the cluster.
 
 Plus everything in the **fixed variable list** (see DESIGN.md §"Templated
-variables"): `${IMAGE_REGISTRY}`, `${IMAGE_REGISTRY_HOST}`,
+variables"): `${IMAGE_REGISTRY_HOST}`,
 `${CONTROLLER_NAMESPACE}`, `${PROTECTED_REGISTRY_BASIC_AUTH}`,
-`${PROTECTED_REGISTRY_DOCKER_CONFIG_JSON}`, `${SCENARIO_DIR}`.
+`${PROTECTED_REGISTRY_DOCKER_CONFIG_JSON}`.
 
 No Go templates. No `{{ ... }}`. Only `${VAR}` envsubst-style substitution
 against the fixed list. Unknown variables are a hard error at parse time.
@@ -216,10 +211,7 @@ same reason.
 <summary>Full schema reference with all fields</summary>
 
 ```yaml
-apiVersion: e2e.ocm.software/v1
-kind: Scenario
-
-# Optional. Overrides the global E2E_TIMEOUT for this scenario.
+# Optional. Overrides the global RESOURCE_TIMEOUT for this scenario.
 timeout: 5m
 
 # Required. Components the harness must install before the scenario runs.
@@ -233,6 +225,7 @@ prepare:
   components:
     - signingKey: ocm.software                     # optional; private key path
       ocmConfig: .ocmconfig                        # optional; --config for `ocm transfer`
+      registry: ${PROTECTED_REGISTRY_BASIC_AUTH}   # optional; overrides IMAGE_REGISTRY for this component
       copyResources: true                          # optional; adds --copy-resources to transfer
 
 # Optional. Hooks (named Go functions) chained in array order.
@@ -249,9 +242,6 @@ deploy:
     waitFor:
       - kubectl: "--for=create --for=condition=Ready=true rgd/my-scenario"
         timeout: 2m                                # optional, overrides scenario timeout
-    debug:                                         # optional; runs on step failure
-      - kubectl: get rgd my-scenario -o yaml
-      - kubectl: get events --field-selector involvedObject.name=my-scenario
   - apply: instance.yaml
     waitFor:
       - kubectl: "--for=create --for=condition=Available deployment.apps/my-scenario-podinfo"
@@ -259,17 +249,10 @@ deploy:
 
 # Optional. Final-state validation after deploy completes.
 assert:
-  kubectl:
-    - "wait --for=condition=Ready=true pod -l app.kubernetes.io/name=my-scenario-podinfo --timeout=5m"
   fieldEquals:
     - resource: pod -l app.kubernetes.io/name=my-scenario-podinfo
       jsonPath: '{.items[0].spec.containers[0].image}'
       value: ${IMAGE_REGISTRY_HOST}/stefanprodan/podinfo:6.9.1
-
-# Optional. Cleanup options.
-cleanup:
-  cascadeFromBootstrap: false
-  cascadeTimeout: 5m
 
 # Optional. Diagnostics on failure or debug mode.
 debug:
@@ -290,9 +273,9 @@ to `e2e.yaml`. Instead, write a hook.
 
 ```yaml
 preDeployHooks:
-  - createBasicAuthSecret
+  - applysetPatchToV2
 postAssertHooks:
-  - verifySignedComponent
+  - applysetAssertPruning
 ```
 
 If you need to write a hook, the hook function is registered in [`kubernetes/controller/test/e2e/hooks/registry.go`](./hooks/registry.go).
@@ -319,7 +302,7 @@ Hooks run in array order. The six phases — `preDeployHooks`, `postDeployHooks`
 documented in DESIGN.md.
 
 Adding a hook is a code change. Reviewers will push back on hooks that
-duplicate something `assert.resources` or `assert.fieldEquals` could express.
+duplicate something `assert.fieldEquals` could express.
 
 ---
 
@@ -380,22 +363,6 @@ controller error condition. Don't try to express that in YAML.
 
 ---
 
-## Cleanup
-
-By default the runner deletes only the resources it deployed. If your scenario
-needs the full OCM-managed graph torn down (component → resource → release),
-opt in:
-
-```yaml
-cleanup:
-  cascadeFromBootstrap: true
-```
-
-This is opt-in because OCM cleanup cascade is itself a behaviour worth testing
-deliberately, not a side-effect every scenario should pay for.
-
----
-
 ## Diagnostics on failure (or in debug mode)
 
 The runner executes the kubectl commands declared in `debug:` whenever
@@ -406,22 +373,7 @@ The runner executes the kubectl commands declared in `debug:` whenever
   an operator picks "Re-run with debug logging") or `ACTIONS_STEP_DEBUG=true`
   is exported into the runner environment.
 
-**Scenario-level `debug:`** runs at the end of the scenario. **Per-step `debug:`**
-runs immediately when that specific deploy step fails (before the scenario aborts):
-
-```yaml
-deploy:
-  - apply: bootstrap.yaml
-    waitFor:
-      - kubectl: "--for=create --for=condition=Ready=true rgd/my-scenario"
-    debug:
-      - kubectl: get rgd my-scenario -o yaml
-      - kubectl: get events --field-selector involvedObject.name=my-scenario
-```
-
-If you omit scenario-level `debug:`, a default set runs (controller pods/logs,
-kro pods/events, RGD conditions). Override it to add scenario-specific
-diagnostics:
+**Scenario-level `debug:`** runs at the end of the scenario:
 
 ```yaml
 debug:
@@ -433,6 +385,9 @@ debug:
 
 Each `kubectl:` value is passed directly to `kubectl` (split on whitespace).
 `label:` is optional — used to group output lines in the log.
+
+If you omit `debug:`, a default set runs (controller pods/logs,
+kro pods/events, RGD conditions).
 
 To force the snapshot on a green run locally, prepend `RUNNER_DEBUG=1`:
 
@@ -457,16 +412,18 @@ task kubernetes/controller:test/e2e/setup/local -- --all-components
 # Run everything
 task kubernetes/controller:test/e2e
 
-# Run one scenario (exact match — won't run nested-signed when you say nested)
+# Run one scenario (unanchored regex — helm/fluxcd/kro/simple also matches helm/fluxcd/kro/simple-nested-status)
 task kubernetes/controller:test/e2e -- helm/fluxcd/kro/simple
 
 # Tear down the cluster and registry when done
 task kubernetes/controller:test/e2e/teardown
 ```
 
-The scenario name passed via `--` is matched exactly (anchored). The local
-cluster is persistent across runs; CI uses the default (cluster only) so each
-shard only installs the components its scenario declares in `requires:`.
+The scenario name passed via `--` is passed to Ginkgo `--focus=` as an unanchored regex:
+`helm/fluxcd/kro/simple` matches any spec whose name contains that substring. Use a more
+specific pattern (e.g. `helm/fluxcd/kro/simple$` or the full folder path) to run exactly
+one scenario. The local cluster is persistent across runs; CI uses the default (cluster only)
+so each shard only installs the components its scenario declares in `requires:`.
 See DESIGN.md §"Operator UX" for the full command table.
 
 ---
@@ -474,9 +431,9 @@ See DESIGN.md §"Operator UX" for the full command table.
 ## Checklist before opening a PR
 
 - [ ] Scenario folder is in the correct audience location.
-- [ ] `e2e.yaml` parses (`task kubernetes/controller:test/e2e -- --focus="<scenario>" --dry-run`).
+- [ ] `e2e.yaml` parses (scenario discovery runs at suite init; unknown vars/hooks are rejected at load time).
 - [ ] Every `${VAR}` is in the fixed variable list.
-- [ ] Every hook name resolves at `BeforeSuite`.
+- [ ] Every hook name is registered in `hooks/registry.go` (unknown names abort the process at describe-registration time via `log.Fatalf`).
 - [ ] Local run passes from a fresh kind cluster.
 - [ ] If user-facing: scenario shows up in `examples/README.md` family table.
 - [ ] If test-only: brief comment at the top of `e2e.yaml` saying *what corner
