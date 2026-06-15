@@ -83,10 +83,7 @@ func DeployResource(ctx context.Context, manifestFilePath string) error {
 func DeployResourceWithoutCleanup(ctx context.Context, manifestFilePath string) error {
 	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-f", manifestFilePath)
 	_, err := Run(cmd)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 // DeleteResource deletes one or more k8s resources with "kubectl".
@@ -255,10 +252,9 @@ func CompareResourceField(ctx context.Context, resource, fieldSelector, expected
 	}
 
 	// Sanitize output
-	result := strings.TrimSpace(string(output))
-	result = strings.ReplaceAll(result, "'", "")
+	result := strings.TrimSpace(strings.ReplaceAll(string(output), "'", ""))
 
-	if strings.TrimSpace(result) != expected {
+	if result != expected {
 		return fmt.Errorf("expected %s, got %s", expected, string(output))
 	}
 

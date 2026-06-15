@@ -68,14 +68,12 @@ func applysetPatchToV2(ctx context.Context, s *Scenario) error {
 		return fmt.Errorf("patch component to 2.0.0: %w", err)
 	}
 
-	deadline := time.Now().Add(parseTimeout(hookTimeout()))
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		get := exec.CommandContext(ctx,
+	pollCtx, cancel := context.WithDeadline(ctx, time.Now().Add(parseTimeout(hookTimeout())))
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		get := exec.CommandContext(pollCtx,
 			"kubectl", "get", component,
 			"-n", "default",
 			"-o", "jsonpath={.status.component.version}",
@@ -84,7 +82,11 @@ func applysetPatchToV2(ctx context.Context, s *Scenario) error {
 		if err == nil && strings.TrimSpace(string(out)) == "2.0.0" {
 			break
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-pollCtx.Done():
+			return fmt.Errorf("component version did not reach 2.0.0 within timeout: %w", pollCtx.Err())
+		case <-ticker.C:
+		}
 	}
 
 	resource := "resource.delivery.ocm.software/" + s.SimpleName + "-resource"
@@ -97,14 +99,23 @@ func applysetPatchToV2(ctx context.Context, s *Scenario) error {
 // applysetAssertPruning verifies that podinfo-2 (only present in v1) has
 // been removed and that podinfo (present in both) remains Available.
 func applysetAssertPruning(ctx context.Context, s *Scenario) error {
-	deadline := time.Now().Add(parseTimeout("1m"))
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		cmd := exec.CommandContext(ctx,
+	if err := waitForPodinfo2Pruned(ctx); err != nil {
+		return err
+	}
+	deployment := "deployment.apps/" + s.SimpleName + "-podinfo"
+	if err := utils.WaitForResource(ctx, "condition=Available", hookTimeout(), deployment); err != nil {
+		return fmt.Errorf("podinfo deployment lost Available after prune: %w", err)
+	}
+	return nil
+}
+
+func waitForPodinfo2Pruned(ctx context.Context) error {
+	pollCtx, cancel := context.WithDeadline(ctx, time.Now().Add(parseTimeout("1m")))
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		cmd := exec.CommandContext(pollCtx,
 			"kubectl", "get", "deployments",
 			"-n", "default",
 			"-l", "app=podinfo-2",
@@ -115,20 +126,16 @@ func applysetAssertPruning(ctx context.Context, s *Scenario) error {
 			var result map[string]any
 			if jsonErr := json.Unmarshal(out, &result); jsonErr == nil {
 				if items, ok := result["items"].([]any); ok && len(items) == 0 {
-					goto pruned
+					return nil
 				}
 			}
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-pollCtx.Done():
+			return fmt.Errorf("podinfo-2 deployment was not pruned within timeout: %w", pollCtx.Err())
+		case <-ticker.C:
+		}
 	}
-	return fmt.Errorf("podinfo-2 deployment was not pruned within timeout")
-
-pruned:
-	deployment := "deployment.apps/" + s.SimpleName + "-podinfo"
-	if err := utils.WaitForResource(ctx, "condition=Available", hookTimeout(), deployment); err != nil {
-		return fmt.Errorf("podinfo deployment lost Available after prune: %w", err)
-	}
-	return nil
 }
 
 // applysetDeleteDeployer deletes the Deployer CR and confirms it is gone.
@@ -138,40 +145,42 @@ func applysetDeleteDeployer(ctx context.Context, s *Scenario) error {
 		return fmt.Errorf("delete deployer: %w", err)
 	}
 
-	deadline := time.Now().Add(parseTimeout(hookTimeout()))
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		cmd := exec.CommandContext(ctx, "kubectl", "get", deployer, "-n", "default")
+	pollCtx, cancel := context.WithDeadline(ctx, time.Now().Add(parseTimeout(hookTimeout())))
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		cmd := exec.CommandContext(pollCtx, "kubectl", "get", deployer, "-n", "default")
 		if _, err := utils.Run(cmd); err != nil {
 			return nil
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-pollCtx.Done():
+			return fmt.Errorf("deployer %s still present after timeout: %w", deployer, pollCtx.Err())
+		case <-ticker.C:
+		}
 	}
-	return fmt.Errorf("deployer %s still present after timeout", deployer)
 }
 
 // applysetAssertCascade asserts that deleting the Deployer also tore down
 // the remaining podinfo deployment it owned.
 func applysetAssertCascade(ctx context.Context, s *Scenario) error {
 	deployment := "deployment.apps/" + s.SimpleName + "-podinfo"
-	deadline := time.Now().Add(parseTimeout(hookTimeout()))
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		cmd := exec.CommandContext(ctx, "kubectl", "get", deployment, "-n", "default")
+	pollCtx, cancel := context.WithDeadline(ctx, time.Now().Add(parseTimeout(hookTimeout())))
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		cmd := exec.CommandContext(pollCtx, "kubectl", "get", deployment, "-n", "default")
 		if _, err := utils.Run(cmd); err != nil {
 			return nil
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-pollCtx.Done():
+			return fmt.Errorf("deployment %s still present after deployer delete: %w", deployment, pollCtx.Err())
+		case <-ticker.C:
+		}
 	}
-	return fmt.Errorf("deployment %s still present after deployer delete", deployment)
 }
 
 // parseTimeout coerces the kubectl-style duration strings used by the

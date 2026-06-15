@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 )
 
 // projectDir is the repository's controller root, used to resolve the two
@@ -47,7 +46,6 @@ var _ = Describe("scenarios", func() {
 
 	Context("examples", func() {
 		for _, cfg := range discoverAndLoad(examplesRoot) {
-			cfg := cfg
 			It("should run "+cfg.Folder, func(ctx SpecContext) {
 				runScenario(ctx, cfg)
 			})
@@ -56,14 +54,9 @@ var _ = Describe("scenarios", func() {
 
 	Context("scenarios", func() {
 		for _, cfg := range discoverAndLoad(scenariosRoot) {
-			cfg := cfg
 			It("should run "+cfg.Folder, func(ctx SpecContext) {
 				runScenario(ctx, cfg)
 			})
 		}
 	})
-
-	// Suppress an empty-context error from Ginkgo when no scenarios have
-	// been migrated to test/e2e/scenarios yet.
-	_ = Expect
 })

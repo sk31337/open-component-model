@@ -3,7 +3,6 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,11 +21,8 @@ import (
 
 const namespace = "ocm-k8s-toolkit-system"
 
-var (
-	imageRegistry     string
-	timeout           string
-	controllerPodName string
-)
+// controllerPodName is captured by proc 1 for log collection in SynchronizedAfterSuite.
+var controllerPodName string
 
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -37,22 +33,13 @@ func TestE2E(t *testing.T) {
 	RunSpecs(t, "e2e suite")
 }
 
-// suiteData is serialised by proc 1 and broadcast to every parallel process.
-type suiteData struct {
-	ImageRegistry string `json:"imageRegistry"`
-	Timeout       string `json:"timeout"`
-}
-
 var _ = SynchronizedBeforeSuite(
-	// Proc 1 only: install all required components for the active scenarios,
-	// then broadcast shared configuration to every process.
+	// Proc 1 only: install all required components for the active scenarios.
+	// Workers read IMAGE_REGISTRY and RESOURCE_TIMEOUT from the environment
+	// directly (via builtinVars / scenarioTimeout), so no data needs to be
+	// broadcast.
 	func(ctx SpecContext) []byte {
-		timeout = os.Getenv("RESOURCE_TIMEOUT")
-		if timeout == "" {
-			timeout = "10m"
-		}
-		imageRegistry = os.Getenv("IMAGE_REGISTRY")
-		Expect(imageRegistry).NotTo(BeEmpty(), "IMAGE_REGISTRY must be set")
+		Expect(os.Getenv("IMAGE_REGISTRY")).NotTo(BeEmpty(), "IMAGE_REGISTRY must be set")
 
 		By("installing required components (proc 1)", func() {
 			collectAndInstallRequires(ctx)
@@ -60,6 +47,7 @@ var _ = SynchronizedBeforeSuite(
 
 		By("validating controller-manager is running", func() {
 			verifyControllerUp := func(ctx context.Context) error {
+				GinkgoHelper()
 				cmd := exec.CommandContext(ctx, "kubectl", "get",
 					"pods", "-l", "control-plane=controller-manager",
 					"-o", "go-template={{ range .items }}"+
@@ -69,7 +57,7 @@ var _ = SynchronizedBeforeSuite(
 					"-n", namespace,
 				)
 				podOutput, err := utils.Run(cmd)
-				ExpectWithOffset(2, err).NotTo(HaveOccurred())
+				Expect(err).NotTo(HaveOccurred())
 
 				var podNames []string
 				for _, name := range strings.Split(string(podOutput), "\n") {
@@ -81,33 +69,26 @@ var _ = SynchronizedBeforeSuite(
 					return fmt.Errorf("expect 1 controller pod running, but got %d", len(podNames))
 				}
 				controllerPodName = podNames[0]
-				ExpectWithOffset(2, controllerPodName).Should(ContainSubstring("controller-manager"))
+				Expect(controllerPodName).Should(ContainSubstring("controller-manager"))
 
 				cmd = exec.CommandContext(ctx, "kubectl", "get",
 					"pods", controllerPodName, "-o", "jsonpath={.status.phase}",
 					"-n", namespace,
 				)
-				status, err := utils.Run(cmd)
-				ExpectWithOffset(2, err).NotTo(HaveOccurred())
-				if string(status) != "Running" {
-					return fmt.Errorf("controller pod in %s status", status)
+				phase, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+				if string(phase) != "Running" {
+					return fmt.Errorf("controller pod in %s status", phase)
 				}
 				return nil
 			}
-			EventuallyWithOffset(1, verifyControllerUp, time.Minute, time.Second).WithContext(ctx).Should(Succeed())
+			Eventually(verifyControllerUp).WithTimeout(time.Minute).WithPolling(time.Second).WithContext(ctx).Should(Succeed())
 		})
 
-		data, err := json.Marshal(suiteData{ImageRegistry: imageRegistry, Timeout: timeout})
-		Expect(err).NotTo(HaveOccurred())
-		return data
+		return nil
 	},
-	// All procs: unpack shared configuration broadcast from proc 1.
-	func(ctx SpecContext, data []byte) {
-		var sd suiteData
-		Expect(json.Unmarshal(data, &sd)).To(Succeed())
-		imageRegistry = sd.ImageRegistry
-		timeout = sd.Timeout
-	},
+	// All procs: no shared data to unpack.
+	func(_ SpecContext, _ []byte) {},
 )
 
 var _ = SynchronizedAfterSuite(
@@ -125,7 +106,7 @@ var _ = SynchronizedAfterSuite(
 				"--log-path", logPath,
 			)
 			_, err := utils.Run(cmd)
-			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+			Expect(err).NotTo(HaveOccurred())
 		})
 	},
 )
@@ -174,7 +155,6 @@ func collectAndInstallRequires(ctx SpecContext) {
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, name := range ordered {
-		name := name
 		g.Go(func() error {
 			script := filepath.Join(compsDir, name+".sh")
 			var buf bytes.Buffer
