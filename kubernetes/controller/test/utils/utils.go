@@ -26,6 +26,10 @@ func Run(cmd *exec.Cmd) ([]byte, error) {
 		return output, fmt.Errorf("%s failed with error: (%w) %s", command, err, string(output))
 	}
 
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		GinkgoLogr.Info(fmt.Sprintf("> %s", line))
+	}
+
 	return output, nil
 }
 
@@ -53,13 +57,15 @@ func DeployResource(ctx context.Context, manifestFilePath string) error {
 	if err != nil {
 		return err
 	}
+
 	DeferCleanup(func(ctx SpecContext) error {
-		cmd = exec.CommandContext(ctx, "kubectl", "delete", "--ignore-not-found", "--cascade=foreground", "--wait=true", "--cascade=foreground", "--timeout=5m", "-f", manifestFilePath)
-		_, err := Run(cmd)
+		cmd = exec.CommandContext(ctx, "kubectl", "delete", "--ignore-not-found", "--wait=true", "--timeout=5m", "--cascade=foreground", "-f", manifestFilePath)
+		_, err = Run(cmd)
 		if err != nil {
 			GinkgoLogr.V(3).Info("WARNING: failed to delete resource", "manifest", manifestFilePath)
 			return err
 		}
+
 		cmd = exec.CommandContext(ctx, "kubectl", "wait", "--for=delete", "--timeout=5m", "-f", manifestFilePath)
 		_, err = Run(cmd)
 		if err != nil {
