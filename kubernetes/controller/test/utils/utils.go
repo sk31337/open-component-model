@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 )
@@ -33,24 +32,8 @@ func Run(cmd *exec.Cmd) ([]byte, error) {
 	return output, nil
 }
 
-// DeployAndWaitForResource takes a manifest file of a k8s resource and deploys it with "kubectl". Correspondingly,
-// a DeferCleanup-handler is created that will delete the resource, when the test-suite ends.
-// Additionally, "waitingFor" is a resource condition to check if the resource was deployed successfully.
-// Example:
-//
-//	err := DeployAndWaitForResource("./pod.yaml", "condition=Ready")
-func DeployAndWaitForResource(ctx context.Context, manifestFilePath, waitingFor, timeout string) error {
-	err := DeployResource(ctx, manifestFilePath)
-	if err != nil {
-		return err
-	}
-
-	return WaitForResource(ctx, waitingFor, timeout, "-f", manifestFilePath)
-}
-
-// DeployResource takes a manifest file of a k8s resource and deploys it with "kubectl". Correspondingly,
-// a DeferCleanup-handler is created that will delete the resource, when the test-suite ends.
-// In contrast to "DeployAndWaitForResource", this function does not wait for a certain condition to be fulfilled.
+// DeployResource applies a manifest with kubectl and registers a DeferCleanup
+// handler that deletes it (foreground cascading) when the spec ends.
 func DeployResource(ctx context.Context, manifestFilePath string) error {
 	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-f", manifestFilePath)
 	_, err := Run(cmd)
@@ -78,14 +61,6 @@ func DeployResource(ctx context.Context, manifestFilePath string) error {
 	return err
 }
 
-// DeployResourceWithoutCleanup takes a manifest file of a k8s resource and deploys it with "kubectl".
-// In contrast to "DeployResource", no DeferCleanup-handler is created to delete the resource afterwards.
-func DeployResourceWithoutCleanup(ctx context.Context, manifestFilePath string) error {
-	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-f", manifestFilePath)
-	_, err := Run(cmd)
-	return err
-}
-
 // DeleteResource deletes one or more k8s resources with "kubectl".
 // The resources to delete are passed as arguments.
 // Additionally, a timeout can be specified, which is passed to "kubectl" as well.
@@ -107,17 +82,6 @@ func WaitForResource(ctx context.Context, condition, timeout string, resource ..
 	return err
 }
 
-// PrepareOCMComponent creates an OCM component from a component-constructor file.
-// After creating the OCM component, the component is transferred to imageRegistry.
-func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, imageRegistry, signingKey string) error {
-	return PrepareOCMComponentWithOptions(ctx, PrepareOCMComponentOptions{
-		Name:                     name,
-		ComponentConstructorPath: componentConstructorPath,
-		ImageRegistry:            imageRegistry,
-		SigningKey:               signingKey,
-	})
-}
-
 type PrepareOCMComponentOptions struct {
 	Name                     string
 	ComponentConstructorPath string
@@ -127,9 +91,6 @@ type PrepareOCMComponentOptions struct {
 	CopyResources            bool
 }
 
-// PrepareOCMComponentWithOptions is the option-bag form of
-// PrepareOCMComponent. Behaves identically to PrepareOCMComponent for the
-// uncredentialed case; honors OCMConfig for protected-registry scenarios.
 func PrepareOCMComponentWithOptions(ctx context.Context, opts PrepareOCMComponentOptions) error {
 	By("creating ocm component for " + opts.Name)
 	tmpDir := GinkgoT().TempDir()
@@ -197,38 +158,6 @@ func PrepareOCMComponentWithOptions(ctx context.Context, opts PrepareOCMComponen
 	}
 
 	return nil
-}
-
-// DumpLogs dumps pod logs and resource status for the given namespace and resource type.
-// Intended for use in AfterEach to capture state on test failure.
-// Creates its own context with a 30s timeout to survive parent context cancellation.
-func DumpLogs(namespace, resourceType string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	logLine := func(msg string) {
-		GinkgoLogr.Info(msg)
-	}
-
-	logCmd := func(label string, args ...string) {
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are hardcoded in test code
-		output, err := Run(cmd)
-		if err != nil {
-			logLine(fmt.Sprintf("[DIAG] %s: error: %v", label, err))
-		} else {
-			for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-				logLine(fmt.Sprintf("[DIAG] %s: %s", label, line))
-			}
-		}
-	}
-
-	logCmd("kro-pods", "kubectl", "get", "pods", "-n", namespace, "-o", "wide")
-	logCmd("kro-events", "kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
-	logCmd("rgd-conditions",
-		"kubectl", "get", resourceType, "-o",
-		"custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type==\"Ready\")].status,READY_MSG:.status.conditions[?(@.type==\"Ready\")].message",
-	)
-	logCmd("kro-logs", "kubectl", "logs", "-n", namespace, "--all-containers", "--tail=100", "-l", "app.kubernetes.io/name=kro")
 }
 
 // CompareResourceField compares the value of a specific field in a Kubernetes resource

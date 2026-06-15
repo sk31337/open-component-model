@@ -19,9 +19,7 @@ import (
 	"ocm.software/open-component-model/kubernetes/controller/test/utils"
 )
 
-const namespace = "ocm-k8s-toolkit-system"
-
-// controllerPodName is captured by proc 1 for log collection in SynchronizedAfterSuite.
+// controllerPodName is captured by proc 1 during BeforeSuite to verify the controller is running.
 var controllerPodName string
 
 func TestE2E(t *testing.T) {
@@ -54,7 +52,7 @@ var _ = SynchronizedBeforeSuite(
 						"{{ if not .metadata.deletionTimestamp }}"+
 						"{{ .metadata.name }}"+
 						"{{ \"\\n\" }}{{ end }}{{ end }}",
-					"-n", namespace,
+					"-n", controllerNamespace,
 				)
 				podOutput, err := utils.Run(cmd)
 				Expect(err).NotTo(HaveOccurred())
@@ -73,7 +71,7 @@ var _ = SynchronizedBeforeSuite(
 
 				cmd = exec.CommandContext(ctx, "kubectl", "get",
 					"pods", controllerPodName, "-o", "jsonpath={.status.phase}",
-					"-n", namespace,
+					"-n", controllerNamespace,
 				)
 				phase, err := utils.Run(cmd)
 				Expect(err).NotTo(HaveOccurred())
@@ -94,21 +92,8 @@ var _ = SynchronizedBeforeSuite(
 var _ = SynchronizedAfterSuite(
 	// All procs: no-op — per-spec cleanup is handled by DeferCleanup inside DeployResource.
 	func() {},
-	// Proc 1 only: dump controller logs when CONTROLLER_LOG_PATH is set.
-	func(ctx SpecContext) {
-		logPath := os.Getenv("CONTROLLER_LOG_PATH")
-		if logPath == "" {
-			return
-		}
-		By("displaying logs from the controller", func() {
-			cmd := exec.CommandContext(ctx, "kubectl",
-				"logs", "-n", namespace, controllerPodName,
-				"--log-path", logPath,
-			)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-		})
-	},
+	// Proc 1 only: no-op.
+	func(_ SpecContext) {},
 )
 
 // collectAndInstallRequires walks both scenario roots, filters by the active
