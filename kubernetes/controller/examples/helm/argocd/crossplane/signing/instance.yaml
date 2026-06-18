@@ -1,6 +1,0 @@
-apiVersion: examples.ocm.software/v1alpha1
-kind: HelmArgocdCrossplaneSigning
-metadata:
-  name: helm-argocd-crossplane-signing
-spec:
-  prefix: helm-argocd-crossplane-signing

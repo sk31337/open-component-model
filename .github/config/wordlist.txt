@@ -706,8 +706,6 @@ serializable
 serviceaccountname
 sexualized
 sha
-sharded
-sharding
 shortcode
 shortcodes
 shortdescription
@@ -767,7 +765,6 @@ subproject
 subresource
 subsitution
 subst
-substring
 substsitution
 subtree
 supermajority
