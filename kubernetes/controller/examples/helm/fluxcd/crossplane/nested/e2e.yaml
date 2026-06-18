@@ -1,0 +1,39 @@
+requires:
+  - crossplane
+  - flux-source
+  - flux-helm
+
+deploy:
+  - apply: bootstrap.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true repository/helm-fluxcd-crossplane-nested-repository -n default"
+      - kubectl: "--for=create --for=condition=Ready=true component/helm-fluxcd-crossplane-nested-component -n default"
+  - apply: resource.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true resource/helm-fluxcd-crossplane-nested-resource-xrd -n default"
+  - apply: deployer.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true deployer/helm-fluxcd-crossplane-nested-deployer"
+      - kubectl: "--for=create --for=condition=Established=true xrd/helmfluxcdcrossplanenestedresources.examples.ocm.software"
+  - apply: instance.yaml
+    waitFor:
+      - kubectl: "--for=create --for=condition=Ready=true helmfluxcdcrossplanenestedresources/helm-fluxcd-crossplane-nested"
+      - kubectl: "--for=create --for=condition=Available deployment.apps/helm-fluxcd-crossplane-nested-podinfo"
+      - kubectl: "--for=condition=Ready=true pod -l app.kubernetes.io/name=helm-fluxcd-crossplane-nested-podinfo"
+debug:
+  - kubectl: get pods -n flux-system -o wide
+    label: flux-pods
+  - kubectl: get events -n flux-system --sort-by=.lastTimestamp
+    label: flux-events
+  - kubectl: get helmrelease -A -o wide
+    label: helmreleases
+  - kubectl: get ocirepository -A -o wide
+    label: ocirepositories
+  - kubectl: get xrd -A -o wide
+    label: xrds
+  - kubectl: get composition -A -o wide
+    label: compositions
+  - kubectl: get helmfluxcdcrossplanenestedresources -A -o wide
+    label: instances
+  - kubectl: get object.kubernetes.crossplane.io -A -o wide
+    label: objects
