@@ -344,9 +344,8 @@ sequenceDiagram
 
 ## The runner
 
-[`e2e_runner.go`](./e2e_runner.go) is the execution engine: `ScenarioConfig`, `walkScenarios`,
-`loadScenario`, `runScenario`, and all supporting helpers. [`e2e_runner_test.go`](./e2e_runner_test.go)
-covers these with pure Go unit tests (no Ginkgo). The Ginkgo spec tree lives in
+[`e2e_runner_test.go`](./e2e_runner_test.go) is the execution engine: `ScenarioConfig`, `walkScenarios`,
+`loadScenario`, `runScenario`, and all supporting helpers, together with pure Go unit tests (no Ginkgo). The Ginkgo spec tree lives in
 [`e2e_scenarios_test.go`](./e2e_scenarios_test.go), which calls `discoverAndLoad` at package-init
 time and registers one `It()` per discovered scenario via `runScenario`.
 
@@ -371,7 +370,7 @@ force diagnostics on success.
 
 If a scenario omits `debug:`, a built-in default set runs (controller
 pods/logs, kro pods/events, RGD conditions) — see `defaultDebugCommands` in
-[`e2e_runner.go`](./e2e_runner.go). The detection helper is `isWorkflowDebug`
+[`e2e_runner_test.go`](./e2e_runner_test.go). The detection helper is `isWorkflowDebug`
 in the same file.
 
 ### Hook registry

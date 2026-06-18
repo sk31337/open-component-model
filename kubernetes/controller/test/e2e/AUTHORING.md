@@ -341,7 +341,7 @@ deploy:
 
 ArgoCD-managed releases use the suffix `-argocd` to avoid colliding with the
 Flux release name; the namespace is `default-argocd`. See
-[`examples/helm/fluxcd/kro/simple/`](../../examples/helm/fluxcd/kro/simple/) and [`examples/helm/argocd/kro/simple/`](../../examples/helm/argocd/kro/simple/) for the
+[`examples/helm/fluxcd/kro/simple/`](../../examples/helm/fluxcd/kro/simple/) for the
 canonical wiring of each tool.
 
 If you need a side-by-side parity demo (both tools deploying the same chart),
@@ -446,5 +446,4 @@ See DESIGN.md §"Operator UX" for the full command table.
 - [`DESIGN.md`](./DESIGN.md) — full schema, locked decisions, migration plan.
 - [`hooks/registry.go`](./hooks/registry.go) — list of named hooks.
 - [`examples/helm/fluxcd/kro/simple/`](../../examples/helm/fluxcd/kro/simple/) — canonical Flux helm reference.
-- [`examples/helm/argocd/kro/simple/`](../../examples/helm/argocd/kro/simple/) — canonical ArgoCD helm reference.
 - [`test/e2e/scenarios/applyset/pruning/`](./scenarios/applyset/pruning/) — canonical test-only reference.
