@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	. "github.com/onsi/ginkgo/v2" //nolint:staticcheck // Ginkgo DSL requires dot imports
+	. "github.com/onsi/ginkgo/v2" //nolint:revive // Ginkgo DSL requires dot imports
 )
 
 // Run executes the provided command within this context.

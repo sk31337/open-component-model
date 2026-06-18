@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2" //nolint:staticcheck // Ginkgo DSL requires dot imports
-	. "github.com/onsi/gomega"    //nolint:staticcheck // Ginkgo DSL requires dot imports
+	. "github.com/onsi/ginkgo/v2" //nolint:revive // Ginkgo DSL requires dot imports
+	. "github.com/onsi/gomega"    //nolint:revive // Ginkgo DSL requires dot imports
 
 	"sigs.k8s.io/yaml"
 
