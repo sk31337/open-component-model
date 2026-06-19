@@ -28,15 +28,18 @@ import (
 
 	filesystemv1alpha1 "ocm.software/open-component-model/bindings/go/configuration/filesystem/v1alpha1/spec"
 	helmdigest "ocm.software/open-component-model/bindings/go/helm/digest"
+	helmcredspec "ocm.software/open-component-model/bindings/go/helm/spec/credentials"
 	ocicredentials "ocm.software/open-component-model/bindings/go/oci/credentials"
 	"ocm.software/open-component-model/bindings/go/oci/repository/provider"
 	ocires "ocm.software/open-component-model/bindings/go/oci/repository/resource"
-	v1 "ocm.software/open-component-model/bindings/go/oci/spec/credentials/identity/v1"
+	ocicredspec "ocm.software/open-component-model/bindings/go/oci/spec/credentials"
+	v1 "ocm.software/open-component-model/bindings/go/oci/spec/identity/v1"
 	ocirepository "ocm.software/open-component-model/bindings/go/oci/spec/repository"
 	"ocm.software/open-component-model/bindings/go/oci/transformer"
 	"ocm.software/open-component-model/bindings/go/plugin/manager"
 	"ocm.software/open-component-model/bindings/go/rsa/signing/handler"
 	signingv1alpha1 "ocm.software/open-component-model/bindings/go/rsa/signing/v1alpha1"
+	rsacredspec "ocm.software/open-component-model/bindings/go/rsa/spec/credentials"
 	ocmruntime "ocm.software/open-component-model/bindings/go/runtime"
 	"ocm.software/open-component-model/kubernetes/controller/api/v1alpha1"
 	"ocm.software/open-component-model/kubernetes/controller/internal/controller/component"
@@ -88,6 +91,7 @@ func main() {
 		resolverWorkerCount       int
 		resolverWorkerQueueLength int
 		resolverSubscriberBuffer  int
+		resolverCacheTTL          int
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metric endpoint binds to. "+
@@ -113,6 +117,8 @@ func main() {
 	flag.IntVar(&resolverSubscriberBuffer, "resolver-subscriber-buffer-size", 100, //nolint:mnd // no magic number
 		"The buffer size for each subscriber's event channel. A larger buffer reduces the probability of dropped resolution events under load. "+
 			"Tune upward if the resolver_event_channel_drops_total metric is non-zero.")
+	flag.IntVar(&resolverCacheTTL, "resolver-cache-ttl", 30, //nolint:mnd // no magic number
+		"The time-to-live (TTL) for the resolver cache entries in minutes. Setting TTL to less than 30 minutes is discouraged in productive use as it can lead to unintended performance issues.")
 
 	opts := zap.Options{
 		Development: true,
@@ -141,6 +147,12 @@ func main() {
 	if resolverSubscriberBuffer > resolverWorkerQueueLength {
 		setupLog.Error(nil, "invalid flag value", "flag", "resolver-subscriber-buffer-size",
 			"value", resolverSubscriberBuffer, "reason", "must not exceed resolver-worker-queue-length")
+		os.Exit(1)
+	}
+
+	if resolverCacheTTL <= 0 {
+		setupLog.Error(nil, "invalid flag value", "flag", "resolver-cache-ttl",
+			"value", resolverCacheTTL, "reason", "must be > 0")
 		os.Exit(1)
 	}
 
@@ -216,6 +228,7 @@ func main() {
 		setupLog.Error(err, "failed to register internal signing plugin")
 		os.Exit(1)
 	}
+	pm.CredentialRepositoryRegistry.Register(rsacredspec.Scheme)
 
 	if err := pm.CredentialRepositoryRegistry.RegisterInternalCredentialRepositoryPlugin(
 		&ocicredentials.OCICredentialRepository{},
@@ -224,6 +237,7 @@ func main() {
 		setupLog.Error(err, "failed to register internal credential repository plugin")
 		os.Exit(1)
 	}
+	pm.CredentialRepositoryRegistry.Register(ocicredspec.Scheme)
 
 	ociResourceRepoPlugin := ocires.NewResourceRepository(&filesystemv1alpha1.Config{}, ocires.WithUserAgent(creator))
 	if err := pm.ResourcePluginRegistry.RegisterInternalResourcePlugin(ociResourceRepoPlugin); err != nil {
@@ -240,6 +254,7 @@ func main() {
 		setupLog.Error(err, "failed to register helm digest processor plugin")
 		os.Exit(1)
 	}
+	pm.CredentialRepositoryRegistry.Register(helmcredspec.Scheme)
 
 	logHandler := logr.ToSlogHandler(setupLog)
 	ociBlobTransformerPlugin := transformer.New(slog.New(logHandler))
@@ -249,7 +264,7 @@ func main() {
 	}
 
 	const unlimited = 0
-	ttl := time.Minute * 30
+	ttl := time.Minute * time.Duration(resolverCacheTTL)
 	resolverCache := expirable.NewLRU[string, *workerpool.Result](unlimited, nil, ttl)
 
 	// Create worker pool with its own dependencies
