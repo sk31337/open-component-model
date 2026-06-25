@@ -53,6 +53,25 @@ Take a look at our [installation guide](https://ocm.software/docs/getting-starte
 - [Deploying a Helm chart using a `ResourceGraphDefinition` inside the OCM component version (bootstrap) with FluxCD](https://ocm.software/docs/tutorials/deploy-helm-charts-with-bootstrap-setup/)
 - [Configuring credentials for OCM Kubernetes Controller Toolkit resources to access private OCM repositories](https://ocm.software/docs/how-to/configure-credentials-for-ocm-controllers/)
 
+## Deployers
+
+The OCM Kubernetes Controller Toolkit is deployer-agnostic: the kro.run `ResourceGraphDefinition` (RGD) you write determines
+which tool reconciles the final workload. Both **FluxCD** and **ArgoCD** are supported and tested.
+
+See the working examples under [`examples/`](./examples/) — each `rgd.yaml` contains both a FluxCD and an
+ArgoCD deployer block side by side.
+
+## Development
+
+### Running e2e tests
+
+| Task | Description |
+|---|---|
+| `task test/e2e/setup/local` | Create `ocm-e2e` Kind cluster with kro, FluxCD, and ArgoCD installed |
+| `task test/e2e/setup/teardown` | Delete the `ocm-e2e` cluster and its registry container |
+| `task test/e2e` | Run e2e tests against the running cluster. Pass ginkgo flags after `--`, e.g. `task test/e2e -- -ginkgo.focus=helm-simple` |
+| `task test/e2e/fresh` | Teardown + setup + run in one shot. Accepts the same ginkgo flags |
+
 ## Contributing
 
 Code contributions, feature requests, bug reports, and help requests are very welcome. Please refer to our
