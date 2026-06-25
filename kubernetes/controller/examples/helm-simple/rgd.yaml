@@ -72,7 +72,7 @@ spec:
           source:
             chart: podinfo
             helm:
-              releaseName: helm-simple-argocd
+              releaseName: helm-simple
             path: .
             repoURL: oci://${resourceChart.status.additional.registry}/${resourceChart.status.additional.repository}
             targetRevision: ${resourceChart.status.additional.tag}

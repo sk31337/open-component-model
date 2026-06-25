@@ -74,7 +74,7 @@ spec:
           source:
             chart: podinfo
             helm:
-              releaseName: ${schema.spec.prefix}-argocd
+              releaseName: ${schema.spec.prefix}
             path: .
             repoURL: oci://${resourceChart.status.additional.registry}/${resourceChart.status.additional.repository}
             targetRevision: ${resourceChart.status.additional.tag}

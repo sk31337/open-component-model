@@ -92,10 +92,10 @@ spec:
                 - patch: |
                     - op: replace
                       path: /metadata/name
-                      value: kustomize-simple-argocd-podinfo
+                      value: kustomize-simple-podinfo
                     - op: add
                       path: /spec/template/metadata/labels/app.kubernetes.io~1name
-                      value: kustomize-simple-argocd-podinfo
+                      value: kustomize-simple-podinfo
                   target:
                     kind: Deployment
                     name: podinfo

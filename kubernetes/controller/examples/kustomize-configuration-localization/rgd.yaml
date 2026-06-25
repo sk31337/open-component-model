@@ -140,10 +140,10 @@ spec:
                 - patch: |
                     - op: replace
                       path: /metadata/name
-                      value: kustomize-configuration-localization-argocd-podinfo
+                      value: kustomize-configuration-localization-podinfo
                     - op: add
                       path: /spec/template/metadata/labels/app.kubernetes.io~1name
-                      value: kustomize-configuration-localization-argocd-podinfo
+                      value: kustomize-configuration-localization-podinfo
                   target:
                     kind: Deployment
                     name: podinfo

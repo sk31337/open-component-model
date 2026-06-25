@@ -100,7 +100,7 @@ spec:
           source:
             chart: podinfo
             helm:
-              releaseName: ${schema.spec.prefix}-argocd
+              releaseName: ${schema.spec.prefix}
               valuesObject:
                 # Localization
                 image:

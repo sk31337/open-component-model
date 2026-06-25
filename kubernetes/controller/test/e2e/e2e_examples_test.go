@@ -112,7 +112,7 @@ var _ = Describe("controller", func() {
 					Expect(utils.WaitForResource(ctx, "jsonpath={.status.sync.status}=Synced", timeout, name, "-n", "argocd")).To(Succeed())
 					Expect(utils.WaitForResource(ctx, "jsonpath={.status.health.status}=Healthy", timeout, name, "-n", "argocd")).To(Succeed())
 
-					name = "deployment.apps/" + example.Name() + "-argocd-podinfo"
+					name = "deployment.apps/" + example.Name() + "-podinfo"
 
 					By("validating the ArgoCD-managed deployment in default-argocd")
 
@@ -121,7 +121,7 @@ var _ = Describe("controller", func() {
 					Expect(utils.WaitForResource(
 						ctx, "condition=Ready=true",
 						timeout,
-						"pod", "-l", "app.kubernetes.io/name="+example.Name()+"-argocd-podinfo", "-n", "default-argocd",
+						"pod", "-l", "app.kubernetes.io/name="+example.Name()+"-podinfo", "-n", "default-argocd",
 					)).To(Succeed())
 
 				}
@@ -153,7 +153,7 @@ var _ = Describe("controller", func() {
 
 					By("validating the ArgoCD configuration (ui.message)")
 					Expect(utils.CompareResourceField(ctx,
-						"pod -l app.kubernetes.io/name="+example.Name()+"-argocd-podinfo -n default-argocd",
+						"pod -l app.kubernetes.io/name="+example.Name()+"-podinfo -n default-argocd",
 						"'{.items[0].spec.containers[0].env[?(@.name==\"PODINFO_UI_MESSAGE\")].value}'",
 						example.Name(),
 					)).To(Succeed())
