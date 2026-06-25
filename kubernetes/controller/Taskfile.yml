@@ -90,30 +90,11 @@ tasks:
       - 'docker rm -f image-registry 2>/dev/null || true'
 
   test/e2e:
-    desc: "Run end-to-end tests against a running cluster. Pass a scenario folder via `--`, e.g. `task test/e2e -- helm-simple`. Omit to run all scenarios."
+    desc: "Run end-to-end tests against a running cluster. Pass ginkgo flags via `--`, e.g. `task test/e2e -- -ginkgo.focus=helm-simple`. Omit to run all scenarios."
     dotenv: [ '{{.TASKFILE_DIR}}/test/e2e/hacks/.env' ]
     cmds:
       - task: helm/install
-      - |
-        focus_args=()
-        cli='{{.CLI_ARGS}}'
-        if [ -n "$cli" ]; then
-          # Strip a leading --focus= or --focus prefix if present.
-          case "$cli" in
-            --focus=*) cli="${cli#--focus=}" ;;
-            "--focus "*) cli="${cli#--focus }" ;;
-          esac
-          # If the value already looks like a regex (starts with ^), pass
-          # it through verbatim (e.g. from cmd/shard CI output). Otherwise
-          # anchor it so "helm-nested" matches exactly that scenario
-          # and not "helm-nested-signed".
-          if [[ "$cli" == ^* ]]; then
-            focus_args=(-ginkgo.focus="$cli")
-          else
-            focus_args=(-ginkgo.focus="^.*${cli}$")
-          fi
-        fi
-        PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v "${focus_args[@]}"
+      - PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v {{.CLI_ARGS}}
 
   test/e2e/fresh:
     desc: "Teardown, setup, and run E2E tests from scratch. Pass a scenario via `--`, e.g. `task test/e2e/fresh -- helm-simple`."
