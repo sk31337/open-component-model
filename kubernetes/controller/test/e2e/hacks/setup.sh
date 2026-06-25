@@ -41,7 +41,7 @@ fi
 
 # Create registry container unless it already exists
 ## Required to store the controller image and have a registry to transfer OCM component versions to test localization.
-reg_name='ocm-e2e-registry'
+reg_name='ocm-e2e-image-registry'
 reg_port='5000'
 if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != 'true' ]; then
   docker run \
@@ -86,9 +86,9 @@ EOF
 for node in $(kind get nodes --name ocm-e2e); do
   add_hosts_toml "${node}" "${CONTAINERD_CONFIG_PATH}/${reg_name}:${reg_port}" "http://${reg_name}:${reg_port}"
   # Also register the "image-registry" DNS alias so containerd skips TLS for that hostname.
-  # bootstrap.yaml and OCM resource status both surface the registry as image-registry:5000;
+  # bootstrap.yaml and OCM resource status both surface the registry as ocm-e2e-image-registry:5000;
   # without this entry containerd falls back to HTTPS and fails the image pull.
-  add_hosts_toml "${node}" "${CONTAINERD_CONFIG_PATH}/image-registry:${reg_port}" "http://image-registry:${reg_port}"
+  #add_hosts_toml "${node}" "${CONTAINERD_CONFIG_PATH}/image-registry:${reg_port}" "http://image-registry:${reg_port}"
   add_hosts_toml "${node}" "${CONTAINERD_CONFIG_PATH}/localhost:31002" "registry-internal.default.svc.cluster.local:5002"
   add_hosts_toml "${node}" "${CONTAINERD_CONFIG_PATH}/localhost:31003" "registry-internal.default.svc.cluster.local:5003"
 done
@@ -96,13 +96,13 @@ done
 # Connect the registry to the cluster network if not already connected.
 ## This allows kind to bootstrap the network but ensures they're on the same network.
 ## The --alias keeps "image-registry" as the in-cluster DNS name so bootstrap.yaml
-## and other manifests that reference image-registry:5000 continue to work without changes.
+## and other manifests that reference ocm-e2e-image-registry:5000 continue to work without changes.
 if [ "$(docker inspect -f='{{json .NetworkSettings.Networks.kind}}' "${reg_name}")" = 'null' ]; then
   docker network connect --alias image-registry "kind" "${reg_name}"
 fi
-if [ "$(docker inspect -f='{{json .NetworkSettings.Networks.kind}}' "image-registry")" = 'null' ]; then
-  docker network connect --alias image-registry "kind" "${reg_name}"
-fi
+#if [ "$(docker inspect -f='{{json .NetworkSettings.Networks.kind}}' "image-registry")" = 'null' ]; then
+#  docker network connect --alias image-registry "kind" "${reg_name}"
+#fi
 
 
 # Make sure the image registry is resolvable using localhost
@@ -111,11 +111,14 @@ if [[ ! -f /etc/hosts ]]; then
   exit 1
 fi
 
-if ! grep -q "image-registry" /etc/hosts; then
-  echo "adding '127.0.0.1 image-registry' to /etc/hosts"
-  echo "127.0.0.1 image-registry" | sudo tee -a /etc/hosts
+#if ! grep -q "image-registry" /etc/hosts; then
+#  echo "adding '127.0.0.1 image-registry' to /etc/hosts"
+#  echo "127.0.0.1 image-registry" | sudo tee -a /etc/hosts
+#fi
+if ! grep -q ${reg_name} /etc/hosts; then
+  echo "adding '127.0.0.1 ${reg_name}' to /etc/hosts"
+  echo "127.0.0.1 ${reg_name}" | sudo tee -a /etc/hosts
 fi
-
 # Create private image registries in cluster
 kubectl apply -f "${image_registries}" || exit 1
 kubectl apply -f "${rbac}" || exit 1
@@ -138,7 +141,7 @@ kubectl wait -n argocd deployment \
     --for=condition=Available --timeout=5m || exit 1
     
 # Register the local OCI registry with ArgoCD as an insecure (plain HTTP) Helm OCI
-# credential template. Any Application whose repoURL starts with oci://image-registry:5000
+# credential template. Any Application whose repoURL starts with oci://ocm-e2e-image-registry:5000
 # inherits these settings. insecureOCIForceHttp is required because the local registry
 # serves plain HTTP; ArgoCD otherwise defaults to HTTPS and fails the chart pull.
 # IMPORTANT: the url must use "image-registry" (the docker network alias), not the
@@ -150,12 +153,12 @@ kubectl apply -n argocd -f - <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
-  name: ocm-e2e-registry-creds
+  name: ${reg_name}-creds
   namespace: argocd
   labels:
     argocd.argoproj.io/secret-type: repo-creds
 stringData:
-  url: oci://image-registry:${reg_port}
+  url: oci://${reg_name}:${reg_port}
   type: helm
   enableOCI: "true"
   insecureOCIForceHttp: "true"
