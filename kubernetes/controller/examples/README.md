@@ -160,7 +160,7 @@ a reference for the simplest possible OCM → cluster workflow.
 **Deployer:** none (ApplySet-based pruning)
 
 Demonstrates how orphaned resources are pruned when an OCM component version is updated. Uses Kubernetes
-[ApplySet](https://kubernetes.io/docs/tasks/manage-kubernetes-objects/apply-set/) for pruning instead of a
+[ApplySet](https://kubernetes.io/docs/reference/labels-annotations-taints/) for pruning instead of a
 GitOps deployer. This example has its own dedicated e2e test file (`test/e2e/e2e_applyset_test.go`) and is
 excluded from the generic examples test loop.
 

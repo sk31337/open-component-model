@@ -70,7 +70,7 @@ ArgoCD deployer block side by side.
 | `task test/e2e/setup/local` | Create `ocm-e2e` Kind cluster with kro, FluxCD, and ArgoCD installed |
 | `task test/e2e/setup/teardown` | Delete the `ocm-e2e` cluster and its registry container |
 | `task test/e2e` | Run e2e tests against the running cluster. Pass ginkgo flags after `--`, e.g. `task test/e2e -- -ginkgo.focus=helm-simple` |
-| `task test/e2e/fresh` | Teardown + setup + run in one shot. Accepts the same ginkgo flags |
+| `task test/e2e/fresh` | Tear down + setup + run in one shot. Accepts the same ginkgo flags |
 
 ## Contributing
 
