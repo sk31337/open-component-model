@@ -85,25 +85,15 @@ EOF
 
 for node in $(kind get nodes --name ocm-e2e); do
   add_hosts_toml "${node}" "${CONTAINERD_CONFIG_PATH}/${reg_name}:${reg_port}" "http://${reg_name}:${reg_port}"
-  # Also register the "image-registry" DNS alias so containerd skips TLS for that hostname.
-  # bootstrap.yaml and OCM resource status both surface the registry as ocm-e2e-image-registry:5000;
-  # without this entry containerd falls back to HTTPS and fails the image pull.
-  #add_hosts_toml "${node}" "${CONTAINERD_CONFIG_PATH}/image-registry:${reg_port}" "http://image-registry:${reg_port}"
   add_hosts_toml "${node}" "${CONTAINERD_CONFIG_PATH}/localhost:31002" "registry-internal.default.svc.cluster.local:5002"
   add_hosts_toml "${node}" "${CONTAINERD_CONFIG_PATH}/localhost:31003" "registry-internal.default.svc.cluster.local:5003"
 done
 
 # Connect the registry to the cluster network if not already connected.
 ## This allows kind to bootstrap the network but ensures they're on the same network.
-## The --alias keeps "image-registry" as the in-cluster DNS name so bootstrap.yaml
-## and other manifests that reference ocm-e2e-image-registry:5000 continue to work without changes.
 if [ "$(docker inspect -f='{{json .NetworkSettings.Networks.kind}}' "${reg_name}")" = 'null' ]; then
   docker network connect --alias image-registry "kind" "${reg_name}"
 fi
-#if [ "$(docker inspect -f='{{json .NetworkSettings.Networks.kind}}' "image-registry")" = 'null' ]; then
-#  docker network connect --alias image-registry "kind" "${reg_name}"
-#fi
-
 
 # Make sure the image registry is resolvable using localhost
 if [[ ! -f /etc/hosts ]]; then
@@ -111,10 +101,6 @@ if [[ ! -f /etc/hosts ]]; then
   exit 1
 fi
 
-#if ! grep -q "image-registry" /etc/hosts; then
-#  echo "adding '127.0.0.1 image-registry' to /etc/hosts"
-#  echo "127.0.0.1 image-registry" | sudo tee -a /etc/hosts
-#fi
 if ! grep -q ${reg_name} /etc/hosts; then
   echo "adding '127.0.0.1 ${reg_name}' to /etc/hosts"
   echo "127.0.0.1 ${reg_name}" | sudo tee -a /etc/hosts
