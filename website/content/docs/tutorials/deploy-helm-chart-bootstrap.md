@@ -462,8 +462,8 @@ Then update the resources to use credentials:
    secretRef:
      name: ghcr-secret
    ```
-
-   For Argo CD, add a `secretRef` under `spec.source` in the Application resource instead — see the [Argo CD private registry docs](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/#repositories).
+   
+   For Argo CD, credentials are configured at the repository level, not in the Application spec. *See [Argo CD private registry docs](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/#repositories)*
 
 3. **Pod imagePullSecrets**: The deployed pods also need credentials to pull
 images. Add this to the HelmRelease values (Flux) or `valuesObject` (Argo CD) in the RGD:

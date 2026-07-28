@@ -12,7 +12,7 @@ You'll install the OCM Controllers, kro, and Flux to enable GitOps workflows wit
 {{< callout context="tip" title="Not all components are always required" icon="outline/info-circle" >}}
 Depending on your use case, you may not need the full setup. For example, if 
 you're only deploying raw k8s deployment from an ocm resource, you may be 
-able to skip kro and Flux. 
+able to skip kro and a deployer like FluxCD or ArgoCD. 
 
 Check the prerequisites of the tutorial or how-to you're following to see what's 
 actually needed. This guide installs everything so you're covered for any 
@@ -21,7 +21,7 @@ scenario.
 
 ## You'll end up with
 
-- A local or remote Kubernetes cluster with OCM Controllers, kro, and Flux installed
+- A local or remote Kubernetes cluster with OCM Controllers, kro, and a deployer like FluxCD or ArgoCD installed
 
 ## Estimated time
 
@@ -141,7 +141,7 @@ ocm-k8s-toolkit-controller-manager-79b7975755-vxtqt   1/1     Running   0       
 {{< /step >}}
 {{< step >}}
 
-## Install kro
+### Install kro
 
 Install [kro](https://kro.run) following the [official installation guide](https://kro.run/docs/getting-started/Installation). The easiest way is via Helm:
 
@@ -347,8 +347,8 @@ metadata:
     argocd.argoproj.io/secret-type: repository
 stringData:
   name: ghcr-helm
-  url: ghcr.io
-  type: helm
+  type: oci
+  url: oci://<path-to-helm-chart>
   enableOCI: "true"
   username: <your-username>
   password: <your-token>
