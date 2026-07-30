@@ -33,6 +33,9 @@ ocm download resource [flags]
  # Download a resource with identity 'name=example' and write to default output
   ocm download resource ghcr.io/org/component:v1 --identity name=example
 
+  # Download a resource with identity 'name=example' and 'architecture=amd64' and write to default output
+  ocm download resource ghcr.io/org/component:v1 --identity name=example,architecture=amd64
+
   # Download a resource and specify an output file
   ocm download resource ghcr.io/org/component:v1 --identity name=example --output ./my-resource.tar.gz
 
@@ -71,6 +74,7 @@ ocm download resource [flags]
                                            - $EXE_DIR/.ocm/config
                                            - $EXE_DIR/.ocmconfig
                                            If multiple configuration files are found, they will be merged in the order they are discovered.
+                                           Later entries have higher priority.
                                            Using the option, the specified configuration file(s) will be used instead of the lookup above.
       --logformat enum                     set the log output format that is used to print individual logs
                                               json: Output logs in JSON format, suitable for machine processing
