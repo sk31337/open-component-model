@@ -25,7 +25,8 @@ import (
 const (
 	componentNamePrefix = "ocm.software/ocm-k8s-toolkit/examples/"
 	// signingVersion is the version stamped on every signed fixture today. Sign
-	// requires an exact name:version reference; transfer does not.
+	// requires an exact name:version reference; transfer also requires a
+	// version reference with ocm CLI 0.12.0+.
 	signingVersion = "1.0.0"
 )
 
@@ -154,8 +155,8 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 		return fmt.Errorf("could not create ocm component: %w", err)
 	}
 
-	componentName := componentNamePrefix + filepath.Base(filepath.Dir(componentConstructorPath))
-	transferRef := fmt.Sprintf("ctf::%s//%s", ctfDir, componentName)
+	componentName := componentNameFromConstructor(componentConstructorPath)
+	transferRef := fmt.Sprintf("ctf::%s//%s:%s", ctfDir, componentName, signingVersion)
 
 	if signingKey != "" {
 		By("signing ocm component for " + name)
@@ -378,4 +379,22 @@ func GetResourceField(ctx context.Context, resource, fieldSelector string) (stri
 
 	result := strings.Trim(strings.TrimSpace(string(output)), "'")
 	return result, nil
+}
+
+// componentNameFromConstructor reads the first component name from an OCM
+// component-constructor.yaml file. Falls back to the legacy derivation
+// (componentNamePrefix + last directory segment) when the file cannot be
+// parsed.
+func componentNameFromConstructor(constructorPath string) string {
+	data, err := os.ReadFile(constructorPath)
+	if err != nil {
+		return componentNamePrefix + filepath.Base(filepath.Dir(constructorPath))
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "- name: "+componentNamePrefix) {
+			return strings.TrimPrefix(line, "- name: ")
+		}
+	}
+	return componentNamePrefix + filepath.Base(filepath.Dir(constructorPath))
 }

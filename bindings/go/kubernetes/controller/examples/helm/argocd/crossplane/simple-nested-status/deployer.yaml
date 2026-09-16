@@ -1,0 +1,8 @@
+apiVersion: delivery.ocm.software/v1alpha1
+kind: Deployer
+metadata:
+  name: helm-argocd-crossplane-simple-nested-status-deployer
+spec:
+  resourceRef:
+    name: helm-argocd-crossplane-simple-nested-status-resource-xrd
+    namespace: default
