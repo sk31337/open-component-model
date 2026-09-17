@@ -26,8 +26,6 @@ const (
 	PublicKey            = "ocm.software.pub"
 	PrivateKey           = "ocm.software"
 	CrossplaneComposition = "crossplane-composition.yaml"
-	CrossplaneResource    = "resource.yaml"
-	CrossplaneDeployer    = "deployer.yaml"
 )
 
 // ignoreExamples lists example relative paths (from examplesDir) that are
@@ -151,37 +149,25 @@ var _ = Describe("controller", func() {
 				)).To(Succeed())
 
 				// ----------------------------------------------------------------
-				// Crossplane flow: deploy XRD/Composition via Deployer, then XR
-				// instance. The Crossplane path is identified by the presence of
-				// crossplane-composition.yaml alongside resource.yaml + deployer.yaml.
+				// Crossplane flow: the OCM Deployer in bootstrap.yaml applies the
+				// XRD+Composition via the crossplane-xrd blob in the OCM component.
+				// This is the correct OCM Kubernetes Toolkit pattern: the composition
+				// flows through OCM (component → Resource → Deployer → cluster),
+				// not applied directly from disk. After bootstrap we just wait for
+				// the XRD to be Established before creating the XR instance.
 				// ----------------------------------------------------------------
 				isCrossplane := slices.Contains(files, CrossplaneComposition) &&
-					slices.Contains(files, CrossplaneResource) &&
-					slices.Contains(files, CrossplaneDeployer)
+					slices.Contains(files, Instance)
 
 				if isCrossplane {
-					By("bootstrapping the crossplane example (OCM stack)")
+					By("bootstrapping the crossplane example (OCM stack + XRD Deployer)")
 					Expect(utils.DeployResource(ctx, filepath.Join(exDir, Bootstrap))).To(Succeed())
 
 					By("waiting for OCM Repository and Component to be ready")
 					Expect(utils.WaitForResource(ctx, "condition=Ready=true", timeout,
 						"component.delivery.ocm.software/"+name+"-component", "-n", "default")).To(Succeed())
 
-					By("creating OCM Resource for the XRD/Composition bundle")
-					Expect(utils.DeployAndWaitForResource(
-						ctx, filepath.Join(exDir, CrossplaneResource),
-						"condition=Ready=true",
-						timeout,
-					)).To(Succeed())
-
-					By("creating OCM Deployer to apply the XRD/Composition")
-					Expect(utils.DeployAndWaitForResource(
-						ctx, filepath.Join(exDir, CrossplaneDeployer),
-						"condition=Ready=true",
-						timeout,
-					)).To(Succeed())
-
-					By("waiting for XRD to be Established")
+					By("waiting for XRD to be Established via OCM Deployer")
 					xrdName := xrdNameFromComposition(filepath.Join(exDir, CrossplaneComposition))
 					if xrdName != "" {
 						Expect(utils.WaitForResource(ctx, "condition=Established=true", timeout,
