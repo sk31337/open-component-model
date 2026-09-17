@@ -254,6 +254,13 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
+  name: controller-manager-crossplane-e2e
+subjects:
+  - kind: ServiceAccount
+    name: ocm-k8s-toolkit-controller-manager
+    namespace: ocm-k8s-toolkit-system
+EOF
+
   # Grant Crossplane SA permission to manage OCM, Flux, and ArgoCD resources
   # (needed so Crossplane Compositions can create OCM Resources, HelmReleases, etc.)
   kubectl apply -f - <<EOF
