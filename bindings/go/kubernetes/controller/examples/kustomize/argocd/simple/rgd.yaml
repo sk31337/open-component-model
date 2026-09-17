@@ -22,6 +22,10 @@ spec:
             byReference:
               resource:
                 name: kustomize-resource
+          additionalStatusFields:
+            registry: resource.access.toOCI().registry
+            repository: resource.access.toOCI().repository
+            digest: resource.access.toOCI().digest
     - id: argocdApplication
       template:
         apiVersion: argoproj.io/v1alpha1
@@ -34,11 +38,10 @@ spec:
         spec:
           project: default
           source:
-            repoURL: ${resourceKustomization.status.resource.access.repoUrl}
-            targetRevision: ${resourceKustomization.status.resource.access.commit}
-            path: kustomize
+            repoURL: oci://${resourceKustomization.status.additional.registry}/${resourceKustomization.status.additional.repository}
+            targetRevision: ${resourceKustomization.status.additional.digest}
+            path: "./"
             kustomize:
-              # e2e-test related patches to validate deployment
               patches:
                 - patch: |
                     - op: replace
@@ -51,12 +54,11 @@ spec:
                     kind: Deployment
                     name: .*
                 - patch: |
-                    - op: replace
-                      path: /spec/minReplicas
-                      value: 1
-                    - op: replace
-                      path: /spec/maxReplicas
-                      value: 1
+                    apiVersion: autoscaling/v2
+                    kind: HorizontalPodAutoscaler
+                    metadata:
+                      name: podinfo
+                    $patch: delete
                   target:
                     kind: HorizontalPodAutoscaler
                     name: .*

@@ -37,19 +37,6 @@ var ignoreExamples = map[string]struct{}{
 	"applyset-pruning":   {}, // tested in e2e_applyset_test.go
 	"replication-simple": {}, // tested in e2e_replication_test.go
 
-	// Legacy flat examples superseded by the new nested structure under
-	// helm/{fluxcd,argocd}/{kro,crossplane}/ and kustomize/{fluxcd,argocd}/.
-	// Kept on disk for reference but excluded from test runs to avoid
-	// conflicts with the new dedicated per-tool scenarios.
-	"helm-simple":                    {}, // → helm/fluxcd/kro/simple + helm/argocd/kro/simple
-	"helm-simple-nested-status":      {}, // → helm/fluxcd/kro/simple-nested-status + helm/argocd/kro/simple-nested-status
-	"helm-nested":                    {}, // → helm/fluxcd/kro/nested + helm/argocd/kro/nested
-	"helm-nested-signed":             {}, // → helm/fluxcd/kro/nested-signed + helm/argocd/kro/nested-signed
-	"helm-signing":                   {}, // → helm/fluxcd/kro/signing + helm/argocd/kro/signing
-	"helm-configuration-localization": {}, // → helm/fluxcd/kro/configuration-localization + helm/argocd/kro/configuration-localization
-	"kustomize-simple":               {}, // → kustomize/fluxcd/simple + kustomize/argocd/simple
-	"kustomize-configuration-localization": {}, // → kustomize/fluxcd/configuration-localization + kustomize/argocd/configuration-localization
-	"k8s-manifest-simple":            {}, // → k8s-manifest/simple
 }
 
 // exampleEntry carries the absolute dir path and its path relative to
@@ -274,6 +261,16 @@ var _ = Describe("controller", func() {
 						timeout,
 					)).To(Succeed())
 
+					// Register a DeferCleanup that runs AFTER the instance DeferCleanup
+					// (LIFO) but BEFORE the bootstrap DeferCleanup. It force-removes
+					// the OCM finalizer from any kro-composed Resources so the bootstrap
+					// --wait=true delete doesn't deadlock waiting for a Component that
+					// is already gone.
+					scenarioName := name
+					DeferCleanup(func(ctx SpecContext) {
+						forceCleanupKroComposedResources(ctx, scenarioName)
+					})
+
 					if strings.Contains(example.relPath, "argocd") {
 						appName := "applications.argoproj.io/" + name
 						By("checking for ArgoCD Application " + appName)
@@ -321,14 +318,16 @@ func runLocalizationAssertions(ctx SpecContext, name, relPath string) {
 	}
 
 	By("validating the FluxCD localization")
-	assertLocalizedImage("pod -l app.kubernetes.io/name=" + name + "-podinfo")
+	if !strings.Contains(relPath, "argocd") {
+		assertLocalizedImage("pod -l app.kubernetes.io/name=" + name + "-podinfo")
 
-	By("validating the FluxCD configuration (ui.message)")
-	Expect(utils.CompareResourceField(ctx,
-		"pod -l app.kubernetes.io/name="+name+"-podinfo",
-		"'{.items[0].spec.containers[0].env[?(@.name==\"PODINFO_UI_MESSAGE\")].value}'",
-		name,
-	)).To(Succeed())
+		By("validating the FluxCD configuration (ui.message)")
+		Expect(utils.CompareResourceField(ctx,
+			"pod -l app.kubernetes.io/name="+name+"-podinfo",
+			"'{.items[0].spec.containers[0].env[?(@.name==\"PODINFO_UI_MESSAGE\")].value}'",
+			name,
+		)).To(Succeed())
+	}
 
 	if strings.Contains(relPath, "argocd") {
 		By("validating the ArgoCD localization")
@@ -412,4 +411,34 @@ func forceDeleteOCMResource(ctx context.Context, resourceName string) {
 		"-p", `[{"op":"replace","path":"/metadata/finalizers","value":[]}]`,
 	)
 	_, _ = utils.Run(cmd)
+}
+
+// forceCleanupKroComposedResources removes OCM Resource finalizers that kro
+// creates as composed objects from the kro RGD template. Without this, deleting
+// bootstrap.yaml with --wait=true deadlocks: kro's composed OCM Resource holds
+// finalizers.ocm.software/resource, the OCM controller can't remove it because
+// the Component (also in bootstrap) is already gone, so kubectl delete
+// bootstrap --wait blocks forever.
+//
+// Pattern: the kro RGD creates an OCM Resource named "<prefix>-resource-chart-name"
+// (and similar variants for image, etc.). We patch out the finalizer so the
+// resource can be GC'd cleanly.
+//
+// All errors are ignored — best-effort; the real test already passed.
+func forceCleanupKroComposedResources(ctx context.Context, namePrefix string) {
+	suffixes := []string{
+		"-resource-chart-name",
+		"-resource-image-name",
+		"-resource-rgd",
+	}
+	for _, suffix := range suffixes {
+		rName := namePrefix + suffix
+		cmd := exec.CommandContext(ctx, "kubectl", "patch",
+			"resource.delivery.ocm.software/"+rName,
+			"-n", "default",
+			"--type", "json",
+			"-p", `[{"op":"replace","path":"/metadata/finalizers","value":[]}]`,
+		)
+		_, _ = utils.Run(cmd)
+	}
 }

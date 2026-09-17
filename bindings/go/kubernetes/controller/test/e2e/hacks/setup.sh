@@ -187,6 +187,21 @@ stringData:
   enableOCI: "true"
   insecureOCIForceHttp: "true"
 EOF
+  # Also register the Docker-network alias the OCM controller uses in status.additional.registry.
+  kubectl apply -n argocd -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: image-registry-alias-creds
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repo-creds
+stringData:
+  url: oci://image-registry:${reg_port}
+  type: helm
+  enableOCI: "true"
+  insecureOCIForceHttp: "true"
+EOF
 }
 
 install_kro() {

@@ -24,6 +24,10 @@ spec:
             byReference:
               resource:
                 name: kustomize-resource
+          additionalStatusFields:
+            registry: resource.access.toOCI().registry
+            repository: resource.access.toOCI().repository
+            digest: resource.access.toOCI().digest
     - id: resourceImage
       template:
         apiVersion: delivery.ocm.software/v1alpha1
@@ -40,19 +44,22 @@ spec:
           additionalStatusFields:
             registry: resource.access.toOCI().registry
             repository: resource.access.toOCI().repository
-            tag: resource.access.toOCI().tag
-    - id: gitrepository
+            digest: resource.access.toOCI().digest
+    - id: ocirepository
       template:
         apiVersion: source.toolkit.fluxcd.io/v1
-        kind: GitRepository
+        kind: OCIRepository
         metadata:
-          name: podinfo
-          namespace: default
+          name: "${schema.spec.prefix}-oci-repository-name"
         spec:
-          interval: 5m
-          url: ${resourceKustomization.status.resource.access.repoUrl}
+          interval: 1m0s
+          insecure: true
+          url: oci://${resourceKustomization.status.additional.registry}/${resourceKustomization.status.additional.repository}
           ref:
-            commit: ${resourceKustomization.status.resource.access.commit}
+            digest: ${resourceKustomization.status.additional.digest}
+          layerSelector:
+            mediaType: "application/vnd.cncf.flux.content.v1.tar+gzip"
+            operation: extract
     - id: kustomization
       template:
         apiVersion: kustomize.toolkit.fluxcd.io/v1
@@ -64,19 +71,17 @@ spec:
           interval: 1m
           prune: true
           sourceRef:
-            kind: GitRepository
-            name: ${gitrepository.metadata.name}
-          path: "kustomize"
+            kind: OCIRepository
+            name: ${ocirepository.metadata.name}
+          path: "./"
           patches:
-            # Localization
             - patch: |
                 - op: replace
                   path: /spec/template/spec/containers/0/image
-                  value: ${resourceImage.status.additional.registry}/${resourceImage.status.additional.repository}:${resourceImage.status.additional.tag}
+                  value: ${resourceImage.status.additional.registry}/${resourceImage.status.additional.repository}@${resourceImage.status.additional.digest}
               target:
                 kind: Deployment
                 name: .*
-            # Configuration
             - patch: |
                 - op: add
                   path: /spec/template/spec/containers/0/env/-
@@ -86,7 +91,6 @@ spec:
               target:
                 kind: Deployment
                 name: .*
-            # e2e-test related patch to validate deployment
             - patch: |
                 - op: replace
                   path: /metadata/name
@@ -98,12 +102,11 @@ spec:
                 kind: Deployment
                 name: .*
             - patch: |
-                - op: replace
-                  path: /spec/minReplicas
-                  value: 1
-                - op: replace
-                  path: /spec/maxReplicas
-                  value: 1
+                apiVersion: autoscaling/v2
+                kind: HorizontalPodAutoscaler
+                metadata:
+                  name: podinfo
+                $patch: delete
               target:
                 kind: HorizontalPodAutoscaler
                 name: .*

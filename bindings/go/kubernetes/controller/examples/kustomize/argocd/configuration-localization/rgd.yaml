@@ -24,6 +24,10 @@ spec:
             byReference:
               resource:
                 name: kustomize-resource
+          additionalStatusFields:
+            registry: resource.access.toOCI().registry
+            repository: resource.access.toOCI().repository
+            digest: resource.access.toOCI().digest
     - id: resourceImage
       template:
         apiVersion: delivery.ocm.software/v1alpha1
@@ -40,7 +44,7 @@ spec:
           additionalStatusFields:
             registry: resource.access.toOCI().registry
             repository: resource.access.toOCI().repository
-            tag: resource.access.toOCI().tag
+            digest: resource.access.toOCI().digest
     - id: argocdApplication
       template:
         apiVersion: argoproj.io/v1alpha1
@@ -53,33 +57,19 @@ spec:
         spec:
           project: default
           source:
-            repoURL: ${resourceKustomization.status.resource.access.repoUrl}
-            targetRevision: ${resourceKustomization.status.resource.access.commit}
-            path: kustomize
+            repoURL: oci://${resourceKustomization.status.additional.registry}/${resourceKustomization.status.additional.repository}
+            targetRevision: ${resourceKustomization.status.additional.digest}
+            path: "./"
             kustomize:
-              # Localization + Configuration patches mirror the Flux variant's
-              # Kustomization.spec.patches; ArgoCD ≥ 2.10 supports kustomize.patches
-              # with the same JSON6902 / strategic-merge syntax.
               patches:
-                # Localization: rewrite container image to the OCM-published image-resource.
-                - patch: |
-                    - op: replace
-                      path: /spec/template/spec/containers/0/image
-                      value: ${resourceImage.status.additional.registry}/${resourceImage.status.additional.repository}:${resourceImage.status.additional.tag}
+                - patch: '[{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"${resourceImage.status.additional.registry}/${resourceImage.status.additional.repository}@${resourceImage.status.additional.digest}"}]'
                   target:
                     kind: Deployment
-                    name: .*
-                # Configuration: inject PODINFO_UI_MESSAGE env var from the schema.
-                - patch: |
-                    - op: add
-                      path: /spec/template/spec/containers/0/env/-
-                      value:
-                        name: PODINFO_UI_MESSAGE
-                        value: ${schema.spec.podinfo.message}
+                    name: podinfo
+                - patch: '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"PODINFO_UI_MESSAGE","value":"${schema.spec.podinfo.message}"}}]'
                   target:
                     kind: Deployment
-                    name: .*
-                # e2e-test related patch to validate deployment
+                    name: podinfo
                 - patch: |
                     - op: replace
                       path: /metadata/name
@@ -89,17 +79,16 @@ spec:
                       value: kustomize-argocd-configuration-localization-podinfo
                   target:
                     kind: Deployment
-                    name: .*
+                    name: podinfo
                 - patch: |
-                    - op: replace
-                      path: /spec/minReplicas
-                      value: 1
-                    - op: replace
-                      path: /spec/maxReplicas
-                      value: 1
+                    apiVersion: autoscaling/v2
+                    kind: HorizontalPodAutoscaler
+                    metadata:
+                      name: podinfo
+                    $patch: delete
                   target:
                     kind: HorizontalPodAutoscaler
-                    name: .*
+                    name: podinfo
           destination:
             server: https://kubernetes.default.svc
             namespace: default-argocd
