@@ -1,0 +1,11 @@
+apiVersion: delivery.ocm.software/v1alpha1
+kind: Resource
+metadata:
+  name: helm-signing-crossplane-resource-xrd
+spec:
+  componentRef:
+    name: helm-signing-component
+  resource:
+    byReference:
+      resource:
+        name: crossplane-xrd

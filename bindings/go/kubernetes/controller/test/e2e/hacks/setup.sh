@@ -193,11 +193,79 @@ install_kro() {
   helm install kro oci://registry.k8s.io/kro/charts/kro --namespace kro --create-namespace --version=0.9.2
 }
 
+install_crossplane() {
+  CROSSPLANE_VERSION="${CROSSPLANE_VERSION:-2.3.1}"
+  if kubectl get deployment crossplane -n crossplane-system >/dev/null 2>&1 \
+     && kubectl get deployment crossplane -n crossplane-system -o jsonpath='{.status.availableReplicas}' | grep -q '[1-9]'; then
+    echo "crossplane already installed, skipping"
+  else
+    helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null || true
+    helm repo update crossplane-stable
+    helm upgrade --install crossplane crossplane-stable/crossplane \
+      --namespace crossplane-system --create-namespace \
+      --version "${CROSSPLANE_VERSION}" --wait
+  fi
+
+  # function-patch-and-transform
+  if ! kubectl get functions.pkg.crossplane.io crossplane-contrib-function-patch-and-transform >/dev/null 2>&1; then
+    kubectl apply -f - <<EOF
+apiVersion: pkg.crossplane.io/v1beta1
+kind: Function
+metadata:
+  name: crossplane-contrib-function-patch-and-transform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/function-patch-and-transform:v0.10.6
+EOF
+    kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-patch-and-transform \
+      --for=condition=Healthy=True --timeout=120s
+  fi
+
+  # function-auto-ready
+  if ! kubectl get functions.pkg.crossplane.io crossplane-contrib-function-auto-ready >/dev/null 2>&1; then
+    kubectl apply -f - <<EOF
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: crossplane-contrib-function-auto-ready
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/function-auto-ready:v0.6.5
+EOF
+    kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-auto-ready \
+      --for=condition=Healthy=True --timeout=120s
+  fi
+
+  # Grant OCM controller permission to manage Crossplane XRDs/Compositions
+  kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: controller-manager-crossplane-e2e
+rules:
+  - apiGroups: ["apiextensions.crossplane.io"]
+    resources: ["compositeresourcedefinitions","compositions"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: controller-manager-crossplane-e2e
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: controller-manager-crossplane-e2e
+subjects:
+  - kind: ServiceAccount
+    name: ocm-k8s-toolkit-controller-manager
+    namespace: ocm-k8s-toolkit-system
+EOF
+}
+
 pids=()
 run_step "image-registries"   install_registries & pids+=($!)
 run_step "flux"               install_flux       & pids+=($!)
 run_step "argocd"             install_argocd     & pids+=($!)
 run_step "kro"                install_kro        & pids+=($!)
+run_step "crossplane"         install_crossplane & pids+=($!)
 
 fail=0
 for pid in "${pids[@]}"; do
