@@ -24,8 +24,6 @@ const (
 	PublicKey                = "ocm.software.pub"
 	PrivateKey               = "ocm.software"
 	CrossplaneComposition    = "crossplane-composition.yaml"
-	CrossplaneResource       = "crossplane-resource.yaml"
-	CrossplaneDeployer       = "crossplane-deployer.yaml"
 	CrossplaneInstance       = "crossplane-instance.yaml"
 )
 
@@ -96,12 +94,6 @@ var _ = Describe("controller", func() {
 				name := ""
 
 				if slices.Contains(files, Rgd) {
-					// Apply the RGD directly from the local file so the kro RGD is always
-					// up-to-date regardless of what's cached in the OCM registry.
-					// Use DeployResourceWithoutCleanup since kro manages the RGD lifecycle
-					// when the instance is deleted; blocking --wait on RGD deletion causes
-					// 2-minute timeouts because kro skips CRD deletion.
-					Expect(utils.DeployResourceWithoutCleanup(ctx, filepath.Join(examplesDir, example.Name(), Rgd))).To(Succeed())
 					name = "rgd/" + example.Name()
 					Expect(utils.WaitForResource(ctx, "create", timeout, name)).To(Succeed())
 					Expect(
@@ -141,8 +133,9 @@ var _ = Describe("controller", func() {
 				}
 
 				// Crossplane flow: apply XRD+Composition directly, then XR instance
-				// Note: we apply crossplane-composition.yaml directly (not via OCM Deployer)
-				// to avoid OCI registry immutability issues with cached blob digests.
+				// Crossplane flow: the bootstrap already deployed the OCM Resource and
+				// Deployer for crossplane-xrd alongside the kro ones. Here we just wait
+				// for the XRD to be Established, then create the XR instance.
 				// Nested examples are skipped because the helm-resource lives inside
 				// a child component, not directly in the parent component.
 				isNested := strings.Contains(example.Name(), "nested")
@@ -150,9 +143,6 @@ var _ = Describe("controller", func() {
 					slices.Contains(files, CrossplaneInstance) &&
 					!isNested {
 					crossplaneName := example.Name() + "-crossplane"
-
-					By("applying Crossplane XRD+Composition directly")
-					Expect(utils.DeployResource(ctx, filepath.Join(examplesDir, example.Name(), CrossplaneComposition))).To(Succeed())
 
 					By("waiting for XRD to be Established")
 					xrdName, xrdErr := xrdNameFromComposition(filepath.Join(examplesDir, example.Name(), CrossplaneComposition))
