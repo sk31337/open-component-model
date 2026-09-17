@@ -200,15 +200,15 @@ install_crossplane() {
     echo "crossplane already installed, skipping"
   else
     helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null || true
-    helm repo update crossplane-stable
+    helm repo update crossplane-stable || return 1
     helm upgrade --install crossplane crossplane-stable/crossplane \
       --namespace crossplane-system --create-namespace \
-      --version "${CROSSPLANE_VERSION}" --wait
+      --version "${CROSSPLANE_VERSION}" --wait || return 1
   fi
 
   # function-patch-and-transform
   if ! kubectl get functions.pkg.crossplane.io crossplane-contrib-function-patch-and-transform >/dev/null 2>&1; then
-    kubectl apply -f - <<EOF
+    kubectl apply -f - <<EOF || return 1
 apiVersion: pkg.crossplane.io/v1beta1
 kind: Function
 metadata:
@@ -216,13 +216,14 @@ metadata:
 spec:
   package: xpkg.upbound.io/crossplane-contrib/function-patch-and-transform:v0.10.6
 EOF
-    kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-patch-and-transform \
-      --for=condition=Healthy=True --timeout=120s
   fi
+  # Always wait — covers both fresh installs and pre-existing objects that may be unhealthy
+  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-patch-and-transform \
+    --for=condition=Healthy=True --timeout=120s || return 1
 
   # function-auto-ready
   if ! kubectl get functions.pkg.crossplane.io crossplane-contrib-function-auto-ready >/dev/null 2>&1; then
-    kubectl apply -f - <<EOF
+    kubectl apply -f - <<EOF || return 1
 apiVersion: pkg.crossplane.io/v1
 kind: Function
 metadata:
@@ -230,9 +231,10 @@ metadata:
 spec:
   package: xpkg.upbound.io/crossplane-contrib/function-auto-ready:v0.6.5
 EOF
-    kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-auto-ready \
-      --for=condition=Healthy=True --timeout=120s
   fi
+  # Always wait — covers both fresh installs and pre-existing objects that may be unhealthy
+  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-auto-ready \
+    --for=condition=Healthy=True --timeout=120s || return 1
 
   # Grant OCM controller permission to manage Crossplane XRDs/Compositions
   kubectl apply -f - <<EOF

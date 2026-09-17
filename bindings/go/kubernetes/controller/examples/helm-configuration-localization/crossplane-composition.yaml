@@ -230,6 +230,11 @@ spec:
                   chart: podinfo
                   helm:
                     releaseName: helm-configuration-localization
+                    parameters:
+                      - name: image.repository
+                        value: ""
+                      - name: ui.message
+                        value: ""
                   path: .
                 destination:
                   server: https://kubernetes.default.svc
