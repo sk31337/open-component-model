@@ -20,3 +20,24 @@ spec:
     name: helm-argocd-crossplane-simple-nested-status-repository
   semver: 1.0.0
   interval: 10m
+---
+apiVersion: delivery.ocm.software/v1alpha1
+kind: Resource
+metadata:
+  name: helm-argocd-crossplane-simple-nested-status-resource-xrd
+spec:
+  componentRef:
+    name: helm-argocd-crossplane-simple-nested-status-component
+  resource:
+    byReference:
+      resource:
+        name: crossplane-xrd
+---
+apiVersion: delivery.ocm.software/v1alpha1
+kind: Deployer
+metadata:
+  name: helm-argocd-crossplane-simple-nested-status-deployer
+spec:
+  resourceRef:
+    name: helm-argocd-crossplane-simple-nested-status-resource-xrd
+    namespace: default

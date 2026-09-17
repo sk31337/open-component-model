@@ -1,8 +1,0 @@
-apiVersion: delivery.ocm.software/v1alpha1
-kind: Deployer
-metadata:
-  name: helm-argocd-crossplane-simple-deployer
-spec:
-  resourceRef:
-    name: helm-argocd-crossplane-simple-resource-xrd
-    namespace: default
