@@ -252,11 +252,59 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: controller-manager-crossplane-e2e
+  # Grant Crossplane SA permission to manage OCM, Flux, and ArgoCD resources
+  # (needed so Crossplane Compositions can create OCM Resources, HelmReleases, etc.)
+  kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-ocm-resources-e2e
+rules:
+  - apiGroups: ["delivery.ocm.software"]
+    resources: ["resources","resources/status","components","repositories","deployers"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+  - apiGroups: ["examples.ocm.software"]
+    resources: ["*","*/status"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["ocirepositories","ocirepositories/status","helmrepositories","helmrepositories/status"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases","helmreleases/status"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications","applications/status"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-ocm-resources-e2e
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crossplane-ocm-resources-e2e
 subjects:
   - kind: ServiceAccount
-    name: ocm-k8s-toolkit-controller-manager
-    namespace: ocm-k8s-toolkit-system
+    name: crossplane
+    namespace: crossplane-system
+EOF
+
+  # Register image-registry:5000 (Docker network alias used by OCM controller) as
+  # an insecure OCI Helm source in ArgoCD so ArgoCD Applications can pull from it.
+  kubectl apply -n argocd -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: image-registry-alias-creds
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repo-creds
+stringData:
+  url: oci://image-registry:5000
+  type: helm
+  enableOCI: "true"
+  insecureOCIForceHttp: "true"
 EOF
 }
 
