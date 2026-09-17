@@ -63,6 +63,8 @@ spec:
                   byReference:
                     resource:
                       name: helm-resource
+                    referencePath:
+                      - name: nested-signed-chart
                 additionalStatusFields:
                   registry: resource.access.toOCI().registry
                   repository: resource.access.toOCI().repository

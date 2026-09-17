@@ -136,12 +136,8 @@ var _ = Describe("controller", func() {
 				// Crossplane flow: the bootstrap already deployed the OCM Resource and
 				// Deployer for crossplane-xrd alongside the kro ones. Here we just wait
 				// for the XRD to be Established, then create the XR instance.
-				// Nested examples are skipped because the helm-resource lives inside
-				// a child component, not directly in the parent component.
-				isNested := strings.Contains(example.Name(), "nested")
 				if slices.Contains(files, CrossplaneComposition) &&
-					slices.Contains(files, CrossplaneInstance) &&
-					!isNested {
+					slices.Contains(files, CrossplaneInstance) {
 					crossplaneName := example.Name() + "-crossplane"
 
 					By("waiting for XRD to be Established")
