@@ -24,7 +24,7 @@ fi
 if kubectl get functions.pkg.crossplane.io crossplane-contrib-function-patch-and-transform >/dev/null 2>&1; then
   echo "function-patch-and-transform already installed, skipping"
 else
-  kubectl apply -f - <<EOF
+  kubectl apply -f - <<EOF || return 1
 apiVersion: pkg.crossplane.io/v1beta1
 kind: Function
 metadata:
@@ -32,14 +32,14 @@ metadata:
 spec:
   package: xpkg.upbound.io/crossplane-contrib/function-patch-and-transform:${FUNCTION_P_AND_T_VERSION}
 EOF
-
-  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-patch-and-transform \
-    --for=condition=Installed=True \
-    --timeout=120s
-  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-patch-and-transform \
-    --for=condition=Healthy=True \
-    --timeout=120s
 fi
+# Always wait — covers fresh installs and pre-existing objects that may be unhealthy
+kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-patch-and-transform \
+  --for=condition=Installed=True \
+  --timeout=120s || return 1
+kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-patch-and-transform \
+  --for=condition=Healthy=True \
+  --timeout=120s || return 1
 
 # Install provider-kubernetes for in-cluster Object management.
 if kubectl get providers.pkg.crossplane.io crossplane-contrib-provider-kubernetes >/dev/null 2>&1; then
@@ -148,7 +148,7 @@ FUNCTION_AUTO_READY_VERSION="${FUNCTION_AUTO_READY_VERSION:-v0.6.5}"
 if kubectl get functions.pkg.crossplane.io crossplane-contrib-function-kro >/dev/null 2>&1; then
   echo "function-kro already installed, skipping"
 else
-  kubectl apply -f - <<EOF
+  kubectl apply -f - <<EOF || return 1
 apiVersion: pkg.crossplane.io/v1
 kind: Function
 metadata:
@@ -156,20 +156,20 @@ metadata:
 spec:
   package: xpkg.upbound.io/crossplane-contrib/function-kro:${FUNCTION_KRO_VERSION}
 EOF
-
-  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-kro \
-    --for=condition=Installed=True \
-    --timeout=120s
-  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-kro \
-    --for=condition=Healthy=True \
-    --timeout=120s
 fi
+# Always wait — covers fresh installs and pre-existing objects that may be unhealthy
+kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-kro \
+  --for=condition=Installed=True \
+  --timeout=120s || return 1
+kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-kro \
+  --for=condition=Healthy=True \
+  --timeout=120s || return 1
 
 # Install function-auto-ready (marks XRs ready when all composed resources are ready).
 if kubectl get functions.pkg.crossplane.io crossplane-contrib-function-auto-ready >/dev/null 2>&1; then
   echo "function-auto-ready already installed, skipping"
 else
-  kubectl apply -f - <<EOF
+  kubectl apply -f - <<EOF || return 1
 apiVersion: pkg.crossplane.io/v1
 kind: Function
 metadata:
@@ -177,14 +177,14 @@ metadata:
 spec:
   package: xpkg.upbound.io/crossplane-contrib/function-auto-ready:${FUNCTION_AUTO_READY_VERSION}
 EOF
-
-  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-auto-ready \
-    --for=condition=Installed=True \
-    --timeout=120s
-  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-auto-ready \
-    --for=condition=Healthy=True \
-    --timeout=120s
 fi
+# Always wait — covers fresh installs and pre-existing objects that may be unhealthy
+kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-auto-ready \
+  --for=condition=Installed=True \
+  --timeout=120s || return 1
+kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-auto-ready \
+  --for=condition=Healthy=True \
+  --timeout=120s || return 1
 
 # Grant the Crossplane SA permission to manage OCM, Flux, and ArgoCD resources directly
 # (needed when compositions create composed resources without provider-kubernetes Objects).
