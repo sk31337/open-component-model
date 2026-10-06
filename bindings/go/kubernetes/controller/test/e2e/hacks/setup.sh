@@ -207,6 +207,24 @@ stringData:
   enableOCI: "true"
   insecureOCIForceHttp: "true"
 EOF
+
+  # Register the Docker network alias (image-registry:5000) as a second credential
+  # template. Crossplane Compositions surface this alias in the XR status fields that
+  # get copied into ArgoCD Application repoURLs, so ArgoCD must recognise it too.
+  kubectl apply -n argocd -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: image-registry-alias-creds
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repo-creds
+stringData:
+  url: oci://image-registry:5000
+  type: helm
+  enableOCI: "true"
+  insecureOCIForceHttp: "true"
+EOF
 }
 
 install_kro() {
@@ -319,22 +337,6 @@ subjects:
     namespace: crossplane-system
 EOF
 
-  # Register image-registry:5000 (Docker network alias used by OCM controller) as
-  # an insecure OCI Helm source in ArgoCD so ArgoCD Applications can pull from it.
-  kubectl apply -n argocd -f - <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: image-registry-alias-creds
-  namespace: argocd
-  labels:
-    argocd.argoproj.io/secret-type: repo-creds
-stringData:
-  url: oci://image-registry:5000
-  type: helm
-  enableOCI: "true"
-  insecureOCIForceHttp: "true"
-EOF
 }
 
 pids=()
