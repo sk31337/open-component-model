@@ -15,16 +15,16 @@ import (
 )
 
 const (
-	ComponentConstructor     = "component-constructor.yaml"
-	Bootstrap                = "bootstrap.yaml"
-	Manifests                = "manifests.yaml"
-	Rgd                      = "rgd.yaml"
-	Instance                 = "instance.yaml"
-	K8sManifest              = "k8s-manifest.yaml"
-	PublicKey                = "ocm.software.pub"
-	PrivateKey               = "ocm.software"
-	CrossplaneComposition    = "crossplane-composition.yaml"
-	CrossplaneInstance       = "crossplane-instance.yaml"
+	ComponentConstructor  = "component-constructor.yaml"
+	Bootstrap             = "bootstrap.yaml"
+	Manifests             = "manifests.yaml"
+	Rgd                   = "rgd.yaml"
+	Instance              = "instance.yaml"
+	K8sManifest           = "k8s-manifest.yaml"
+	PublicKey             = "ocm.software.pub"
+	PrivateKey            = "ocm.software"
+	CrossplaneComposition = "crossplane-composition.yaml"
+	CrossplaneInstance    = "crossplane-instance.yaml"
 )
 
 // ignoreExamples lists examples that are tested elsewhere or should be skipped.
