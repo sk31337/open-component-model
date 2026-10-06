@@ -310,6 +310,26 @@ const BINDING_MOUNTS = [
     { pkg: 'sigstore',      source: 'spec/credentials/trustedroot/v1alpha1/schemas',     target: 'schemas/bindings/go/credentials/sigstore/trustedroot/v1alpha1' },
     { pkg: 'credentials',   source: 'spec/config/v1/schemas',                            target: 'schemas/bindings/go/credentials/direct/v1' },
     { pkg: 'wget',          source: 'spec/credentials/v1/schemas',                       target: 'schemas/bindings/go/credentials/wget/v1' },
+    // Introduced in 0.17; older release tags do not contain these schema directories.
+    { pkg: 'transfer',      source: 'v1alpha1/spec/schemas',                             target: 'schemas/bindings/go/transfer',               since: '0.17' },
+    { pkg: 'wget',          source: 'transformation/spec/v1alpha1/schemas',              target: 'schemas/bindings/go/wget/transformation',    since: '0.17' },
+    { pkg: 'configuration/checksum/http', source: 'v1alpha1/spec/schemas', target: 'schemas/bindings/go/configuration/checksum/http/v1alpha1', sinceMonolith: true },
+    { pkg: 'git',           source: 'spec/credentials/v1/schemas',                       target: 'schemas/bindings/go/credentials/git/v1',     since: '0.18' },
+    { pkg: 'input/dir', source: 'spec/v1/schemas', target: 'schemas/bindings/go/input/dir/v1', since: '0.18' },
+    { pkg: 'input/file', source: 'spec/v1/schemas', target: 'schemas/bindings/go/input/file/v1', since: '0.18' },
+    { pkg: 'input/utf8', source: 'spec/v1/schemas', target: 'schemas/bindings/go/input/utf8/v1', since: '0.18' },
+    { pkg: 'helm', source: 'spec/input/v1/schemas', target: 'schemas/bindings/go/input/helm/v1', since: '0.18' },
+    { pkg: 'wget', source: 'spec/input/v1/schemas', target: 'schemas/bindings/go/input/wget/v1', since: '0.18' },
+    { pkg: 's3', source: 'spec/input/v2/schemas', target: 'schemas/bindings/go/input/s3/v2', since: '0.18' },
+    { pkg: 'git', source: 'spec/input/v1/schemas', target: 'schemas/bindings/go/input/git/v1', since: '0.18' },
+    { pkg: 'oci', source: 'spec/access/v1/schemas', target: 'schemas/bindings/go/access/oci/v1', since: '0.18' },
+    { pkg: 'descriptor/v2', source: 'schemas', target: 'schemas/bindings/go/access/localblob/v1', since: '0.18' },
+    { pkg: 'helm', source: 'spec/access/v1/schemas', target: 'schemas/bindings/go/access/helm/v1', since: '0.18' },
+    { pkg: 'github', source: 'spec/access/v1/schemas', target: 'schemas/bindings/go/access/github/v1', since: '0.18' },
+    { pkg: 'git', source: 'spec/access/v1/schemas', target: 'schemas/bindings/go/access/git/v1', since: '0.18' },
+    { pkg: 'blob/filesystem', source: 'spec/access/v1alpha1/schemas', target: 'schemas/bindings/go/access/file/v1alpha1', since: '0.18' },
+    { pkg: 'wget', source: 'spec/access/v1/schemas', target: 'schemas/bindings/go/access/wget/v1', since: '0.18' },
+    { pkg: 's3', source: 'spec/access/v2/schemas', target: 'schemas/bindings/go/access/s3/v2', since: '0.18' },
 ];
 
 // Return the bindings schema imports for a version. The layout is auto-detected
@@ -322,11 +342,13 @@ const BINDING_MOUNTS = [
 function bindingSchemaImports(version, deps) {
     const monolithVersion = deps?.[MONOLITHIC_BINDINGS_MODULE];
     if (monolithVersion) {
-        const mounts = BINDING_MOUNTS.map(m => ({
-            source: `${m.pkg}/${m.source}`,
-            target: `static/${version}/${m.target}`,
-            sites: { matrix: { versions: [version] } },
-        }));
+        const mounts = BINDING_MOUNTS
+            .filter(m => !m.since || compareSemver(version, m.since) >= 0)
+            .map(m => ({
+                source: `${m.pkg}/${m.source}`,
+                target: `static/${version}/${m.target}`,
+                sites: { matrix: { versions: [version] } },
+            }));
 
         // If version is >= 0.16.0 cli and kubernetes/controller were added to bindings/go, so we need to add them to
         // BINDING_MOUNTS.
@@ -354,6 +376,13 @@ function bindingSchemaImports(version, deps) {
 
     const byPackage = new Map();
     for (const m of BINDING_MOUNTS) {
+        // Bindings introduced after the monorepo merge never existed as
+        // stand-alone Go modules, so they have no legacy per-package import.
+        // Entries gated by a `since` release simply lacked the schema directory
+        // in older tags.
+        if (m.sinceMonolith || (m.since && compareSemver(version, m.since) < 0)) {
+            continue;
+        }
         if (!byPackage.has(m.pkg)) {
             byPackage.set(m.pkg, []);
         }

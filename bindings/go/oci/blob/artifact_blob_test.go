@@ -90,7 +90,7 @@ func TestResourceBlob_Digest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mock := &mockBlob{}
 			rb, err := ociblob.NewArtifactBlobWithMediaType(tt.resource, mock, "application/octet-stream")
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			dig, ok := rb.Digest()
 			assert.Equal(t, tt.expectedOK, ok)
 			if tt.expectedOK {
@@ -358,6 +358,15 @@ func TestNewResourceBlobWithMediaType_DigestValidation(t *testing.T) {
 				Value:         "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
 			},
 			blobDigest:    "",
+			expectedError: false,
+		},
+		{
+			name: "matching SHA-512 digests",
+			resourceDigest: &descriptor.Digest{
+				HashAlgorithm: internaldigest.HashAlgorithmSHA512,
+				Value:         "ee26b0dd4af7e749aa1a8ee3c10ae9923f618980772e473f8819a5d4940e0db27ac185f8a0e1d5f84f88bc887fd67b143732c304cc5fa9ad8e6f57f50028a8ff",
+			},
+			blobDigest:    "sha512:ee26b0dd4af7e749aa1a8ee3c10ae9923f618980772e473f8819a5d4940e0db27ac185f8a0e1d5f84f88bc887fd67b143732c304cc5fa9ad8e6f57f50028a8ff",
 			expectedError: false,
 		},
 	}

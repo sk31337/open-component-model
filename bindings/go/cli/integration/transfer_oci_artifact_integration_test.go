@@ -16,6 +16,7 @@ import (
 	"github.com/opencontainers/image-spec/specs-go"
 	ociImageSpecV1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
+	"oras.land/oras-go/v2/content/memory"
 
 	blobfs "ocm.software/open-component-model/bindings/go/blob/filesystem"
 	"ocm.software/open-component-model/bindings/go/blob/inmemory"
@@ -202,7 +203,7 @@ components:
 
 	sourceRef := fmt.Sprintf("ctf::%s//%s:%s", sourceCTF, componentName, componentVersion)
 
-	t.Run("transfer with default (no --upload-as flag)", func(t *testing.T) {
+	t.Run("transfer with default (no uploader config)", func(t *testing.T) {
 		targetRef := fmt.Sprintf("http://%s/%s", targetRegistry.RegistryAddress, "default")
 
 		transferCMD := cmd.New()
@@ -243,7 +244,125 @@ components:
 		r.NoError(v2.Scheme.Convert(desc.Component.Resources[1].Access, &localBlobAccess2))
 	})
 
-	t.Run("transfer with --upload-as localBlob", func(t *testing.T) {
+	t.Run("transfer with OCI uploader config (local blob with missing reference name)", func(t *testing.T) {
+		targetRef := fmt.Sprintf("http://%s/%s", targetRegistry.RegistryAddress, "as/oci/norefname")
+
+		transferCMD := cmd.New()
+		transferCMD.SetArgs([]string{
+			"transfer",
+			"component-version",
+			sourceRef,
+			targetRef,
+			"--config", cfgPath,
+			"--copy-resources", // required, otherwise we wouldn't transfer oci artifacts
+			"--config", writeOCIUploaderConfig(t),
+		})
+
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+
+		// Executes transfer
+		r.NoError(transferCMD.ExecuteContext(ctx), "transfer should succeed")
+
+		// Set up a repository to download components from the target to check whether
+		// the transfer worked as expected.
+		targetRepo, err := createRepo(ctx, repoProvider, credentialResolver, &ociv1.Repository{BaseUrl: targetRef})
+		r.NoError(err, "should be able to create target repository")
+
+		// Check if component exists in target registry
+		desc, err := targetRepo.GetComponentVersion(ctx, componentName, componentVersion)
+		r.NoError(err, "should be able to retrieve transferred component")
+		r.Equal(componentName, desc.Component.Name)
+		r.Equal(componentVersion, desc.Component.Version)
+		r.Len(desc.Component.Resources, 2)
+		r.Equal("test-oci-resource", desc.Component.Resources[0].Name)
+
+		var ociAccess v1.OCIImage
+		r.NoError(ociaccess.Scheme.Convert(desc.Component.Resources[0].Access, &ociAccess))
+		r.Equal(fmt.Sprintf("%s/test-oci-resource:v1.0.0", targetRef), ociAccess.ImageReference)
+
+		// upload as oci is expected to be skipped due to missing reference name
+		r.Equal("test-localblob-oci-resource", desc.Component.Resources[1].Name)
+		var localBlobAccess2 v2.LocalBlob
+		r.NoError(v2.Scheme.Convert(desc.Component.Resources[1].Access, &localBlobAccess2))
+	})
+
+	t.Run("transfer with OCI uploader config", func(t *testing.T) {
+		// Perform an intermediary transfer to get a local blob with a reference name
+		intermediaryctf := filepath.Join(tempdir, "intermediary-ctf")
+		intermediaryRef := fmt.Sprintf("ctf::%s", intermediaryctf)
+		transferIntermediaryCMD := cmd.New()
+		transferIntermediaryCMD.SetArgs([]string{
+			"transfer",
+			"component-version",
+			sourceRef,
+			intermediaryRef,
+			"--config", cfgPath,
+			"--copy-resources", // required, otherwise we wouldn't transfer oci artifacts
+		})
+
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+
+		// Executes transfer
+		r.NoError(transferIntermediaryCMD.ExecuteContext(ctx), "transfer should succeed")
+
+		// Check that the intermediary looks as we expect
+		intermediaryRepo, err := createRepo(ctx, repoProvider, credentialResolver, &ctfv1.Repository{FilePath: intermediaryctf})
+		r.NoError(err, "should be able to create intermediary repository")
+		desc, err := intermediaryRepo.GetComponentVersion(ctx, componentName, componentVersion)
+		r.NoError(err, "should be able to retrieve component from intermediary repository")
+		var localBlobAccess v2.LocalBlob
+		r.NoError(v2.Scheme.Convert(desc.Component.Resources[0].Access, &localBlobAccess))
+		r.Equal("test-oci-resource:v1.0.0", localBlobAccess.ReferenceName)
+		var anotherLocalBlobAccess v2.LocalBlob
+		r.NoError(v2.Scheme.Convert(desc.Component.Resources[1].Access, &anotherLocalBlobAccess))
+		r.Empty(anotherLocalBlobAccess.ReferenceName)
+
+		// Actual transfer to be tested
+		targetRef := fmt.Sprintf("http://%s/%s", targetRegistry.RegistryAddress, "as/oci/refname")
+		intermediaryRef = fmt.Sprintf("ctf::%s//%s:%s", intermediaryctf, componentName, componentVersion)
+
+		transferCMD := cmd.New()
+		transferCMD.SetArgs([]string{
+			"transfer",
+			"component-version",
+			intermediaryRef,
+			targetRef,
+			"--config", cfgPath,
+			"--copy-resources", // required, otherwise we wouldn't transfer oci artifacts
+			"--config", writeOCIUploaderConfig(t),
+		})
+
+		// Executes transfer
+		r.NoError(transferCMD.ExecuteContext(ctx), "transfer should succeed")
+
+		// Set up a repository to download components from the target to check whether
+		// the transfer worked as expected.
+		targetRepo, err := createRepo(ctx, repoProvider, credentialResolver, &ociv1.Repository{BaseUrl: targetRef})
+		r.NoError(err, "should be able to create target repository")
+
+		// Check if component exists in target registry
+		desc, err = targetRepo.GetComponentVersion(ctx, componentName, componentVersion)
+		r.NoError(err, "should be able to retrieve transferred component")
+		r.Equal(componentName, desc.Component.Name)
+		r.Equal(componentVersion, desc.Component.Version)
+		r.Len(desc.Component.Resources, 2)
+		r.Equal("test-oci-resource", desc.Component.Resources[0].Name)
+
+		var ociAccess v1.OCIImage
+		r.NoError(ociaccess.Scheme.Convert(desc.Component.Resources[0].Access, &ociAccess))
+		r.Equal(fmt.Sprintf("%s/test-oci-resource:v1.0.0", targetRef), ociAccess.ImageReference)
+
+		// upload as oci is expected to be skipped due to missing reference name
+		r.Equal("test-localblob-oci-resource", desc.Component.Resources[1].Name)
+		var localBlobAccess2 v2.LocalBlob
+		r.NoError(v2.Scheme.Convert(desc.Component.Resources[1].Access, &localBlobAccess2))
+	})
+
+	// TODO(legacy-flags): deprecated --copy-resources/--upload-as behavior, kept verbatim from
+	// before the uploader migration; remove together with legacy_flags.go.
+	t.Run("[deprecated] transfer with --upload-as localBlob", func(t *testing.T) {
 		targetRef := fmt.Sprintf("http://%s/%s", targetRegistry.RegistryAddress, "as/local")
 
 		transferCMD := cmd.New()
@@ -284,7 +403,7 @@ components:
 		r.NoError(v2.Scheme.Convert(desc.Component.Resources[1].Access, &localBlobAccess2))
 	})
 
-	t.Run("transfer with --upload-as ociArtifact (local blob with missing reference name)", func(t *testing.T) {
+	t.Run("[deprecated] transfer with --upload-as ociArtifact (local blob with missing reference name)", func(t *testing.T) {
 		targetRef := fmt.Sprintf("http://%s/%s", targetRegistry.RegistryAddress, "as/oci/norefname")
 
 		transferCMD := cmd.New()
@@ -327,7 +446,7 @@ components:
 		r.NoError(v2.Scheme.Convert(desc.Component.Resources[1].Access, &localBlobAccess2))
 	})
 
-	t.Run("transfer with --upload-as ociArtifact", func(t *testing.T) {
+	t.Run("[deprecated] transfer with --upload-as ociArtifact", func(t *testing.T) {
 		// Perform an intermediary transfer to get a local blob with a reference name
 		intermediaryctf := filepath.Join(tempdir, "intermediary-ctf")
 		intermediaryRef := fmt.Sprintf("ctf::%s", intermediaryctf)
@@ -357,7 +476,7 @@ components:
 		r.Equal("test-oci-resource:v1.0.0", localBlobAccess.ReferenceName)
 		var anotherLocalBlobAccess v2.LocalBlob
 		r.NoError(v2.Scheme.Convert(desc.Component.Resources[1].Access, &anotherLocalBlobAccess))
-		r.Equal("", anotherLocalBlobAccess.ReferenceName)
+		r.Empty(anotherLocalBlobAccess.ReferenceName)
 
 		// Actual transfer to be tested
 		targetRef := fmt.Sprintf("http://%s/%s", targetRegistry.RegistryAddress, "as/oci/refname")
@@ -556,7 +675,6 @@ components:
 		sourceRef, targetRef,
 		"--config", cfgPath,
 		"--copy-resources",
-		"--upload-as", "localBlob",
 	})
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -587,7 +705,142 @@ components:
 	r.Equal("RSASSA-PSS", desc.Signatures[0].Signature.Algorithm)
 }
 
+// Regression for #3674: copying v1-written OCI resources must not invalidate
+// component digests recorded by parents or signatures.
+func Test_Integration_Transfer_OCIArtifact_PreservesV1DescriptorDigest(t *testing.T) {
+	r := require.New(t)
+	t.Parallel()
+	ctx := t.Context()
+
+	sourceRegistry, err := internal.CreateOCIRegistry(t)
+	r.NoError(err)
+
+	sourceRepo := sourceRegistry.Connect(t)
+	resourceRepo := ocires.NewResourceRepository(&filesystemv1alpha1.Config{})
+	data, access := createSingleLayerOCIImage(t, []byte("issue-3674-artifact"),
+		"http://"+sourceRegistry.Reference("issue-3674-artifact:1.0.0"))
+	access.Type = ocmruntime.NewVersionedType("ociArtifact", "v1")
+
+	resource, err := resourceRepo.UploadResource(ctx, &descriptor.Resource{
+		ElementMeta: descriptor.ElementMeta{
+			ObjectMeta: descriptor.ObjectMeta{Name: "artifact", Version: "1.0.0"},
+		},
+		Type:     "ociImage",
+		Relation: descriptor.LocalRelation,
+		Access:   access,
+	}, inmemory.New(bytes.NewReader(data)), &ocicredsv1.OCICredentials{
+		Type:     ocicredsv1.OCICredentialsVersionedType,
+		Username: sourceRegistry.User,
+		Password: sourceRegistry.Password,
+	})
+	r.NoError(err)
+	r.NotNil(resource.Digest)
+
+	// Seed the descriptor as v1 wrote it, independently of the upload defaults.
+	resource.Digest.NormalisationAlgorithm = "ociArtifactDigest/v1"
+	wantResourceDigest := resource.Digest.DeepCopy()
+	const creationTime = "2026-06-19T07:16:30Z"
+	source := &descriptor.Descriptor{
+		Meta: descriptor.Meta{Version: "v2"},
+		Component: descriptor.Component{
+			ComponentMeta: descriptor.ComponentMeta{
+				ObjectMeta:   descriptor.ObjectMeta{Name: "ocm.software/issue3674", Version: "1.0.0"},
+				CreationTime: creationTime,
+			},
+			Provider:  descriptor.Provider{Name: "ocm.software"},
+			Resources: []descriptor.Resource{*resource},
+		},
+	}
+	wantComponentDigest, err := signing.GenerateDigest(ctx, source, slog.Default(), v4alpha1.Algorithm, crypto.SHA256.String())
+	r.NoError(err)
+	r.NoError(sourceRepo.AddComponentVersion(ctx, source))
+
+	assertPreserved := func(t *testing.T, repo repository.ComponentVersionRepository) *descriptor.Descriptor {
+		t.Helper()
+		r := require.New(t)
+		got, err := repo.GetComponentVersion(t.Context(), source.Component.Name, source.Component.Version)
+		r.NoError(err)
+		r.Equal(creationTime, got.Component.CreationTime)
+		r.Len(got.Component.Resources, 1)
+		r.Equal(wantResourceDigest, got.Component.Resources[0].Digest, "all resource digest metadata must survive transfer")
+		gotDigest, err := signing.GenerateDigest(t.Context(), got, slog.Default(), v4alpha1.Algorithm, crypto.SHA256.String())
+		r.NoError(err)
+		r.Equal(wantComponentDigest, gotDigest, "the digest recorded by a parent must still match")
+		return got
+	}
+	assertPreserved(t, sourceRepo)
+
+	cases := []struct {
+		name   string
+		viaCTF bool
+	}{
+		{
+			name: "registry-to-registry",
+		},
+		{
+			name:   "registry-ctf-registry",
+			viaCTF: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := require.New(t)
+			targetRegistry, err := internal.CreateOCIRegistry(t)
+			r.NoError(err)
+			cfgPath, err := internal.CreateOCMConfigForRegistry(t, []internal.ConfigOpts{
+				{Host: sourceRegistry.Host, Port: sourceRegistry.Port, User: sourceRegistry.User, Password: sourceRegistry.Password},
+				{Host: targetRegistry.Host, Port: targetRegistry.Port, User: targetRegistry.User, Password: targetRegistry.Password},
+			})
+			r.NoError(err)
+			transfer := func(from, to string) {
+				t.Helper()
+				command := cmd.New()
+				command.SetArgs([]string{
+					"transfer", "component-version", from, to,
+					"--config", cfgPath, "--copy-resources", "--config", writeOCIUploaderConfig(t),
+				})
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+				defer cancel()
+				r.NoError(command.ExecuteContext(ctx))
+			}
+			componentRef := "//" + source.Component.Name + ":" + source.Component.Version
+			from := "http://" + sourceRegistry.RegistryAddress + componentRef
+			if tc.viaCTF {
+				ctfPath := filepath.Join(t.TempDir(), "intermediary")
+				ctfRef := "ctf::" + ctfPath
+				transfer(from, ctfRef)
+				fs, err := blobfs.NewFS(ctfPath, os.O_RDONLY)
+				r.NoError(err)
+				ctfRepo, err := oci.NewRepository(ocictf.WithCTF(ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))))
+				r.NoError(err)
+				got := assertPreserved(t, ctfRepo)
+				var localAccess v2.LocalBlob
+				r.NoError(v2.Scheme.Convert(got.Component.Resources[0].Access, &localAccess))
+				r.NotEmpty(localAccess.ReferenceName, "the CTF must retain the OCI upload reference")
+				from = ctfRef + componentRef
+			}
+			transfer(from, "http://"+targetRegistry.RegistryAddress)
+			got := assertPreserved(t, targetRegistry.Connect(t))
+			var targetAccess v1.OCIImage
+			r.NoError(ociaccess.Scheme.Convert(got.Component.Resources[0].Access, &targetAccess))
+			r.Contains(targetAccess.ImageReference, targetRegistry.RegistryAddress+"/", "resource must point to the target registry")
+
+			// Fetch the complete artifact from the target, not merely its descriptor.
+			blob, err := resourceRepo.DownloadResource(t.Context(), &got.Component.Resources[0], &ocicredsv1.OCICredentials{
+				Type:     ocicredsv1.OCICredentialsVersionedType,
+				Username: targetRegistry.User,
+				Password: targetRegistry.Password,
+			})
+			r.NoError(err)
+			root, err := tar.CopyOCILayoutWithIndex(t.Context(), memory.New(), blob, tar.CopyOCILayoutWithIndexOptions{})
+			r.NoError(err)
+			r.Equal(wantResourceDigest.Value, root.Digest.Encoded())
+		})
+	}
+}
+
 func createSingleLayerOCIImage(t *testing.T, data []byte, ref ...string) ([]byte, *v1.OCIImage) {
+	t.Helper()
 	r := require.New(t)
 	var buf bytes.Buffer
 	w, err := tar.NewOCILayoutWriterWithTempFile(&buf, t.TempDir())

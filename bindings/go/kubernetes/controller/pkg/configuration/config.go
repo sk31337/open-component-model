@@ -26,6 +26,7 @@ import (
 	ocicredentials "ocm.software/open-component-model/bindings/go/oci/spec/credentials"
 	ocicredentialsv1 "ocm.software/open-component-model/bindings/go/oci/spec/credentials/v1"
 	"ocm.software/open-component-model/bindings/go/runtime"
+	signingspec "ocm.software/open-component-model/bindings/go/signing/v1alpha1/spec"
 	transferspec "ocm.software/open-component-model/bindings/go/transfer/v1alpha1/spec"
 )
 
@@ -38,20 +39,43 @@ var ocmConfigTypes = []runtime.Type{
 
 // allowedConfigTypes defines the set of OCM config types accepted by the controller.
 // It is built on top of ocmConfigTypes so the two can never drift.
-var allowedConfigTypes = append(
-	slices.Clone(ocmConfigTypes),
-	// credentials
-	runtime.NewVersionedType(credentialsv1spec.ConfigType, credentialsv1spec.Version),
-	runtime.NewUnversionedType(credentialsv1spec.ConfigType),
-	// path-matcher resolvers (v1alpha1)
-	runtime.NewVersionedType(resolversv1alpha1spec.ConfigType, resolversv1alpha1spec.Version),
-	runtime.NewUnversionedType(resolversv1alpha1spec.ConfigType),
-	// transfer settings
-	runtime.NewVersionedType(transferspec.ConfigType, transferspec.Version),
-	runtime.NewUnversionedType(transferspec.ConfigType),
-	runtime.NewVersionedType(httpv1alpha1.ConfigType, httpv1alpha1.Version),
-	runtime.NewUnversionedType(httpv1alpha1.ConfigType),
+var allowedConfigTypes = slices.Concat(
+	ocmConfigTypes,
+	[]runtime.Type{
+		// credentials
+		runtime.NewVersionedType(credentialsv1spec.ConfigType, credentialsv1spec.Version),
+		runtime.NewUnversionedType(credentialsv1spec.ConfigType),
+		// path-matcher resolvers (v1alpha1)
+		runtime.NewVersionedType(resolversv1alpha1spec.ConfigType, resolversv1alpha1spec.Version),
+		runtime.NewUnversionedType(resolversv1alpha1spec.ConfigType),
+	},
+	// transfer settings and the uploaders that only write into the replication target or keep
+	// resources by reference. The HTTP, Artifactory and Nexus uploaders are not accepted: they
+	// send resource content to configured URLs from the controller pod.
+	versionedAndUnversioned(
+		transferspec.ConfigType,
+		transferspec.OCIUploaderConfigType,
+		transferspec.LocalBlobUploaderConfigType,
+		transferspec.ReferenceUploaderConfigType,
+	),
+	[]runtime.Type{
+		runtime.NewVersionedType(httpv1alpha1.ConfigType, httpv1alpha1.Version),
+		runtime.NewUnversionedType(httpv1alpha1.ConfigType),
+		// signing settings, selects the verifier used for component signature verification
+		runtime.NewVersionedType(signingspec.ConfigType, signingspec.Version),
+		runtime.NewUnversionedType(signingspec.ConfigType),
+	},
 )
+
+// versionedAndUnversioned returns, for each transfer config type name, its versioned and
+// unversioned type.
+func versionedAndUnversioned(names ...string) []runtime.Type {
+	out := make([]runtime.Type, 0, 2*len(names))
+	for _, name := range names {
+		out = append(out, runtime.NewVersionedType(name, transferspec.Version), runtime.NewUnversionedType(name))
+	}
+	return out
+}
 
 // filterAllowedConfigTypes filters the provided config to only include config entries whose
 // types are in the allowedConfigTypes list. Additionally, it strips the deprecated Aliases field
@@ -232,18 +256,14 @@ func LoadConfigurations(ctx context.Context, k8sClient client.Reader, namespace 
 
 		configs = append(configs, cfg)
 	}
+	merged := genericv1.MergeConfigs(log.FromContext(ctx).V(1).Info, configs...)
 
-	flattened := genericv1.FlatMap(configs...)
-	if flattened == nil {
-		return nil, nil
-	}
-
-	flattenedFiltered, err := filterAllowedConfigTypes(ctx, flattened)
+	filtered, err := filterAllowedConfigTypes(ctx, merged)
 	if err != nil {
 		return nil, fmt.Errorf("failed to apply config type allowlist: %w", err)
 	}
 
-	content, err := json.Marshal(flattenedFiltered)
+	content, err := json.Marshal(filtered)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +273,7 @@ func LoadConfigurations(ctx context.Context, k8sClient client.Reader, namespace 
 	hash := hasher.Sum(nil)
 
 	result := Configuration{
-		Config: flattenedFiltered,
+		Config: filtered,
 		Hash:   hash,
 	}
 

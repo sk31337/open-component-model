@@ -18,7 +18,7 @@ jobs:
     outputs:
       run_go: ${{ steps.compute.outputs.run_go }}
       run_lint: ${{ steps.compute.outputs.run_lint }}
-      dependency_table_changed: ${{ steps.filter.outputs.dependency_table }}
+      dependency_list_changed: ${{ steps.filter.outputs.dependency_list }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,13 +37,15 @@ jobs:
               - 'conformance/scenarios/sovereign/components/notes/**'
             ci:
               - '.github/workflows/ci.yml'
-            dependency_table:
+            dependency_list:
               - 'golangci.yml'
               - 'tools.Taskfile.yml'
-              - '.github/scripts/dependency-table.js'
+              - '.github/scripts/dependency-list.js'
               - '.github/scripts/package.json'
               - '.github/scripts/package-lock.json'
               - 'docs/dependency-table.md'
+              - 'bindings/go/README.md'
+              - 'bindings/go/**/doc.go'
       - name: Compute scopes
         id: compute
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
@@ -99,22 +101,26 @@ jobs:
         run:
           task tools:golangci-lint/verify
 
-  dependency_table_verify:
-    name: "dependency-table-verify"
+  dependency_list_verify:
+    name: "dependency-list-verify"
     needs: changes
     runs-on: ubuntu-24.04-arm
-    if: ${{ needs.changes.outputs.dependency_table_changed == 'true' }}
+    if: ${{ needs.changes.outputs.dependency_list_changed == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Non-cone mode so that file and glob patterns (e.g. bindings/go/**/doc.go) work.
+          sparse-checkout-cone-mode: 'false'
           sparse-checkout: |
-            Taskfile.yml
-            tools.Taskfile.yml
-            golangci.yml
-            docs/dependency-table.md
-            .github/scripts/dependency-table.js
-            .github/scripts/package.json
-            .github/scripts/package-lock.json
+            /Taskfile.yml
+            /tools.Taskfile.yml
+            /golangci.yml
+            /docs/dependency-table.md
+            /bindings/go/README.md
+            /bindings/go/**/doc.go
+            /.github/scripts/dependency-list.js
+            /.github/scripts/package.json
+            /.github/scripts/package-lock.json
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -124,10 +130,10 @@ jobs:
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify dependency table is in sync
+      - name: Verify generated depguard documents are in sync
         run: |
-          task tools:dependency-table/verify || {
-            echo "::error::docs/dependency-table.md is out of sync. Run 'task tools:dependency-table/generate' and commit the result."
+          task tools:dependency-list/verify || {
+            echo "::error::docs/dependency-table.md or bindings/go/README.md is out of sync. Run 'task tools:dependency-list/generate' and commit the result."
             exit 1
           }
 
@@ -205,6 +211,30 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_USER: ${{ github.actor }}
         run: task bindings/go:test/integration
+      - name: Coverage summary and threshold
+        if: always()
+        working-directory: bindings/go
+        run: |
+          if [ ! -f coverage.integration.out ]; then
+            echo "### Integration coverage: n/a (tests did not run)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Floor = measured baseline (~47%, merged + generated excluded) minus a margin for churn. Ratchet up over time.
+          floor=43
+          pct=$(go tool cover -func=coverage.integration.out | awk '/^total:/{gsub(/%/,"",$NF);print $NF}')
+          echo "### Integration coverage: ${pct}% (floor ${floor}%)" >> "$GITHUB_STEP_SUMMARY"
+          awk -v p="$pct" -v f="$floor" 'BEGIN{exit (p+0 < f+0)}' \
+            || { echo "::error::integration coverage ${pct}% is below the ${floor}% floor"; exit 1; }
+      - name: Publish integration test report
+        uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
+        if: always()
+        with:
+          report_paths: '${{ github.workspace }}/bindings/go/junit.xml'
+          detailed_summary: true
+          include_passed: false
+          # annotate inline + write the job summary without creating a check run,
+          # so the report works on fork PRs (read-only token) too.
+          annotate_only: true
 
   run_unit_tests:
     name: "Unit Tests"
@@ -229,6 +259,20 @@ jobs:
           cache-dependency-path: '${{ github.workspace }}/bindings/go/go.sum'
       - name: Run Tests
         run: task bindings/go:test
+      - name: Coverage summary and threshold
+        if: always()
+        working-directory: bindings/go
+        run: |
+          if [ ! -f coverage.unit.out ]; then
+            echo "### Unit coverage: n/a (tests did not run)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Floor = filtered baseline (~65%, generated files excluded) minus a margin for churn. Ratchet up over time.
+          floor=62
+          pct=$(go tool cover -func=coverage.unit.out | awk '/^total:/{gsub(/%/,"",$NF);print $NF}')
+          echo "### Unit coverage: ${pct}% (floor ${floor}%)" >> "$GITHUB_STEP_SUMMARY"
+          awk -v p="$pct" -v f="$floor" 'BEGIN{exit (p+0 < f+0)}' \
+            || { echo "::error::unit coverage ${pct}% is below the ${floor}% floor"; exit 1; }
 
   generate:
     runs-on: ubuntu-24.04-arm
@@ -273,7 +317,7 @@ jobs:
       - run_unit_tests
       - run_integration_tests
       - golangci_lint
-      - dependency_table_verify
+      - dependency_list_verify
     if: ${{ failure() }}
     steps:
       - name: Some CI step failed or was cancelled!
