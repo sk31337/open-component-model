@@ -15,10 +15,14 @@ import (
 // BuildGraphDefinition constructs a [transformv1alpha1.TransformationGraphDefinition] that
 // describes how to transfer component versions between repositories.
 //
-// cfg carries the declarative transfer settings. A nil cfg and empty enum
-// fields resolve to the defaults: no recursion,
-// [transferv1alpha1.CopyModeLocalBlobResources], and
-// [transferv1alpha1.UploadAsLocalBlob].
+// cfg carries the declarative transfer settings. A nil cfg resolves to the
+// defaults: no recursion.
+//
+// uploaders select the resources to move and are evaluated in declaration order:
+// the first uploader whose match selects a resource handles it, and a selected
+// uploader that cannot handle the resource fails the build. A resource no uploader
+// selects follows the baseline: local blobs are copied as local blobs, everything
+// else stays by reference.
 //
 // Each [Mapping] pairs source components with a target repository and a
 // resolver, enabling N:M routing where different sources feed different
@@ -26,21 +30,23 @@ import (
 func BuildGraphDefinition(
 	ctx context.Context,
 	cfg *transferv1alpha1.Config,
+	uploaders []transferv1alpha1.UploaderConfig,
 	mappings ...Mapping,
 ) (*transformv1alpha1.TransformationGraphDefinition, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid transfer config: %w", err)
 	}
+	for i, u := range uploaders {
+		if v, ok := u.(runtime.Validatable); ok {
+			if err := v.Validate(); err != nil {
+				return nil, fmt.Errorf("invalid uploader config at index %d: %w", i, err)
+			}
+		}
+	}
 
 	resolved := transferv1alpha1.Config{}
 	if cfg != nil {
 		resolved = *cfg
-	}
-	if resolved.CopyMode == "" {
-		resolved.CopyMode = transferv1alpha1.CopyModeLocalBlobResources
-	}
-	if resolved.UploadType == "" {
-		resolved.UploadType = transferv1alpha1.UploadAsLocalBlob
 	}
 
 	roots, err := collectTransferRoots(ctx, mappings)
@@ -51,10 +57,9 @@ func BuildGraphDefinition(
 	slog.DebugContext(ctx, "building transfer graph definition",
 		"roots", len(roots),
 		"recursive", resolved.Recursive,
-		"copyMode", resolved.CopyMode,
-		"uploadType", resolved.UploadType)
+		"uploaders", len(uploaders))
 
-	return internal.BuildGraphDefinition(ctx, roots, resolved)
+	return internal.BuildGraphDefinition(ctx, roots, resolved, uploaders)
 }
 
 func collectTransferRoots(ctx context.Context, mappings []Mapping) (map[string]internal.TransferRoot, error) {

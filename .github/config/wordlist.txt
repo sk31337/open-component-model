@@ -1,3 +1,17 @@
+apparmor
+att
+bsi
+chainguard
+cni
+cnsa
+cra
+cvss
+esv
+grype
+healthcheck
+init
+kube
+lex
 Runtime's
 acls
 accessmethod
@@ -12,6 +26,7 @@ addociartifact
 addversion
 adr
 adrs
+aes
 agentic
 aggregative
 agpl
@@ -74,6 +89,7 @@ callout
 callouts
 camelcase
 canonicalized
+calver
 cas
 ccwienk
 cel
@@ -102,6 +118,7 @@ clusterroles
 clyso
 cmds
 cncf
+cmvp
 coc
 codebase
 codeowners
@@ -232,11 +249,13 @@ downloaders
 downloadhandlers
 dpop
 dry-run
+drbg
 dsl
 dup
 dups
 dynaml
 ecdsa
+ecdhe
 echoserver
 ecrplugin
 elementmeta
@@ -264,6 +283,7 @@ filesytem
 finalizer
 finalizers
 fixup
+fips
 florian
 fluxcd
 fluxcd's
@@ -284,6 +304,7 @@ gapped
 gav
 gc
 genericocireg
+gcm
 gerald
 gergely
 gethelmchart
@@ -298,6 +319,7 @@ gib
 gitcommit
 gitea
 github
+gitlab
 gitignore
 gitops
 gitrepository
@@ -305,6 +327,7 @@ gittreestate
 globalaccess
 globals
 gmbh
+gnupg
 gobuildinfo
 gobuildinfojson
 gocritic
@@ -442,6 +465,7 @@ linters
 lister
 listers
 llm
+liveness
 localblob
 localblobs
 localhost
@@ -498,6 +522,7 @@ mvnrepository
 myprivateregistry
 möller
 müller
+nacl
 namespace
 namespaced
 namespaces
@@ -511,6 +536,7 @@ newrepository
 newrepositoryspec
 niclas
 nixos
+nist
 noop
 npm
 npm's
@@ -588,6 +614,7 @@ packagespec
 packageversion
 parallelize
 parameterization
+passwd
 patchstrategicmerge
 patchstrategicmergesource
 patchstrategicmergetarget
@@ -669,6 +696,7 @@ representable
 reproducibility
 requeue
 requeues
+requeued
 resendbuffer
 resmgmt
 resolvefromcomponentversion
@@ -703,6 +731,7 @@ rsassa
 rss
 runnable
 runtime
+runtimes
 saas
 sakundarwar
 sast
@@ -713,12 +742,18 @@ scalable
 scheidemann
 schema
 schemas
+scrypt
 sdk
+seccomp
+secretbox
 secretref
+selinux
 semver
 sequent
 serializable
 serviceaccountname
+setgid
+setuid
 sexualized
 sha
 shortcode
@@ -750,6 +785,9 @@ socio
 sonatype
 sourceref
 spdx
+srg
+subcommand
+sv
 syft
 src
 srcrefs
@@ -773,6 +811,7 @@ subcharts
 subfolder
 subfolders
 subheadline
+submodules
 subpath
 subpaths
 subprocess
@@ -826,7 +865,9 @@ ttl
 tuf
 typehandler
 typename
+udp
 ui
+uids
 uis
 uncomment
 uncommenting
@@ -932,6 +973,7 @@ statefulset
 ConvertHelmToOCI
 GetHelmChart
 AddOCIArtifact
+TransferOCIArtifact
 csl
 async
 netlify
@@ -970,3 +1012,11 @@ RGW
 Cloudflare
 unversioned
 BuildKit
+retryable
+lexicographically
+artifactory
+ADR's
+KiB
+VM
+traversable
+unsplit

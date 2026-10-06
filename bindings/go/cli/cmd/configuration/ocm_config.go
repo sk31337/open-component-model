@@ -3,9 +3,11 @@ package configuration
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -51,15 +53,8 @@ By default (without specifying custom locations with this flag), the file will b
 - $EXE_DIR/.ocmconfig
 If multiple configuration files are found, they will be merged in the order they are discovered.
 Later entries have higher priority.
-Using the option, the specified configuration file(s) will be used instead of the lookup above.`)
-}
-
-func GetFlattenedOCMConfigForCommand(cmd *cobra.Command) (*genericv1.Config, error) {
-	cfg, err := GetOCMConfigForCommand(cmd)
-	if err != nil {
-		return nil, err
-	}
-	return genericv1.FlatMap(cfg), nil
+Using the option, the specified configuration file(s) will be used instead of the lookup above.
+Configuration documents piped into stdin are applied last, on top of these files.`)
 }
 
 func GetOCMConfigForCommand(cmd *cobra.Command) (*genericv1.Config, error) {
@@ -115,7 +110,7 @@ func loadAndMergeConfigs(paths []string, strict bool) (*genericv1.Config, error)
 		slog.Debug("ocm config was loaded successfully", slog.String("path", path))
 		cfgs = append(cfgs, cfg)
 	}
-	return genericv1.FlatMap(cfgs...), nil
+	return genericv1.MergeConfigs(slog.Warn, cfgs...), nil
 }
 
 // GetConfigFromPath reads and decodes the YAML configuration file from the specified path.
@@ -134,12 +129,26 @@ func GetConfigFromPath(path string) (_ *genericv1.Config, err error) {
 	defer func() {
 		err = errors.Join(err, file.Close())
 	}()
+	return decodeConfig(file)
+}
 
+func decodeConfig(r io.Reader) (*genericv1.Config, error) {
 	var instance genericv1.Config
-	if err := genericv1.Scheme.Decode(file, &instance); err != nil {
+	if err := genericv1.Scheme.Decode(r, &instance); err != nil {
 		return nil, err
 	}
 	return &instance, nil
+}
+
+// appendIfNew appends entries in `toAdd` to `given` if not already present
+func appendIfNew(given []string, toAdd ...string) []string {
+	for _, entry := range toAdd {
+		entry = filepath.Clean(entry)
+		if !slices.Contains(given, entry) {
+			given = append(given, entry)
+		}
+	}
+	return given
 }
 
 // GetOCMConfigPaths searches for the OCM configuration file in the following locations (in order):
@@ -166,16 +175,16 @@ func GetConfigFromPath(path string) (_ *genericv1.Config, err error) {
 func GetOCMConfigPaths(options OCMConfigOptions) ([]string, error) {
 	var paths []string
 	if path := getFromEnvironment(options); path != "" {
-		paths = append(paths, path)
+		paths = appendIfNew(paths, path)
 	}
 	if subPaths := getFromXDGOrHomeDir(options); len(subPaths) > 0 {
-		paths = append(paths, subPaths...)
+		paths = appendIfNew(paths, subPaths...)
 	}
 	if subPaths := getFromWorkingDir(options); len(subPaths) > 0 {
-		paths = append(paths, subPaths...)
+		paths = appendIfNew(paths, subPaths...)
 	}
 	if subPaths := getFromExecutableDir(options); len(subPaths) > 0 {
-		paths = append(paths, subPaths...)
+		paths = appendIfNew(paths, subPaths...)
 	}
 
 	if len(paths) > 0 {

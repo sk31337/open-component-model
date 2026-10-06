@@ -191,9 +191,9 @@ func TestGetConfigFromSecret(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := GetConfigFromSecret(tt.secret)
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 			assert.Equal(t, tt.want, cfg)
 		})
@@ -242,9 +242,9 @@ func TestGetConfigFromConfigMap(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := GetConfigFromConfigMap(tt.configMap)
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 			if tt.wantNil {
 				assert.Nil(t, cfg)
@@ -295,9 +295,80 @@ func TestLoadConfigurations(t *testing.T) {
 		},
 	}
 
+	nestedSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nested-secret",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			v1alpha1.OCMConfigKey: []byte(`{
+				"type": "generic.config.ocm.software/v1",
+				"configurations": [
+					{
+						"type": "credentials.config.ocm.software/v1",
+						"repositories": []
+					},
+					{
+						"type": "generic.config.ocm.software/v1",
+						"configurations": [
+							{
+								"type": "credentials.config.ocm.software/v1",
+								"repositories": []
+							}
+						]
+					}
+				]
+			}`),
+		},
+	}
+
+	multiSecretA := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "multi-a",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			v1alpha1.OCMConfigKey: []byte(`{
+				"type": "generic.config.ocm.software/v1",
+				"configurations": [
+					{
+						"type": "credentials.config.ocm.software/v1",
+						"repositories": []
+					},
+					{
+						"type": "filesystem.config.ocm.software/v1alpha1",
+						"tempFolder": "/tmp"
+					}
+				]
+			}`),
+		},
+	}
+
+	multiSecretB := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "multi-b",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			v1alpha1.OCMConfigKey: []byte(`{
+				"type": "generic.config.ocm.software/v1",
+				"configurations": [
+					{
+						"type": "resolvers.config.ocm.software/v1alpha1",
+						"resolvers": []
+					},
+					{
+						"type": "whatever.config.ocm.software/v1alpha1",
+						"whatever": "whatever"
+					}
+				]
+			}`),
+		},
+	}
+
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(secret, configMap).
+		WithObjects(secret, configMap, nestedSecret, multiSecretA, multiSecretB).
 		Build()
 
 	tests := []struct {
@@ -307,6 +378,63 @@ func TestLoadConfigurations(t *testing.T) {
 		wantErr     bool
 		checkResult func(t *testing.T, cfg *genericv1.Config)
 	}{
+		{
+			name:      "nested generic configs are ignored",
+			namespace: "default",
+			ocmConfigs: []v1alpha1.OCMConfiguration{
+				{
+					NamespacedObjectKindReference: v1alpha1.NamespacedObjectKindReference{
+						Kind: "Secret",
+						Name: "nested-secret",
+					},
+				},
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, cfg *genericv1.Config) {
+				t.Helper()
+				assert.NotNil(t, cfg)
+				// only the direct credentials entry survives; the nested generic entry is dropped
+				assert.Len(t, cfg.Configurations, 1)
+				assert.Equal(t,
+					ocmruntime.NewVersionedType(credentialsv1.ConfigType, credentialsv1.Version),
+					cfg.Configurations[0].GetType(),
+				)
+			},
+		},
+		{
+			name:      "entries from multiple configs are merged in order and disallowed types are dropped",
+			namespace: "default",
+			ocmConfigs: []v1alpha1.OCMConfiguration{
+				{
+					NamespacedObjectKindReference: v1alpha1.NamespacedObjectKindReference{
+						Kind: "Secret",
+						Name: "multi-a",
+					},
+				},
+				{
+					NamespacedObjectKindReference: v1alpha1.NamespacedObjectKindReference{
+						Kind: "Secret",
+						Name: "multi-b",
+					},
+				},
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, cfg *genericv1.Config) {
+				t.Helper()
+				assert.NotNil(t, cfg)
+				// the allowed credentials and resolvers entries survive in declaration order;
+				// the disallowed filesystem and whatever entries are dropped
+				assert.Len(t, cfg.Configurations, 2)
+				assert.Equal(t,
+					ocmruntime.NewVersionedType(credentialsv1.ConfigType, credentialsv1.Version),
+					cfg.Configurations[0].GetType(),
+				)
+				assert.Equal(t,
+					ocmruntime.NewVersionedType(resolversv1alpha1spec.ConfigType, resolversv1alpha1spec.Version),
+					cfg.Configurations[1].GetType(),
+				)
+			},
+		},
 		{
 			name:      "load from secret",
 			namespace: "default",
@@ -320,6 +448,7 @@ func TestLoadConfigurations(t *testing.T) {
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, cfg *genericv1.Config) {
+				t.Helper()
 				assert.NotNil(t, cfg)
 				assert.Len(t, cfg.Configurations, 2)
 			},
@@ -337,6 +466,7 @@ func TestLoadConfigurations(t *testing.T) {
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, cfg *genericv1.Config) {
+				t.Helper()
 				assert.NotNil(t, cfg)
 			},
 		},
@@ -359,8 +489,8 @@ func TestLoadConfigurations(t *testing.T) {
 			},
 			wantErr: false,
 			checkResult: func(t *testing.T, cfg *genericv1.Config) {
+				t.Helper()
 				assert.NotNil(t, cfg)
-				// FlatMap merges configurations
 				assert.Len(t, cfg.Configurations, 2)
 			},
 		},
@@ -616,6 +746,32 @@ func TestFilterAllowedConfigTypes(t *testing.T) {
 		assert.Contains(t, types, ocmruntime.NewUnversionedType(resolversv1alpha1spec.ConfigType))
 	})
 
+	t.Run("uploaders sending content to configured URLs are dropped", func(t *testing.T) {
+		cfg := makeGenericConfig(
+			`{"type":"http.uploader.transfer.config.ocm.software/v1alpha1","match":"true","targetURL":"http://internal.example"}`,
+			`{"type":"http.uploader.transfer.config.ocm.software","match":"true","targetURL":"http://internal.example"}`,
+			`{"type":"artifactory.uploader.transfer.config.ocm.software/v1alpha1","match":"true","url":"http://internal.example","repository":"r"}`,
+			`{"type":"nexus.uploader.transfer.config.ocm.software","match":"true","url":"http://internal.example","repository":"r"}`,
+			`{"type":"localblob.uploader.transfer.config.ocm.software/v1alpha1"}`,
+		)
+		result, err := filterAllowedConfigTypes(t.Context(), cfg)
+		require.NoError(t, err)
+		require.Len(t, result.Configurations, 1)
+		assert.Equal(t, ocmruntime.NewVersionedType("localblob.uploader.transfer.config.ocm.software", "v1alpha1"), result.Configurations[0].GetType())
+	})
+
+	t.Run("uploader entries pass through", func(t *testing.T) {
+		cfg := makeGenericConfig(
+			`{"type":"oci.uploader.transfer.config.ocm.software/v1alpha1"}`,
+			`{"type":"reference.uploader.transfer.config.ocm.software"}`,
+		)
+		result, err := filterAllowedConfigTypes(t.Context(), cfg)
+		require.NoError(t, err)
+		require.Len(t, result.Configurations, 2)
+		assert.Equal(t, ocmruntime.NewVersionedType("oci.uploader.transfer.config.ocm.software", "v1alpha1"), result.Configurations[0].GetType())
+		assert.Equal(t, ocmruntime.NewUnversionedType("reference.uploader.transfer.config.ocm.software"), result.Configurations[1].GetType())
+	})
+
 	t.Run("aliases stripped from ocm.config.ocm.software versioned", func(t *testing.T) {
 		cfg := makeGenericConfig(
 			`{"type":"ocm.config.ocm.software/v1","aliases":{"myrepo":{"type":"OCIRegistry","baseUrl":"ghcr.io"}},"resolvers":[]}`,
@@ -714,25 +870,6 @@ func TestFilterAllowedConfigTypes(t *testing.T) {
 			ocmruntime.NewVersionedType(httpv1alpha1.ConfigType, httpv1alpha1.Version),
 			result.Configurations[0].GetType(),
 		)
-	})
-
-	t.Run("allowed entries from multiple configs are all preserved after FlatMap", func(t *testing.T) {
-		cfgA := makeGenericConfig(
-			`{"type":"credentials.config.ocm.software/v1","repositories":[]}`,
-			`{"type":"filesystem.config.ocm.software/v1alpha1","tempFolder":"/tmp"}`,
-		)
-		cfgB := makeGenericConfig(
-			`{"type":"resolvers.config.ocm.software/v1alpha1","resolvers":[]}`,
-			`{"type":"whatever.config.ocm.software/v1alpha1","whatever":"whatever"}`,
-		)
-		flattened := genericv1.FlatMap(cfgA, cfgB)
-		result, err := filterAllowedConfigTypes(t.Context(), flattened)
-		require.NoError(t, err)
-		// only the credentials and resolvers entries survive; the filesystem and whatever entries are dropped
-		require.Len(t, result.Configurations, 2)
-		types := []ocmruntime.Type{result.Configurations[0].GetType(), result.Configurations[1].GetType()}
-		assert.Contains(t, types, ocmruntime.NewVersionedType(credentialsv1.ConfigType, credentialsv1.Version))
-		assert.Contains(t, types, ocmruntime.NewVersionedType(resolversv1alpha1spec.ConfigType, resolversv1alpha1spec.Version))
 	})
 
 	t.Run("dropped types are logged at V(1)", func(t *testing.T) {

@@ -55,6 +55,7 @@ KIND_NODE_IMAGE="kindest/node:v${KIND_NODE_IMAGE_VERSION}"
 # - Port mappings for additional cluster OCI registries (replication tests).
 # - Containerd config patches to add registry mirrors and configs for the internal registries.
 # - http-alias and insecure_skip_verify.
+# - A single node: no spec needs multi-node scheduling, and images are pulled and kind-loaded once.
 CONTAINERD_CONFIG_PATH="/etc/containerd/certs.d"
 cat <<EOF | kind create cluster --name ocm-e2e --image="${KIND_NODE_IMAGE}" --config=-
 kind: Cluster
@@ -66,7 +67,6 @@ nodes:
         hostPort: 31002
       - containerPort: 31003
         hostPort: 31003
-  - role: worker
 containerdConfigPatches:
 - |-
  [plugins."io.containerd.grpc.v1.cri".registry]
@@ -129,8 +129,8 @@ run_step() {
 install_registries() {
   kubectl apply -f "${image_registries}" || return 1
   kubectl apply -f "${rbac}" || return 1
-  kubectl wait pod -l app=protected-registry1 --for condition=Ready --timeout 5m || return 1
-  kubectl wait pod -l app=protected-registry2 --for condition=Ready --timeout 5m || return 1
+  # Wait on the Deployments: a pod label selector matches nothing until the ReplicaSet has created the pods.
+  kubectl wait -n default deployment protected-registry1 protected-registry2 --for=condition=Available --timeout=5m || return 1
 }
 
 install_flux() {
@@ -144,25 +144,45 @@ install_argocd() {
   argocd_version="${ARGOCD_VERSION:-stable}"
 
   kubectl get namespace argocd &>/dev/null || kubectl create namespace argocd
-  kubectl apply -n argocd --server-side --force-conflicts -f "https://raw.githubusercontent.com/argoproj/argo-cd/${argocd_version}/manifests/install.yaml" || return 1
-
-  kubectl wait -n argocd deployment \
-      argocd-server \
-      argocd-repo-server \
-      argocd-redis \
-      argocd-dex-server \
-      argocd-applicationset-controller \
-      argocd-notifications-controller \
-      --for=condition=Available --timeout=5m || return 1
 
   # Widen argocd-repo-server's OCI layer mediaType allowlist to include
   # flux-native artifacts (application/vnd.cncf.flux.content.v1.tar+gzip),
   # produced from ./kustomize by test/utils.buildKustomizeOCILayout for the
   # kustomize-configuration-localization example. Defaults reproduced from
   # argocd's cmd/argocd-repo-server/commands/argocd_repo_server.go.
-  kubectl -n argocd set env deploy/argocd-repo-server \
-      ARGOCD_REPO_SERVER_OCI_LAYER_MEDIA_TYPES="application/vnd.oci.image.layer.v1.tar,application/vnd.oci.image.layer.v1.tar+gzip,application/vnd.cncf.helm.chart.content.v1.tar+gzip,application/vnd.cncf.flux.content.v1.tar+gzip" || return 1
-  kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=2m || return 1
+  # Created before the install manifest; that manifest's argocd-cmd-params-cm declares no data, and a distinct field
+  # manager keeps this key across its server-side apply.
+  kubectl -n argocd create configmap argocd-cmd-params-cm \
+      --from-literal=reposerver.oci.layer.media.types="application/vnd.oci.image.layer.v1.tar,application/vnd.oci.image.layer.v1.tar+gzip,application/vnd.cncf.helm.chart.content.v1.tar+gzip,application/vnd.cncf.flux.content.v1.tar+gzip" \
+      --dry-run=client -o yaml | kubectl apply --server-side --field-manager=ocm-e2e-setup -f - || return 1
+
+  # Core install (application-controller, repo-server, redis, applicationset-controller): specs only need
+  # Applications to sync; API server, dex and notifications are unused.
+  kubectl apply -n argocd --server-side --force-conflicts -f "https://raw.githubusercontent.com/argoproj/argo-cd/${argocd_version}/manifests/core-install.yaml" || return 1
+
+  kubectl wait -n argocd deployment \
+      argocd-repo-server \
+      argocd-redis \
+      argocd-applicationset-controller \
+      --for=condition=Available --timeout=5m || return 1
+
+  # argocd-server creates the "default" AppProject at startup; the core install has no server, so create it here.
+  # Every example Application uses project: default and never syncs without it.
+  kubectl apply -n argocd -f - <<EOF || return 1
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  sourceRepos: ["*"]
+  destinations:
+    - server: "*"
+      namespace: "*"
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+EOF
 
   # Register the local OCI registry with ArgoCD as an insecure (plain HTTP) Helm OCI
   # credential template. Any Application whose repoURL starts with oci://ocm-e2e-image-registry:5000
@@ -187,10 +207,136 @@ stringData:
   enableOCI: "true"
   insecureOCIForceHttp: "true"
 EOF
+
+  # Register the Docker network alias (image-registry:5000) as a second credential
+  # template. Crossplane Compositions surface this alias in the XR status fields that
+  # get copied into ArgoCD Application repoURLs, so ArgoCD must recognise it too.
+  kubectl apply -n argocd -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: image-registry-alias-creds
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repo-creds
+stringData:
+  url: oci://image-registry:5000
+  type: helm
+  enableOCI: "true"
+  insecureOCIForceHttp: "true"
+EOF
 }
 
 install_kro() {
   helm install kro oci://registry.k8s.io/kro/charts/kro --namespace kro --create-namespace --version=0.9.2
+}
+
+install_crossplane() {
+  CROSSPLANE_VERSION="${CROSSPLANE_VERSION:-2.3.1}"
+  if kubectl get deployment crossplane -n crossplane-system >/dev/null 2>&1 \
+     && kubectl get deployment crossplane -n crossplane-system -o jsonpath='{.status.availableReplicas}' | grep -q '[1-9]'; then
+    echo "crossplane already installed, skipping"
+  else
+    helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null || true
+    helm repo update crossplane-stable || return 1
+    helm upgrade --install crossplane crossplane-stable/crossplane \
+      --namespace crossplane-system --create-namespace \
+      --version "${CROSSPLANE_VERSION}" --wait || return 1
+  fi
+
+  # function-patch-and-transform
+  if ! kubectl get functions.pkg.crossplane.io crossplane-contrib-function-patch-and-transform >/dev/null 2>&1; then
+    kubectl apply -f - <<EOF || return 1
+apiVersion: pkg.crossplane.io/v1beta1
+kind: Function
+metadata:
+  name: crossplane-contrib-function-patch-and-transform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/function-patch-and-transform:v0.10.6
+EOF
+  fi
+  # Always wait — covers both fresh installs and pre-existing objects that may be unhealthy
+  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-patch-and-transform \
+    --for=condition=Healthy=True --timeout=120s || return 1
+
+  # function-auto-ready
+  if ! kubectl get functions.pkg.crossplane.io crossplane-contrib-function-auto-ready >/dev/null 2>&1; then
+    kubectl apply -f - <<EOF || return 1
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: crossplane-contrib-function-auto-ready
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/function-auto-ready:v0.6.5
+EOF
+  fi
+  # Always wait — covers both fresh installs and pre-existing objects that may be unhealthy
+  kubectl wait functions.pkg.crossplane.io/crossplane-contrib-function-auto-ready \
+    --for=condition=Healthy=True --timeout=120s || return 1
+
+  # Grant OCM controller permission to manage Crossplane XRDs/Compositions
+  kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: controller-manager-crossplane-e2e
+rules:
+  - apiGroups: ["apiextensions.crossplane.io"]
+    resources: ["compositeresourcedefinitions","compositions"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: controller-manager-crossplane-e2e
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: controller-manager-crossplane-e2e
+subjects:
+  - kind: ServiceAccount
+    name: ocm-k8s-toolkit-controller-manager
+    namespace: ocm-k8s-toolkit-system
+EOF
+
+  # Grant Crossplane SA permission to manage OCM, Flux, and ArgoCD resources
+  # (needed so Crossplane Compositions can create OCM Resources, HelmReleases, etc.)
+  kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-ocm-resources-e2e
+rules:
+  - apiGroups: ["delivery.ocm.software"]
+    resources: ["resources","resources/status","components","repositories","deployers"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+  - apiGroups: ["examples.ocm.software"]
+    resources: ["*","*/status"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["ocirepositories","ocirepositories/status","helmrepositories","helmrepositories/status"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases","helmreleases/status"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications","applications/status"]
+    verbs: ["create","delete","get","list","patch","update","watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-ocm-resources-e2e
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crossplane-ocm-resources-e2e
+subjects:
+  - kind: ServiceAccount
+    name: crossplane
+    namespace: crossplane-system
+EOF
+
 }
 
 pids=()
@@ -198,6 +344,7 @@ run_step "image-registries"   install_registries & pids+=($!)
 run_step "flux"               install_flux       & pids+=($!)
 run_step "argocd"             install_argocd     & pids+=($!)
 run_step "kro"                install_kro        & pids+=($!)
+run_step "crossplane"         install_crossplane & pids+=($!)
 
 fail=0
 for pid in "${pids[@]}"; do

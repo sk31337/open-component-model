@@ -12,7 +12,7 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/minio"
+	"github.com/testcontainers/testcontainers-go/wait"
 
 	"ocm.software/open-component-model/bindings/go/credentials"
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
@@ -33,26 +33,31 @@ import (
 	transferv1alpha1 "ocm.software/open-component-model/bindings/go/transfer/v1alpha1/spec"
 )
 
-// Test_Integration_TransferS3Resource_CopyModeAllResources verifies that an s3 resource (an
+// Test_Integration_TransferS3Resource_LocalBlobUploader verifies that an s3 resource (an
 // object in a bucket, not stored in the source CTF) is transferred by value: the object is
 // downloaded from the bucket and embedded as a localBlob in the target OCI registry. s3
-// resources are external, so they are only copied under CopyModeAllResources.
-func Test_Integration_TransferS3Resource_CopyModeAllResources(t *testing.T) {
+// resources are external, so they are only copied when a local blob uploader is configured.
+func Test_Integration_TransferS3Resource_LocalBlobUploader(t *testing.T) {
 	t.Parallel()
 	r := require.New(t)
 	ctx := t.Context()
 
-	// 1. Serve the resource content from a MinIO bucket.
-	container, err := minio.Run(ctx, "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z")
+	// 1. Serve the resource content from a RustFS bucket.
+	const s3AccessKey, s3SecretKey = "ocm-test", "ocm-test-secret"
+	container, err := testcontainers.Run(ctx, "rustfs/rustfs:1.0.0-rc.6",
+		testcontainers.WithExposedPorts("9000/tcp"),
+		testcontainers.WithEnv(map[string]string{"RUSTFS_ACCESS_KEY": s3AccessKey, "RUSTFS_SECRET_KEY": s3SecretKey}),
+		testcontainers.WithWaitStrategy(wait.ForHTTP("/health/ready").WithPort("9000/tcp")),
+	)
 	r.NoError(err)
 	t.Cleanup(func() { r.NoError(testcontainers.TerminateContainer(container)) })
-	hostPort, err := container.ConnectionString(ctx)
+	hostPort, err := container.PortEndpoint(ctx, "9000/tcp", "")
 	r.NoError(err)
 	endpoint := "http://" + hostPort
 
 	const bucket, objectKey = "transfer-bucket", "path/to/artifact.txt"
 	resourceData := []byte("Hello from s3 integration test!")
-	putS3Object(t, ctx, endpoint, container.Username, container.Password, bucket, objectKey, resourceData)
+	putS3Object(t, ctx, endpoint, s3AccessKey, s3SecretKey, bucket, objectKey, resourceData)
 
 	// 2. Start the target OCI registry.
 	registryAddr, user, password := startRegistry(t)
@@ -102,7 +107,7 @@ func Test_Integration_TransferS3Resource_CopyModeAllResources(t *testing.T) {
 	}
 	r.NoError(ctfRepo.AddComponentVersion(ctx, desc))
 
-	// 4. Build the transfer graph with CopyModeAllResources (external resources are skipped otherwise).
+	// 4. Build the transfer graph with a local blob uploader (external resources are kept by reference otherwise).
 	sourceSpec := &ctfrepospec.Repository{
 		Type:     runtime.Type{Name: ctfrepospec.Type, Version: ctfrepospec.Version},
 		FilePath: sourceCTFPath,
@@ -113,7 +118,8 @@ func Test_Integration_TransferS3Resource_CopyModeAllResources(t *testing.T) {
 	}
 
 	tgd, err := transfer.BuildGraphDefinition(ctx,
-		&transferv1alpha1.Config{CopyMode: transferv1alpha1.CopyModeAllResources},
+		&transferv1alpha1.Config{},
+		[]transferv1alpha1.UploaderConfig{&transferv1alpha1.LocalBlobUploaderConfig{}},
 		transfer.Mapping{
 			Components: []transfer.ComponentID{{Component: componentName, Version: componentVersion}},
 			Target:     targetSpec,
@@ -134,7 +140,7 @@ func Test_Integration_TransferS3Resource_CopyModeAllResources(t *testing.T) {
 	r.True(hasDownloadS3, "s3 resource should generate a DownloadS3Resource transformation")
 
 	// 5. Build and execute the graph.
-	credResolver := newS3CredResolver(t, endpoint, bucket, objectKey, container.Username, container.Password,
+	credResolver := newS3CredResolver(t, endpoint, bucket, objectKey, s3AccessKey, s3SecretKey,
 		registryCreds{registryAddr, user, password})
 	repoProvider := provider.NewComponentVersionRepositoryProvider(provider.WithTempDir(t.TempDir()))
 	// An s3 resource is downloaded via the s3 resource repository. In the CLI this is a dynamic

@@ -82,10 +82,10 @@ func DeployResource(ctx context.Context, manifestFilePath string) error {
 		return err
 	}
 	DeferCleanup(func(ctx SpecContext) error {
-		cmd = exec.CommandContext(ctx, "kubectl", "delete", "-f", manifestFilePath)
+		cmd = exec.CommandContext(ctx, "kubectl", "delete", "--ignore-not-found", "--wait=true", "--timeout=60s", "-f", manifestFilePath)
 		_, err := Run(cmd)
 		if err != nil {
-			GinkgoLogr.V(3).Info("WARNING: failed to delete resource", "manifest", manifestFilePath)
+			GinkgoLogr.V(3).Info("WARNING: cleanup timed out or failed", "manifest", manifestFilePath)
 		}
 
 		return err
@@ -155,7 +155,8 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 	}
 
 	componentName := componentNamePrefix + filepath.Base(filepath.Dir(componentConstructorPath))
-	transferRef := fmt.Sprintf("ctf::%s//%s", ctfDir, componentName)
+	componentVersion := componentVersionFromConstructor(componentConstructorPath)
+	transferRef := fmt.Sprintf("ctf::%s//%s:%s", ctfDir, componentName, componentVersion)
 
 	if signingKey != "" {
 		By("signing ocm component for " + name)
@@ -164,7 +165,7 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 			return fmt.Errorf("could not write signing ocmconfig: %w", err)
 		}
 
-		signRef := fmt.Sprintf("ctf::%s//%s:%s", ctfDir, componentName, signingVersion)
+		signRef := fmt.Sprintf("ctf::%s//%s:%s", ctfDir, componentName, componentVersion)
 		cmd = exec.CommandContext(ctx, ocm,
 			"sign", "cv",
 			signRef,
@@ -184,7 +185,12 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 	}
 
 	if strings.Contains(name, "localization") {
-		cmd.Args = append(cmd.Args, "--copy-resources", "--upload-as", "ociArtifact")
+		uploaderConfigPath := filepath.Join(tmpDir, "oci-uploader.ocmconfig")
+		uploaderConfig := "type: generic.config.ocm.software/v1\nconfigurations:\n- type: oci.uploader.transfer.config.ocm.software/v1alpha1\n"
+		if err := os.WriteFile(uploaderConfigPath, []byte(uploaderConfig), 0o600); err != nil {
+			return fmt.Errorf("could not write oci uploader ocmconfig: %w", err)
+		}
+		cmd.Args = append(cmd.Args, "--copy-resources", "--config", uploaderConfigPath)
 	}
 
 	if _, err := Run(cmd); err != nil {
@@ -378,4 +384,32 @@ func GetResourceField(ctx context.Context, resource, fieldSelector string) (stri
 
 	result := strings.Trim(strings.TrimSpace(string(output)), "'")
 	return result, nil
+}
+
+// componentVersionFromConstructor reads the component version from an OCM
+// component-constructor.yaml file. Falls back to signingVersion ("1.0.0").
+func componentVersionFromConstructor(constructorPath string) string {
+	data, err := os.ReadFile(constructorPath)
+	if err != nil {
+		return signingVersion
+	}
+	inComponent := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- name: "+componentNamePrefix) {
+			inComponent = true
+			continue
+		}
+		if inComponent && strings.HasPrefix(trimmed, "version:") {
+			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "version:"))
+			v = strings.Trim(v, `"'`)
+			if v != "" {
+				return v
+			}
+		}
+		if inComponent && strings.HasPrefix(trimmed, "- name:") {
+			break
+		}
+	}
+	return signingVersion
 }

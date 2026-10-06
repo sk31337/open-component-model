@@ -18,6 +18,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/cli/internal/render/graph/tree"
 	"ocm.software/open-component-model/bindings/go/cli/internal/repository/ocm"
 	genericv1 "ocm.software/open-component-model/bindings/go/configuration/generic/v1/spec"
+	versioningspec "ocm.software/open-component-model/bindings/go/configuration/versioning/v1alpha1/spec"
 	"ocm.software/open-component-model/bindings/go/credentials"
 	"ocm.software/open-component-model/bindings/go/dag"
 	syncdag "ocm.software/open-component-model/bindings/go/dag/sync"
@@ -29,10 +30,11 @@ import (
 	"ocm.software/open-component-model/bindings/go/plugin/manager"
 	"ocm.software/open-component-model/bindings/go/repository/component/resolvers"
 	"ocm.software/open-component-model/bindings/go/runtime"
+	"ocm.software/open-component-model/bindings/go/runtime/versioning"
 )
 
 const (
-	FlagSemverConstraint = "semver-constraint"
+	FlagConstraint       = "constraint"
 	FlagOutput           = "output"
 	FlagDisplayMode      = "display-mode"
 	FlagConcurrencyLimit = "concurrency-limit"
@@ -76,6 +78,11 @@ get component-versions ghcr.io/open-component-model//ocm.software/cli
 get cvs ghcr.io/open-component-model//ocm.software/cli --output json
 get cvs ghcr.io/open-component-model//ocm.software/cli -oyaml
 
+Showing the resources of each component version in the tree output:
+
+get cv ./path/to/ctf//ocm.software/cli:0.12.0 -o widetree
+get cvs ghcr.io/open-component-model//ocm.software/cli -o widetree --recursive
+
 Specifying types and schemes:
 
 get cv ctf::github.com/locally-checked-out-repo//ocm.software/cli:0.12.0
@@ -85,11 +92,11 @@ get cvs oci::http://localhost:8080//ocm.software/cli
 		DisableAutoGenTag: true,
 	}
 
-	enum.VarP(cmd.Flags(), FlagOutput, "o", []string{render.OutputFormatTable.String(), render.OutputFormatYAML.String(), render.OutputFormatJSON.String(), render.OutputFormatNDJSON.String(), render.OutputFormatTree.String()}, "output format of the component descriptors")
+	enum.VarP(cmd.Flags(), FlagOutput, "o", []string{render.OutputFormatTree.String(), render.OutputFormatTable.String(), render.OutputFormatYAML.String(), render.OutputFormatJSON.String(), render.OutputFormatNDJSON.String(), render.OutputFormatWideTree.String()}, "output format of the component descriptors")
 	enum.VarP(cmd.Flags(), FlagDisplayMode, "", []string{render.StaticRenderMode, render.LiveRenderMode}, `display mode can be used in combination with --recursive
   static: print the output once the complete component graph is discovered
   live (experimental): continuously updates the output to represent the current discovery state of the component graph`)
-	cmd.Flags().String(FlagSemverConstraint, "> 0.0.0-0", "semantic version constraint restricting which versions to output")
+	cmd.Flags().String(FlagConstraint, "> 0.0.0-0", "version constraint restricting which versions to output, evaluated by each version's configured scheme; versions with no applicable scheme are retained")
 	// TODO(fabianburth): add concurrency limit to the dag discovery (https://github.com/open-component-model/ocm-project/issues/705)
 	// cmd.Flags().Int(FlagConcurrencyLimit, 4, "maximum amount of parallel requests to the repository for resolving component versions")
 	cmd.Flags().Bool(FlagLatest, false, "if set, only the latest version of the component is returned")
@@ -132,9 +139,9 @@ func GetComponentVersion(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("getting display-mode flag failed: %w", err)
 	}
-	constraint, err := cmd.Flags().GetString(FlagSemverConstraint)
+	constraint, err := cmd.Flags().GetString(FlagConstraint)
 	if err != nil {
-		return fmt.Errorf("getting semver-constraint flag failed: %w", err)
+		return fmt.Errorf("getting constraint flag failed: %w", err)
 	}
 	// TODO(fabianburth): add concurrency limit to the dag discovery (https://github.com/open-component-model/ocm-project/issues/705)
 	// concurrencyLimit, err := cmd.Flags().GetInt(FlagConcurrencyLimit)
@@ -206,10 +213,15 @@ func processComponentReference(cmd *cobra.Command,
 		return fmt.Errorf("could not access ocm repository: %w", err)
 	}
 
+	registry, err := versioningspec.RegistryFromConfig(config)
+	if err != nil {
+		return fmt.Errorf("could not build versioning registry: %w", err)
+	}
 	descs, err := ocm.GetComponentVersions(ctx, ocm.GetComponentVersionsOptions{
 		VersionOptions: ocm.VersionOptions{
 			SemverConstraint: constraint,
 			LatestOnly:       latestOnly,
+			Registry:         registry,
 		},
 	}, ref.Component, ref.Version, repo)
 	if err != nil {
@@ -292,6 +304,12 @@ func buildRenderer(ctx context.Context, dag *syncdag.SyncedDirectedAcyclicGraph[
 		return list.New(ctx, dag, list.WithListSerializer(serializer), list.WithRoots(roots...)), nil
 	case render.OutputFormatTree.String():
 		return tree.New(ctx, dag, tree.WithRoots(roots...)), nil
+	case render.OutputFormatWideTree.String():
+		return tree.New(ctx, dag,
+			tree.WithRoots(roots...),
+			tree.WithHeader[string](wideTreeHeader...),
+			tree.WithVertexSerializerFunc(serializeVertexToWideTreeRow),
+		), nil
 	case render.OutputFormatTable.String():
 		serializer := list.ListSerializerFunc[string](serializeVerticesToTable)
 		return list.New(ctx, dag, list.WithListSerializer(serializer), list.WithRoots(roots...)), nil
@@ -314,6 +332,63 @@ func serializeVertexToDescriptor(vertex *dag.Vertex[string]) (any, error) {
 		return nil, fmt.Errorf("converting descriptor to v2 failed: %w", err)
 	}
 	return descriptorV2, nil
+}
+
+// wideTreeHeader describes the columns of the widetree output. It renders both
+// component versions and the resources they contain, so it carries the columns
+// of both element kinds. COMPONENT and PROVIDER are filled for component rows,
+// NAME, TYPE and RELATION for resource rows.
+var wideTreeHeader = []string{"COMPONENT", "NAME", "VERSION", "PROVIDER", "TYPE", "RELATION", "IDENTITY"}
+
+// extraIdentity returns the identity without the name attribute, because the
+// name already has its own column. What remains is the extra identity, which is
+// what distinguishes elements that share a name. An element without extra
+// identity yields an empty string.
+func extraIdentity(identity runtime.Identity) string {
+	delete(identity, descruntime.IdentityAttributeName)
+	if len(identity) == 0 {
+		return ""
+	}
+	return identity.String()
+}
+
+// serializeVertexToWideTreeRow serializes the component version held by the
+// vertex into a row matching wideTreeHeader, with one nested row per resource of
+// the component version. The nested rows are rendered below the component row.
+func serializeVertexToWideTreeRow(vertex *dag.Vertex[string]) (tree.Row, error) {
+	untypedDescriptor, ok := vertex.Attributes[syncdag.AttributeValue]
+	if !ok {
+		return tree.Row{}, fmt.Errorf("vertex %s has no %s attribute", vertex.ID, syncdag.AttributeValue)
+	}
+	desc, ok := untypedDescriptor.(*descruntime.Descriptor)
+	if !ok {
+		return tree.Row{}, fmt.Errorf("expected vertex %s attribute %s to be of type %T, got type %T", vertex.ID, syncdag.AttributeValue, &descruntime.Descriptor{}, untypedDescriptor)
+	}
+	resources := make([]tree.Row, 0, len(desc.Component.Resources))
+	for i := range desc.Component.Resources {
+		res := &desc.Component.Resources[i]
+		resources = append(resources, tree.Row{Cells: []string{
+			"", // COMPONENT: a resource belongs to the component row above it.
+			res.Name,
+			res.Version,
+			"", // PROVIDER: resources inherit the provider of their component.
+			res.Type,
+			string(res.Relation),
+			extraIdentity(res.ToIdentity()),
+		}})
+	}
+	return tree.Row{
+		Cells: []string{
+			desc.Component.Name,
+			"", // NAME: only resources carry an element name.
+			desc.Component.Version,
+			desc.Component.Provider.Name,
+			"", // TYPE: only resources carry a type.
+			"", // RELATION: only resources carry a relation.
+			extraIdentity(desc.Component.ToIdentity()),
+		},
+		Children: resources,
+	}, nil
 }
 
 func serializeVerticesToTable(writer io.Writer, vertices []*dag.Vertex[string]) error {
@@ -429,7 +504,11 @@ func processRepositoryReference(cmd *cobra.Command,
 		return fmt.Errorf("no components found in repository %v", repository)
 	}
 
-	roots, err := getIDsForComponentsFromRepository(ctx, pluginManager, repository, componentNames, params, credentialGraph)
+	registry, err := versioningspec.RegistryFromConfig(config)
+	if err != nil {
+		return fmt.Errorf("could not build versioning registry: %w", err)
+	}
+	roots, err := getIDsForComponentsFromRepository(ctx, pluginManager, repository, componentNames, params, registry, credentialGraph)
 	if err != nil {
 		return fmt.Errorf("failed to get identities for components %v in repository %v: %w", componentNames, repository, err)
 	}
@@ -490,6 +569,7 @@ func getIDsForComponentsFromRepository(ctx context.Context,
 	repository runtime.Typed,
 	componentNames []string,
 	params Params,
+	registry *versioning.Registry,
 	_ credentials.Resolver,
 ) ([]string, error) {
 	constraint := params.constraint
@@ -506,6 +586,7 @@ func getIDsForComponentsFromRepository(ctx context.Context,
 		ocm.WithSemverConstraint(constraint),
 		ocm.WithLatestOnly(latestOnly),
 		ocm.WithSort(),
+		ocm.WithVersioningRegistry(registry),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("listing component versions failed: %w", err)
