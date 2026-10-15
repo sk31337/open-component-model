@@ -193,7 +193,7 @@ EOF
   # surfaces in resource.status.additional.registry — which kro then copies verbatim
   # into the ArgoCD Application's repoURL. The credential template only matches when
   # the url prefix is identical to the Application's repoURL.
-  kubectl apply -n argocd -f - <<EOF
+  kubectl apply -n argocd -f - <<EOF || return 1
 apiVersion: v1
 kind: Secret
 metadata:
@@ -211,7 +211,7 @@ EOF
   # Register the Docker network alias (image-registry:5000) as a second credential
   # template. Crossplane Compositions surface this alias in the XR status fields that
   # get copied into ArgoCD Application repoURLs, so ArgoCD must recognise it too.
-  kubectl apply -n argocd -f - <<EOF
+  kubectl apply -n argocd -f - <<EOF || return 1
 apiVersion: v1
 kind: Secret
 metadata:
@@ -275,7 +275,7 @@ EOF
     --for=condition=Healthy=True --timeout=120s || return 1
 
   # Grant OCM controller permission to manage Crossplane XRDs/Compositions
-  kubectl apply -f - <<EOF
+  kubectl apply -f - <<EOF || return 1
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -301,7 +301,7 @@ EOF
 
   # Grant Crossplane SA permission to manage OCM, Flux, and ArgoCD resources
   # (needed so Crossplane Compositions can create OCM Resources, HelmReleases, etc.)
-  kubectl apply -f - <<EOF
+  kubectl apply -f - <<EOF || return 1
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
