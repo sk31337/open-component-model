@@ -1,6 +1,6 @@
 # Examples
 
-This directory contains end-to-end examples demonstrating how to use the OCM Kubernetes Controller Toolkit. Each example is self-contained: it includes a component definition (`component-constructor.yaml`), a bootstrap manifest (`bootstrap.yaml`), and a kro `ResourceGraphDefinition` (`rgd.yaml`) and an instance manifest (`instance.yaml`).
+This directory contains end-to-end examples demonstrating how to use the OCM Kubernetes Controller Toolkit. Each example is self-contained: it includes a component definition (`component-constructor.yaml`), a bootstrap manifest (`bootstrap.yaml`), and a kro `ResourceGraphDefinition` (`kro-rgd.yaml`) and an instance manifest (`kro-instance.yaml`).
 
 ## Prerequisites
 
@@ -136,7 +136,7 @@ Like `kustomize-simple`, but adds image localization and configuration via JSON 
 > **Note on kro + ArgoCD kustomize patches:** kro cannot parse multi-line YAML block scalars that contain
 > `${…}` CEL expression references inside ArgoCD `kustomize.patches`. The workaround is to express those
 > patches as inline JSON arrays (e.g. `'[{"op":"replace",…}]'`). Static patches (no CEL expressions) can
-> continue to use normal YAML block scalars. See the `rgd.yaml` in this example for the pattern.
+> continue to use normal YAML block scalars. See the `kro-rgd.yaml` in this example for the pattern.
 
 ---
 
