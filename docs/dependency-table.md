@@ -9,11 +9,11 @@
 | 2 | `descriptor/runtime` | `descriptor/v2`, `runtime` |
 | 2 | `http` | `configuration`, `runtime` |
 | 3 | `descriptor/normalisation` | `descriptor/runtime`, `descriptor/v2`, `runtime` |
-| 3 | `gpg`, `rsa` | `credentials`, `descriptor/runtime`, `runtime` |
+| 3 | `gpg` | `credentials`, `descriptor/runtime`, `runtime` |
 | 3 | `transform` | `cel`, `credentials`, `dag`, `runtime` |
-| 4 | `signing` | `configuration`, `descriptor/normalisation`, `descriptor/runtime`, `runtime` |
+| 4 | `signing` | `configuration`, `credentials`, `descriptor/normalisation`, `descriptor/runtime`, `runtime` |
 | 5 | `repository` | `blob`, `configuration`, `credentials`, `descriptor/normalisation`, `descriptor/runtime`, `runtime`, `signing` |
-| 5 | `sigstore` | `credentials`, `descriptor/runtime`, `runtime`, `signing` |
+| 5 | `rsa`, `sigstore` | `credentials`, `descriptor/runtime`, `runtime`, `signing` |
 | 6 | `oci` | `blob`, `configuration`, `credentials`, `ctf`, `descriptor/runtime`, `descriptor/v2`, `http`, `repository`, `runtime` |
 | 7 | `constructor` | `blob`, `credentials`, `ctf`, `dag`, `descriptor/normalisation`, `descriptor/runtime`, `descriptor/v2`, `oci`, `repository`, `runtime` |
 | 8 | `git`, `s3`, `wget` | `blob`, `configuration`, `constructor`, `credentials`, `descriptor/runtime`, `descriptor/v2`, `http`, `repository`, `runtime` |
