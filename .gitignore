@@ -50,6 +50,3 @@ go.work.sum
 
 # gitguardian
 .cache_ggshield
-
-# ai slop
-.pi/*
