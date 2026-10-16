@@ -12,23 +12,31 @@ const (
 	Type = "Wget"
 )
 
-// Wget describes an input sourced by downloading a resource from an HTTP/S URL
+// Wget (aka "HTTP") describes an input sourced by downloading a resource from an HTTP/S URL
 // during component construction. The downloaded content is stored as a local blob
 // in the component version.
+//
+// Verification against a source-side checksum is a deployment concern, not a
+// descriptor concern: configure it with `checksum.http.config.ocm.software/v1alpha1`
+// (see `bindings/go/configuration/checksum/http/v1alpha1/spec`), which steers
+// both this input method and the wget access-type digest processor.
 //
 // +k8s:deepcopy-gen:interfaces=ocm.software/open-component-model/bindings/go/runtime.Typed
 // +k8s:deepcopy-gen=true
 // +ocm:typegen=true
 // +ocm:jsonschema-gen=true
 type Wget struct {
-	// +ocm:jsonschema-gen:enum=wget/v1,Wget/v1
-	// +ocm:jsonschema-gen:enum:deprecated=wget,Wget
+	// +ocm:jsonschema-gen:enum=wget/v1,Wget/v1,HTTP/v1,http/v1
+	// +ocm:jsonschema-gen:enum:deprecated=wget,Wget,HTTP,http
 	Type runtime.Type `json:"type"`
 
-	// URL is the HTTP endpoint to download the resource from.
+	// URL is the HTTP or HTTPS endpoint to download the resource from.
+	// Other URL schemes are rejected.
 	URL string `json:"url"`
 
 	// MediaType is the media type of the resource with optional format qualifiers.
+	// If empty, the Content-Type response header is used, falling back to
+	// application/octet-stream.
 	MediaType string `json:"mediaType,omitempty"`
 
 	// Header contains HTTP headers to be sent with the request.
@@ -37,7 +45,7 @@ type Wget struct {
 	// Verb is the HTTP method to use (GET, POST, etc.). Defaults to GET.
 	Verb string `json:"verb,omitempty"`
 
-	// Body is the HTTP body to send with the request.
+	// Body is the HTTP body to send with the request, base64-encoded in JSON and YAML.
 	Body []byte `json:"body,omitempty"`
 
 	// NoRedirect disables following HTTP redirects when set to true.

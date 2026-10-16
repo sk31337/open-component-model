@@ -31,6 +31,22 @@ ocm get config [flags]
 
   # Display effective config from a specific config file
   ocm get config --config ./my-ocm-config.yaml
+
+  # Read config from stdin, on top of a config file
+  ocm get config --config ./my-ocm-config.yaml --config - <<EOF
+  type: generic.config.ocm.software/v1
+  configurations:
+  - type: credentials.config.ocm.software
+    consumers:
+    - identity:
+        type: OCIRegistry
+        hostname: ghcr.io
+      credentials:
+      - type: Credentials/v1
+        properties:
+          username: my-user
+          password: my-token
+  EOF
 ```
 
 ### Options
@@ -63,6 +79,9 @@ ocm get config [flags]
                                            If multiple configuration files are found, they will be merged in the order they are discovered.
                                            Later entries have higher priority.
                                            Using the option, the specified configuration file(s) will be used instead of the lookup above.
+                                           Use "-" to read configuration documents from stdin. It is an entry like any other: on its own it
+                                           replaces the lookup above, so add --config <file> to keep a file, and a repeated "-" is ignored.
+                                           Other documents on stdin stay there for commands that read it, such as transfer with --transfer-spec -.
       --logformat enum                     set the log output format that is used to print individual logs
                                               json: Output logs in JSON format, suitable for machine processing
                                               text: Output logs in human-readable text format, suitable for console output

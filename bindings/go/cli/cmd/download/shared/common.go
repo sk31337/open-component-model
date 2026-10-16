@@ -16,7 +16,9 @@ import (
 	"ocm.software/open-component-model/bindings/go/cli/internal/flags/log"
 	"ocm.software/open-component-model/bindings/go/credentials"
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
-	v2 "ocm.software/open-component-model/bindings/go/descriptor/v2"
+	"ocm.software/open-component-model/bindings/go/descriptor/v2"
+	"ocm.software/open-component-model/bindings/go/oci/compref"
+	ociaccess "ocm.software/open-component-model/bindings/go/oci/spec/access"
 	"ocm.software/open-component-model/bindings/go/plugin/manager"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/resource"
 	"ocm.software/open-component-model/bindings/go/repository"
@@ -43,15 +45,29 @@ func GetContextItems(cmd *cobra.Command) (*manager.PluginManager, credentials.Re
 	return pluginManager, credentialGraph, logger, nil
 }
 
-// DownloadResourceData handles the actual data download from repository
-func DownloadResourceData(ctx context.Context, pluginManager *manager.PluginManager, credentialGraph credentials.Resolver, component, version string, repo repository.ComponentVersionRepository, res *descriptor.Resource, identity runtime.Identity) (blob.ReadOnlyBlob, error) {
+// DownloadResourceData downloads the content of res, a resource of desc, the component version
+// ref names, read through repo. If ref is pinned to a digest, the content is verified against the
+// digest of res (see VerifyResourceContent), so it is bound to the pinned descriptor also where it
+// is not read from the pinned artifact (external accesses, or local blobs under a normalized pin).
+func DownloadResourceData(ctx context.Context, pluginManager *manager.PluginManager, credentialGraph credentials.Resolver, ref *compref.Ref, desc *descriptor.Descriptor, repo repository.ComponentVersionRepository, res *descriptor.Resource, identity runtime.Identity) (blob.ReadOnlyBlob, error) {
+	data, err := downloadResourceData(ctx, pluginManager, credentialGraph, desc.Component.Name, desc.Component.Version, repo, res, identity)
+	if err != nil || ref.Digest == "" {
+		return data, err
+	}
+	return VerifyResourceContent(ctx, res, data)
+}
+
+func downloadResourceData(ctx context.Context, pluginManager *manager.PluginManager, credentialGraph credentials.Resolver, component, version string, repo repository.ComponentVersionRepository, res *descriptor.Resource, identity runtime.Identity) (blob.ReadOnlyBlob, error) {
 	access := res.GetAccess()
 	var data blob.ReadOnlyBlob
 	var err error
 
-	if IsLocal(access) {
+	if v2.IsLocalBlob(access) || ociaccess.IsRelativeOCIReference(access) {
 		data, _, err = repo.GetLocalResource(ctx, component, version, identity)
 	} else {
+		if access == nil {
+			return nil, fmt.Errorf("access was empty for resource %s", res.Name)
+		}
 		var plugin resource.Repository
 		plugin, err = pluginManager.ResourcePluginRegistry.GetResourcePlugin(ctx, access)
 		if err != nil {
@@ -83,16 +99,4 @@ func SaveBlobToFile(data blob.ReadOnlyBlob, outputPath string) error {
 		return fmt.Errorf("writing resource to %q failed: %w", outputPath, err)
 	}
 	return nil
-}
-
-// IsLocal checks if access method is local
-func IsLocal(access runtime.Typed) bool {
-	if access == nil {
-		return false
-	}
-	var local v2.LocalBlob
-	if err := v2.Scheme.Convert(access, &local); err != nil {
-		return false
-	}
-	return true
 }

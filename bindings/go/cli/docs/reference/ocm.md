@@ -43,6 +43,9 @@ ocm [sub-command] [flags]
                                            If multiple configuration files are found, they will be merged in the order they are discovered.
                                            Later entries have higher priority.
                                            Using the option, the specified configuration file(s) will be used instead of the lookup above.
+                                           Use "-" to read configuration documents from stdin. It is an entry like any other: on its own it
+                                           replaces the lookup above, so add --config <file> to keep a file, and a repeated "-" is ignored.
+                                           Other documents on stdin stay there for commands that read it, such as transfer with --transfer-spec -.
   -h, --help                               help for ocm
       --logformat enum                     set the log output format that is used to print individual logs
                                               json: Output logs in JSON format, suitable for machine processing
@@ -61,6 +64,7 @@ ocm [sub-command] [flags]
       --plugin-directory string            default directory path for ocm plugins. (default "$HOME/.config/ocm/plugins")
       --plugin-shutdown-timeout duration   Timeout for plugin shutdown. If a plugin does not shut down within this time, it is forcefully killed (default 10s)
       --temp-folder string                 Specify a custom temporary folder path for filesystem operations.
+  -v, --version                            version for ocm
       --working-directory string           Specify a custom working directory path to load resources from.
 ```
 

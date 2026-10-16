@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"testing"
+
+	_ "crypto/sha512" // SHA-384 and SHA-512 OCI roots
 
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
@@ -51,6 +54,7 @@ func init() {
 }
 
 func Repository(t *testing.T, options ...oci.RepositoryOption) *oci.Repository {
+	t.Helper()
 	opts := append([]oci.RepositoryOption{oci.WithTempDir(t.TempDir())}, options...)
 	repo, err := oci.NewRepository(opts...)
 	require.NoError(t, err, "Failed to create repository")
@@ -137,6 +141,68 @@ func TestRepository_GetComponentVersion(t *testing.T) {
 	r.NotNil(desc, "Expected non-nil descriptor when getting existing component version")
 }
 
+func TestRepository_ReadLegacyOCIArtifactDigest(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, ocictf.WithCTF(store), oci.WithScheme(testScheme))
+	artifact, root := buildTestManifestStream(t)
+	resourceStore, err := store.StoreForReference(ctx, "test-image:1.0.0")
+	r.NoError(err)
+	r.NoError(oras.CopyGraph(ctx, artifact, resourceStore, root, oras.DefaultCopyGraphOptions))
+	r.NoError(resourceStore.Tag(ctx, root, "1.0.0"))
+
+	legacyDigest := &descriptor.Digest{
+		HashAlgorithm:          "SHA-256",
+		NormalisationAlgorithm: "genericBlobDigest/v1",
+		Value:                  root.Digest.Encoded(),
+	}
+	component := &descriptor.Descriptor{
+		Meta: descriptor.Meta{Version: "v2"},
+		Component: descriptor.Component{
+			ComponentMeta: descriptor.ComponentMeta{ObjectMeta: descriptor.ObjectMeta{Name: "ocm.software/legacy-digest", Version: "1.0.0"}},
+			Provider:      descriptor.Provider{Name: "test-provider"},
+			Resources: []descriptor.Resource{{
+				ElementMeta: descriptor.ElementMeta{ObjectMeta: descriptor.ObjectMeta{Name: "artifact", Version: "1.0.0"}},
+				Type:        "ociImage",
+				Relation:    descriptor.ExternalRelation,
+				Access: &v1.OCIImage{
+					Type:           runtime.NewVersionedType(v1.OCIImageType, v1.Version),
+					ImageReference: "test-image:1.0.0",
+				},
+				Digest: legacyDigest,
+			}},
+		},
+	}
+	r.NoError(repo.AddComponentVersion(ctx, component))
+
+	got, err := repo.GetComponentVersion(ctx, component.Component.Name, component.Component.Version)
+	r.NoError(err)
+	r.Len(got.Component.Resources, 1)
+	r.Equal(legacyDigest, got.Component.Resources[0].Digest)
+	var ociAccess v1.OCIImage
+	r.NoError(testScheme.Convert(got.Component.Resources[0].Access, &ociAccess))
+	got.Component.Resources[0].Access = &ociAccess
+	processed, err := repo.ProcessResourceDigest(ctx, &got.Component.Resources[0])
+	r.NoError(err)
+	r.Equal(legacyDigest, processed.Digest)
+
+	stream, err := repo.DownloadResourceStream(ctx, &got.Component.Resources[0])
+	r.NoError(err)
+	layout, err := stream.Materialize(ctx)
+	r.NoError(err)
+	downloadedRoot, err := tar.CopyOCILayoutWithIndex(ctx, memory.New(), layout, tar.CopyOCILayoutWithIndexOptions{})
+	r.NoError(err)
+	r.Equal(root.Digest, downloadedRoot.Digest)
+
+	got, err = repo.GetComponentVersion(ctx, component.Component.Name, component.Component.Version)
+	r.NoError(err)
+	r.Equal(legacyDigest, got.Component.Resources[0].Digest)
+}
+
 func TestRepository_GetLocalResource(t *testing.T) {
 	type getLocalResourceTestCase struct {
 		name                     string
@@ -147,7 +213,6 @@ func TestRepository_GetLocalResource(t *testing.T) {
 		errorContains            string
 		setupComponent           bool
 		setupComponentLikeOldOCM bool
-		setupManifest            func(t *testing.T, store spec.Store, ctx context.Context, content []byte, resource *descriptor.Resource) error
 		checkContent             func(t *testing.T, original []byte, actual []byte)
 	}
 
@@ -176,6 +241,7 @@ func TestRepository_GetLocalResource(t *testing.T) {
 			expectError:    true,
 			setupComponent: false,
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				assert.Equal(t, string(original), string(actual))
 			},
 		},
@@ -201,6 +267,7 @@ func TestRepository_GetLocalResource(t *testing.T) {
 			},
 			setupComponent: true,
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				assert.Equal(t, string(original), string(actual))
 			},
 		},
@@ -233,6 +300,7 @@ func TestRepository_GetLocalResource(t *testing.T) {
 			},
 			setupComponent: true,
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				assert.Equal(t, string(original), string(actual))
 			},
 		},
@@ -259,6 +327,7 @@ func TestRepository_GetLocalResource(t *testing.T) {
 			},
 			setupComponentLikeOldOCM: true,
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				assert.Equal(t, string(original), string(actual))
 			},
 		},
@@ -313,6 +382,7 @@ func TestRepository_GetLocalResource(t *testing.T) {
 			},
 			setupComponent: true,
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				assert.Equal(t, string(original), string(actual))
 			},
 		},
@@ -333,6 +403,7 @@ func TestRepository_GetLocalResource(t *testing.T) {
 				},
 			},
 			content: func(t *testing.T) []byte {
+				t.Helper()
 				// Create a buffer to hold the OCI layout
 				buf := bytes.NewBuffer(nil)
 				layout, err := tar.NewOCILayoutWriterWithTempFile(buf, t.TempDir())
@@ -364,6 +435,7 @@ func TestRepository_GetLocalResource(t *testing.T) {
 				return buf.Bytes()
 			}(t),
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				r := require.New(t)
 				store, err := tar.ReadOCILayout(t.Context(), inmemory.New(bytes.NewReader(original)))
 				r.NoError(err, "Failed to read OCI layout")
@@ -444,7 +516,7 @@ func TestRepository_GetLocalResource(t *testing.T) {
 					defer reader.Close()
 
 					content, err := io.ReadAll(reader)
-					r.NoError(err, fmt.Errorf("failed to read blob content: %w", err))
+					r.NotErrorIs(err, fmt.Errorf("failed to read blob content: %w", err))
 
 					// If the content is gzipped (starts with gzip magic number), decompress it
 					if len(content) >= 2 && content[0] == 0x1f && content[1] == 0x8b {
@@ -1083,7 +1155,7 @@ func TestRepository_AddLocalResourceOCIImageLayer(t *testing.T) {
 	r.NotNil(resource)
 	var localAccess v2.LocalBlob
 	r.NoError(v2.Scheme.Convert(resource.Access, &localAccess))
-	r.Equal(localAccess.ReferenceName, "ocm/oci/repo:latest", "Resource reference name should match expected value")
+	r.Equal("ocm/oci/repo:latest", localAccess.ReferenceName, "Resource reference name should match expected value")
 
 	r.NoError(err, "Failed to get OCI image layer resource")
 	r.NotNil(blob, "Blob should not be nil")
@@ -1099,6 +1171,7 @@ func TestRepository_AddLocalResourceOCIImageLayer(t *testing.T) {
 }
 
 func createSingleLayerOCIImage(t *testing.T, data []byte, ref string) ([]byte, *v1.OCIImage) {
+	t.Helper()
 	r := require.New(t)
 	var buf bytes.Buffer
 	w, err := tar.NewOCILayoutWriterWithTempFile(&buf, t.TempDir())
@@ -1168,7 +1241,47 @@ func TestRepository_ListComponentVersions(t *testing.T) {
 	r.Equal(expectedOrder, versions, "Versions should be sorted in descending order")
 }
 
+// TestRepository_ListComponentVersions_PreservesNonSemver guards against the
+// regression where ListComponentVersions dropped versions that are valid OCI
+// tags but do not parse as loose semver (e.g. "build-1837", "ubuntu22.04").
+// Such versions are legal under a configured versioning scheme, and the OCI
+// binding must return them so the CLI can order them with the active registry.
+func TestRepository_ListComponentVersions_PreservesNonSemver(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, ocictf.WithCTF(store))
+
+	const componentName = "ocm.software/non-semver-component"
+	versionsToAdd := []string{"2.0.0", "build-1837", "ubuntu22.04", "1.0.0"}
+	for _, version := range versionsToAdd {
+		desc := &descriptor.Descriptor{
+			Meta: descriptor.Meta{Version: "v2"},
+			Component: descriptor.Component{
+				Provider: descriptor.Provider{Name: "test-provider"},
+				ComponentMeta: descriptor.ComponentMeta{
+					ObjectMeta: descriptor.ObjectMeta{Name: componentName, Version: version},
+				},
+			},
+		}
+		r.NoError(repo.AddComponentVersion(ctx, desc), "adding %s must succeed (valid OCI tag)", version)
+	}
+
+	versions, err := repo.ListComponentVersions(ctx, componentName)
+	r.NoError(err)
+	r.ElementsMatch(versionsToAdd, versions, "non-semver versions must not be dropped from the listing")
+
+	// The default comparator keeps semver versions ranked ahead of non-semver
+	// ones and orders semver newest-first.
+	r.Equal([]string{"2.0.0", "1.0.0"}, []string{versions[0], versions[1]},
+		"semver versions must sort newest-first ahead of non-semver entries")
+}
+
 func setupLegacyComponentVersion(t *testing.T, store *ocictf.Store, ctx context.Context, content []byte, resource *descriptor.Resource) {
+	t.Helper()
 	r := require.New(t)
 	// Get a repository store for the component
 	repoStore, err := store.StoreForReference(t.Context(), store.ComponentVersionReference(t.Context(), "ocm.software/test-component", "1.0.0"))
@@ -1214,6 +1327,7 @@ func setupLegacyComponentVersion(t *testing.T, store *ocictf.Store, ctx context.
 }
 
 func setupLegacyComponentVersionWithSource(t *testing.T, store *ocictf.Store, ctx context.Context, content []byte, source *descriptor.Source) {
+	t.Helper()
 	r := require.New(t)
 	// Get a repository store for the component
 	repoStore, err := store.StoreForReference(t.Context(), store.ComponentVersionReference(t.Context(), "ocm.software/test-component", "1.0.0"))
@@ -1262,7 +1376,6 @@ func TestRepository_GetLocalSource(t *testing.T) {
 		errorContains            string
 		setupComponent           bool
 		setupComponentLikeOldOCM bool
-		setupManifest            func(t *testing.T, store spec.Store, ctx context.Context, content []byte, source *descriptor.Source) error
 		checkContent             func(t *testing.T, original []byte, actual []byte)
 	}
 
@@ -1290,6 +1403,7 @@ func TestRepository_GetLocalSource(t *testing.T) {
 			expectError:    true,
 			setupComponent: false,
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				assert.Equal(t, string(original), string(actual))
 			},
 		},
@@ -1313,6 +1427,7 @@ func TestRepository_GetLocalSource(t *testing.T) {
 			},
 			setupComponent: true,
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				assert.Equal(t, string(original), string(actual))
 			},
 		},
@@ -1343,6 +1458,7 @@ func TestRepository_GetLocalSource(t *testing.T) {
 			},
 			setupComponent: true,
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				assert.Equal(t, string(original), string(actual))
 			},
 		},
@@ -1388,6 +1504,7 @@ func TestRepository_GetLocalSource(t *testing.T) {
 				},
 			},
 			content: func(t *testing.T) []byte {
+				t.Helper()
 				// Create a buffer to hold the OCI layout
 				buf := bytes.NewBuffer(nil)
 				layout, err := tar.NewOCILayoutWriterWithTempFile(buf, t.TempDir())
@@ -1420,6 +1537,7 @@ func TestRepository_GetLocalSource(t *testing.T) {
 				return buf.Bytes()
 			}(t),
 			checkContent: func(t *testing.T, original []byte, actual []byte) {
+				t.Helper()
 				r := require.New(t)
 				store, err := tar.ReadOCILayout(t.Context(), inmemory.New(bytes.NewReader(original)))
 				r.NoError(err, "Failed to read OCI layout")
@@ -1572,6 +1690,7 @@ func TestRepository_ProcessResourceDigest(t *testing.T) {
 				},
 			},
 			setup: func(t *testing.T) {
+				t.Helper()
 				ctx := t.Context()
 				r := require.New(t)
 				store, err := store.StoreForReference(ctx, "test-registry/test-image:v2.0.0")
@@ -1604,6 +1723,7 @@ func TestRepository_ProcessResourceDigest(t *testing.T) {
 				},
 			},
 			setup: func(t *testing.T) {
+				t.Helper()
 				ctx := t.Context()
 				r := require.New(t)
 				store, err := store.StoreForReference(ctx, "test-registry/test-image:v2.0.0")
@@ -1640,6 +1760,7 @@ func TestRepository_ProcessResourceDigest(t *testing.T) {
 				},
 			},
 			setup: func(t *testing.T) {
+				t.Helper()
 				ctx := t.Context()
 				r := require.New(t)
 				store, err := store.StoreForReference(ctx, "test-registry/test-image:v2.0.0")
@@ -1660,6 +1781,190 @@ func TestRepository_ProcessResourceDigest(t *testing.T) {
 				return nil
 			},
 		},
+		{
+			name: "oci image layer takes the digest from the access",
+			resource: &descriptor.Resource{
+				Relation: descriptor.ExternalRelation,
+				ElementMeta: descriptor.ElementMeta{
+					ObjectMeta: descriptor.ObjectMeta{
+						Name:    "test-resource",
+						Version: "1.0.0",
+					},
+				},
+				Type: "test-type",
+				Access: &v1.OCIImageLayer{
+					Reference: "test-registry/test-layer@" + dig.String(),
+					MediaType: ociImageSpecV1.MediaTypeImageLayer,
+					Digest:    dig,
+					Size:      int64(len(testdata)),
+				},
+			},
+			setup: func(t *testing.T) {
+				t.Helper()
+				ctx := t.Context()
+				r := require.New(t)
+				store, err := store.StoreForReference(ctx, "test-registry/test-layer")
+				r.NoError(err, "Failed to get store for test registry")
+
+				desc := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, testdata)
+				r.NoError(store.Push(ctx, desc, bytes.NewReader(testdata)))
+			},
+			check: func(resource *descriptor.Resource) error {
+				r := require.New(t)
+				layer, ok := resource.Access.(*v1.OCIImageLayer)
+				r.True(ok, "Access should be of type v1.OCIImageLayer")
+				r.Equal("test-registry/test-layer@"+dig.String(), layer.Reference)
+				r.NotNil(resource.Digest, "digest should have been applied from the access")
+				r.Equal(dig.Encoded(), resource.Digest.Value)
+				return nil
+			},
+		},
+		{
+			// The reference documented for OCIImageLayer is a bare repository, with the
+			// layer addressed by the digest field alone.
+			name: "oci image layer with a reference that carries no digest",
+			resource: &descriptor.Resource{
+				Relation: descriptor.ExternalRelation,
+				ElementMeta: descriptor.ElementMeta{
+					ObjectMeta: descriptor.ObjectMeta{
+						Name:    "test-resource",
+						Version: "1.0.0",
+					},
+				},
+				Type: "test-type",
+				Access: &v1.OCIImageLayer{
+					Reference: "test-registry/test-layer",
+					MediaType: ociImageSpecV1.MediaTypeImageLayer,
+					Digest:    dig,
+					Size:      int64(len(testdata)),
+				},
+			},
+			setup: func(t *testing.T) {
+				t.Helper()
+				ctx := t.Context()
+				r := require.New(t)
+				store, err := store.StoreForReference(ctx, "test-registry/test-layer")
+				r.NoError(err, "Failed to get store for test registry")
+
+				desc := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, testdata)
+				r.NoError(store.Push(ctx, desc, bytes.NewReader(testdata)))
+			},
+			check: func(resource *descriptor.Resource) error {
+				r := require.New(t)
+				r.NotNil(resource.Digest, "digest should have been applied from the access")
+				r.Equal(dig.Encoded(), resource.Digest.Value)
+				return nil
+			},
+		},
+		{
+			name: "oci image layer with a size that does not match the blob",
+			resource: &descriptor.Resource{
+				Relation: descriptor.ExternalRelation,
+				ElementMeta: descriptor.ElementMeta{
+					ObjectMeta: descriptor.ObjectMeta{
+						Name:    "test-resource",
+						Version: "1.0.0",
+					},
+				},
+				Type: "test-type",
+				Access: &v1.OCIImageLayer{
+					Reference: "test-registry/test-layer",
+					MediaType: ociImageSpecV1.MediaTypeImageLayer,
+					Digest:    dig,
+					Size:      int64(len(testdata)) + 1,
+				},
+			},
+			setup: func(t *testing.T) {
+				t.Helper()
+				ctx := t.Context()
+				r := require.New(t)
+				store, err := store.StoreForReference(ctx, "test-registry/test-layer")
+				r.NoError(err, "Failed to get store for test registry")
+
+				desc := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, testdata)
+				r.NoError(store.Push(ctx, desc, bytes.NewReader(testdata)))
+			},
+			err: func(t assert.TestingT, err error, i ...interface{}) bool {
+				return assert.ErrorContains(t, err, "but the access declares 13")
+			},
+		},
+		{
+			name: "oci image layer without a size takes it from the blob",
+			resource: &descriptor.Resource{
+				Relation: descriptor.ExternalRelation,
+				ElementMeta: descriptor.ElementMeta{
+					ObjectMeta: descriptor.ObjectMeta{
+						Name:    "test-resource",
+						Version: "1.0.0",
+					},
+				},
+				Type: "test-type",
+				Access: &v1.OCIImageLayer{
+					Reference: "test-registry/test-layer",
+					MediaType: ociImageSpecV1.MediaTypeImageLayer,
+					Digest:    dig,
+				},
+			},
+			setup: func(t *testing.T) {
+				t.Helper()
+				ctx := t.Context()
+				r := require.New(t)
+				store, err := store.StoreForReference(ctx, "test-registry/test-layer")
+				r.NoError(err, "Failed to get store for test registry")
+
+				desc := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, testdata)
+				r.NoError(store.Push(ctx, desc, bytes.NewReader(testdata)))
+			},
+			check: func(resource *descriptor.Resource) error {
+				r := require.New(t)
+				r.Equal(int64(len(testdata)), resource.Access.(*v1.OCIImageLayer).Size, "the size should have been taken from the blob")
+				r.Equal(dig.Encoded(), resource.Digest.Value)
+				return nil
+			},
+		},
+		{
+			name: "oci image layer that is not present in the repository",
+			resource: &descriptor.Resource{
+				Relation: descriptor.ExternalRelation,
+				ElementMeta: descriptor.ElementMeta{
+					ObjectMeta: descriptor.ObjectMeta{
+						Name:    "test-resource",
+						Version: "1.0.0",
+					},
+				},
+				Type: "test-type",
+				Access: &v1.OCIImageLayer{
+					Reference: "test-registry/absent-layer@" + digest.FromString("absent").String(),
+					MediaType: ociImageSpecV1.MediaTypeImageLayer,
+					Digest:    digest.FromString("absent"),
+					Size:      6,
+				},
+			},
+			err: func(t assert.TestingT, err error, i ...interface{}) bool {
+				return assert.ErrorContains(t, err, "does not exist")
+			},
+		},
+		{
+			name: "oci image layer without a reference",
+			resource: &descriptor.Resource{
+				Relation: descriptor.ExternalRelation,
+				ElementMeta: descriptor.ElementMeta{
+					ObjectMeta: descriptor.ObjectMeta{
+						Name:    "test-resource",
+						Version: "1.0.0",
+					},
+				},
+				Type: "test-type",
+				Access: &v1.OCIImageLayer{
+					MediaType: ociImageSpecV1.MediaTypeImageLayer,
+					Digest:    dig,
+					Size:      int64(len(testdata)),
+				},
+			},
+			err: func(t assert.TestingT, err error, i ...interface{}) bool {
+				return assert.ErrorContains(t, err, `set it in field "ref"`)
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1669,8 +1974,12 @@ func TestRepository_ProcessResourceDigest(t *testing.T) {
 			}
 
 			res, err := repo.ProcessResourceDigest(ctx, tt.resource)
-			if tt.err != nil && !tt.err(t, err) {
-				return
+			if tt.err != nil {
+				if !tt.err(t, err) {
+					return
+				}
+			} else {
+				r.NoError(err)
 			}
 
 			if tt.check != nil {
@@ -1680,6 +1989,153 @@ func TestRepository_ProcessResourceDigest(t *testing.T) {
 		})
 	}
 }
+
+// TestRepository_DownloadResourceOCIImageLayer asserts that a layer access yields
+// the raw content rather than an OCI layout tar: a bare blob has no manifest that
+// a layout could point at.
+func TestRepository_DownloadResourceOCIImageLayer(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, ocictf.WithCTF(store))
+
+	testdata := []byte("test layer content")
+	dig := digest.FromBytes(testdata)
+
+	layerStore, err := store.StoreForReference(ctx, "test-registry/test-layer")
+	r.NoError(err)
+	desc := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, testdata)
+	r.NoError(layerStore.Push(ctx, desc, bytes.NewReader(testdata)))
+
+	res := &descriptor.Resource{
+		Relation: descriptor.ExternalRelation,
+		ElementMeta: descriptor.ElementMeta{
+			ObjectMeta: descriptor.ObjectMeta{Name: "test-layer-resource", Version: "1.0.0"},
+		},
+		Type: "test-type",
+		Access: &v1.OCIImageLayer{
+			Type:      runtime.NewVersionedType(v1.OCIImageLayerType, v1.Version),
+			Reference: "test-registry/test-layer@" + dig.String(),
+			MediaType: ociImageSpecV1.MediaTypeImageLayer,
+			Digest:    dig,
+			Size:      int64(len(testdata)),
+		},
+	}
+
+	downloaded, err := repo.DownloadResource(ctx, res)
+	r.NoError(err)
+
+	reader, err := downloaded.ReadCloser()
+	r.NoError(err)
+	t.Cleanup(func() { r.NoError(reader.Close()) })
+
+	data, err := io.ReadAll(reader)
+	r.NoError(err)
+	r.Equal(testdata, data, "downloaded content should be the layer itself")
+
+	aware, ok := downloaded.(blob.MediaTypeAware)
+	r.True(ok, "layer blob should carry its media type")
+	mediaType, ok := aware.MediaType()
+	r.True(ok)
+	r.Equal(ociImageSpecV1.MediaTypeImageLayer, mediaType)
+
+	for _, reference := range []string{"test-layer", "test-layer@" + dig.String()} {
+		t.Run("CTF reference without registry "+reference, func(t *testing.T) {
+			r := require.New(t)
+			local := res.DeepCopy()
+			local.Access.(*v1.OCIImageLayer).Reference = reference
+
+			processed, err := repo.ProcessResourceDigest(t.Context(), local)
+			r.NoError(err)
+			r.Equal(dig.Encoded(), processed.Digest.Value)
+
+			downloaded, err := repo.DownloadResource(t.Context(), local)
+			r.NoError(err)
+			reader, err := downloaded.ReadCloser()
+			r.NoError(err)
+			data, err := io.ReadAll(reader)
+			r.NoError(err)
+			r.NoError(reader.Close())
+			r.Equal(testdata, data)
+		})
+	}
+
+	t.Run("without a media type the blob keeps its default", func(t *testing.T) {
+		r := require.New(t)
+		untyped := res.DeepCopy()
+		untyped.Access.(*v1.OCIImageLayer).MediaType = ""
+
+		downloaded, err := repo.DownloadResource(ctx, untyped)
+		r.NoError(err)
+		aware, ok := downloaded.(blob.MediaTypeAware)
+		r.True(ok)
+		mediaType, ok := aware.MediaType()
+		r.True(ok)
+		r.Equal("application/octet-stream", mediaType, "an empty media type must not overwrite the default")
+	})
+
+	t.Run("a size that does not match the blob is rejected", func(t *testing.T) {
+		r := require.New(t)
+		wrongSize := res.DeepCopy()
+		wrongSize.Access.(*v1.OCIImageLayer).Size = int64(len(testdata)) + 1
+
+		_, err := repo.DownloadResource(ctx, wrongSize)
+		r.ErrorContains(err, "the descriptor declares")
+	})
+
+	t.Run("a layer cannot be streamed", func(t *testing.T) {
+		r := require.New(t)
+		_, err := repo.DownloadResourceStream(ctx, res)
+		r.ErrorContains(err, "cannot be streamed")
+	})
+
+	t.Run("a raw layer access is rejected as upload target", func(t *testing.T) {
+		r := require.New(t)
+		raw := &runtime.Raw{}
+		r.NoError(runtime.NewScheme(runtime.WithAllowUnknown()).Convert(res.Access, raw))
+		target := res.DeepCopy()
+		target.Access = raw
+
+		_, err := repo.UploadResource(ctx, target, inmemory.New(bytes.NewReader(testdata)))
+		r.ErrorContains(err, "as upload target")
+	})
+
+	t.Run("a stream rooted at a blob is not pushed or tagged", func(t *testing.T) {
+		r := require.New(t)
+		target := &descriptor.Resource{
+			ElementMeta: res.ElementMeta,
+			Type:        res.Type,
+			Access: &v1.OCIImage{
+				Type:           runtime.NewVersionedType(v1.OCIImageType, v1.Version),
+				ImageReference: "test-registry/blob-target:1.0.0",
+			},
+		}
+		_, err := repo.UploadResourceStream(ctx, target, &blobRootStream{ReadOnlyGraphStorage: layerStore, root: desc})
+		r.ErrorContains(err, "not an OCI manifest or index")
+
+		targetStore, err := store.StoreForReference(ctx, "test-registry/blob-target")
+		r.NoError(err)
+		_, err = targetStore.Resolve(ctx, "1.0.0")
+		r.Error(err, "a blob must never be tagged in the target")
+	})
+}
+
+// blobRootStream is a ResourceStream whose root is a plain blob instead of a manifest.
+type blobRootStream struct {
+	content.ReadOnlyGraphStorage
+	root ociImageSpecV1.Descriptor
+}
+
+func (s *blobRootStream) Root() ociImageSpecV1.Descriptor { return s.root }
+
+func (s *blobRootStream) Materialize(context.Context) (blob.ReadOnlyBlob, error) {
+	return nil, errors.New("not implemented")
+}
+
+var _ ocistream.ResourceStream = (*blobRootStream)(nil)
 
 func TestRepository_AddComponentVersionAlias(t *testing.T) {
 	r := require.New(t)
@@ -2059,6 +2515,7 @@ func TestRepository_RemoveComponentVersionAlias(t *testing.T) {
 		{
 			name: "removes alias leaving sibling alias and semver intact",
 			setup: func(t *testing.T, repo *oci.Repository) {
+				t.Helper()
 				r := require.New(t)
 				r.NoError(repo.AddComponentVersion(t.Context(), makeDesc("1.0.0")))
 				r.NoError(repo.AddComponentVersionAlias(t.Context(), componentName, "1.0.0", "latest"))
@@ -2066,6 +2523,7 @@ func TestRepository_RemoveComponentVersionAlias(t *testing.T) {
 			},
 			alias: "latest",
 			assert: func(t *testing.T, repo *oci.Repository, removeErr error) {
+				t.Helper()
 				r := require.New(t)
 				r.NoError(removeErr)
 
@@ -2086,16 +2544,19 @@ func TestRepository_RemoveComponentVersionAlias(t *testing.T) {
 			setup: func(*testing.T, *oci.Repository) {},
 			alias: "nonexistent",
 			assert: func(t *testing.T, _ *oci.Repository, removeErr error) {
+				t.Helper()
 				require.ErrorIs(t, removeErr, repository.ErrNotFound)
 			},
 		},
 		{
 			name: "rejects a semver version string and leaves it accessible",
 			setup: func(t *testing.T, repo *oci.Repository) {
+				t.Helper()
 				require.NoError(t, repo.AddComponentVersion(t.Context(), makeDesc("1.0.0")))
 			},
 			alias: "1.0.0",
 			assert: func(t *testing.T, repo *oci.Repository, removeErr error) {
+				t.Helper()
 				r := require.New(t)
 				r.Error(removeErr)
 				r.Contains(removeErr.Error(), "not an alias")
@@ -2108,6 +2569,7 @@ func TestRepository_RemoveComponentVersionAlias(t *testing.T) {
 		{
 			name: "removed alias does not appear in ListComponentVersions",
 			setup: func(t *testing.T, repo *oci.Repository) {
+				t.Helper()
 				r := require.New(t)
 				r.NoError(repo.AddComponentVersion(t.Context(), makeDesc("1.0.0")))
 				r.NoError(repo.AddComponentVersion(t.Context(), makeDesc("2.0.0")))
@@ -2115,6 +2577,7 @@ func TestRepository_RemoveComponentVersionAlias(t *testing.T) {
 			},
 			alias: "latest",
 			assert: func(t *testing.T, repo *oci.Repository, removeErr error) {
+				t.Helper()
 				r := require.New(t)
 				r.NoError(removeErr)
 
@@ -2326,6 +2789,325 @@ func buildTestManifestStream(t *testing.T) (*memory.Store, ociImageSpecV1.Descri
 	return store, manifestDesc
 }
 
+func buildTestIndexStream(t *testing.T) (*memory.Store, ociImageSpecV1.Descriptor) {
+	t.Helper()
+	r := require.New(t)
+	ctx := t.Context()
+	store, amd64 := buildTestManifestStream(t)
+	amd64.Platform = &ociImageSpecV1.Platform{OS: "linux", Architecture: "amd64"}
+	arm64, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1, "application/custom", oras.PackManifestOptions{
+		ManifestAnnotations: map[string]string{"architecture": "arm64"},
+	})
+	r.NoError(err)
+	arm64.Platform = &ociImageSpecV1.Platform{OS: "linux", Architecture: "arm64"}
+	body, err := json.Marshal(ociImageSpecV1.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ociImageSpecV1.MediaTypeImageIndex,
+		Manifests: []ociImageSpecV1.Descriptor{amd64, arm64},
+	})
+	r.NoError(err)
+	root := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageIndex, body)
+	r.NoError(store.Push(ctx, root, bytes.NewReader(body)))
+	return store, root
+}
+
+func TestRepository_ProcessResourceDigest_OCIArtifact(t *testing.T) {
+	testRepositoryResourceDigest(t, "ProcessResourceDigest")
+}
+
+func TestRepository_UploadPreservesResourceDigest(t *testing.T) {
+	for _, operation := range []string{"UploadResource", "UploadResourceStream"} {
+		t.Run(operation, func(t *testing.T) {
+			testRepositoryResourceDigest(t, operation)
+		})
+	}
+}
+
+func testRepositoryResourceDigest(t *testing.T, operation string) {
+	t.Helper()
+	for _, artifact := range []struct {
+		name  string
+		build func(*testing.T) (*memory.Store, ociImageSpecV1.Descriptor)
+	}{
+		{name: "manifest", build: buildTestManifestStream},
+		{name: "multi-platform index", build: buildTestIndexStream},
+	} {
+		t.Run(artifact.name, func(t *testing.T) {
+			memStore, root := artifact.build(t)
+			correct := descriptor.Digest{
+				HashAlgorithm:          "SHA-256",
+				NormalisationAlgorithm: "ociArtifactDigest/v1",
+				Value:                  root.Digest.Encoded(),
+			}
+			type testCase struct {
+				name   string
+				digest *descriptor.Digest
+				err    string
+			}
+			tests := []testCase{
+				{name: "generate OCI artifact digest"},
+			}
+			for _, normalization := range []string{"ociArtifactDigest/v1", "genericBlobDigest/v1", "unexpected/v1", ""} {
+				existing := correct
+				existing.NormalisationAlgorithm = normalization
+				for _, mismatch := range []string{"none", "algorithm", "value"} {
+					candidate := existing.DeepCopy()
+					var wantErr string
+					switch mismatch {
+					case "algorithm":
+						candidate.HashAlgorithm = "SHA-512"
+						wantErr = "hash algorithm mismatch"
+					case "value":
+						candidate.Value = digest.FromString("different content").Encoded()
+						wantErr = "digest value mismatch"
+					}
+					if normalization == "unexpected/v1" {
+						wantErr = "unsupported OCI artifact normalisation algorithm"
+					}
+					// An empty normalization is completed, but set fields must still match.
+					// Incomplete metadata copied from OCI descriptors uses the OCI spelling (Helm does).
+					if normalization == "" && mismatch != "algorithm" {
+						candidate.HashAlgorithm = "sha256"
+					}
+					tests = append(tests, testCase{
+						name:   fmt.Sprintf("normalization=%s/mismatch=%s", normalization, mismatch),
+						digest: candidate,
+						err:    wantErr,
+					})
+				}
+			}
+			for _, missing := range []string{"hash", "value", "hash and value"} {
+				for _, mismatch := range []bool{false, true} {
+					candidate := correct.DeepCopy()
+					var wantErr string
+					if mismatch {
+						candidate.Value = digest.FromString("different content").Encoded()
+						if missing == "hash" {
+							wantErr = "digest value mismatch"
+						}
+					}
+					if missing == "hash" || missing == "hash and value" {
+						candidate.HashAlgorithm = ""
+					}
+					if missing == "value" || missing == "hash and value" {
+						candidate.Value = ""
+					}
+					tests = append(tests, testCase{
+						name:   fmt.Sprintf("missing=%s/mismatch=%t", missing, mismatch),
+						digest: candidate,
+						err:    wantErr,
+					})
+				}
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					r := require.New(t)
+					ctx := t.Context()
+					fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+					r.NoError(err)
+					store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+					repo := Repository(t, ocictf.WithCTF(store), oci.WithScheme(testScheme))
+					targetStore, err := store.StoreForReference(ctx, "test-repo:1.0.0")
+					r.NoError(err)
+					stream := &ocistream.OCIResourceStream{
+						ReadOnlyGraphStorage: memStore,
+						Descriptor:           root,
+						TempDir:              t.TempDir(),
+						Tags:                 []string{"test-repo:1.0.0"},
+					}
+
+					resource := &descriptor.Resource{
+						Access: &v1.OCIImage{ImageReference: "test-repo:1.0.0"},
+						Digest: tt.digest.DeepCopy(),
+					}
+					originalManifest, err := content.FetchAll(ctx, memStore, root)
+					r.NoError(err)
+					// Seed a different root so rejection must preserve an existing tag.
+					existingManifest := append(bytes.Clone(originalManifest), '\n')
+					existingRoot := root
+					existingRoot.Digest = digest.FromBytes(existingManifest)
+					existingRoot.Size = int64(len(existingManifest))
+					r.NoError(targetStore.Push(ctx, existingRoot, bytes.NewReader(existingManifest)))
+					r.NoError(targetStore.Tag(ctx, existingRoot, "1.0.0"))
+
+					original := resource.DeepCopy()
+					var result *descriptor.Resource
+					switch operation {
+					case "ProcessResourceDigest":
+						r.NoError(oras.CopyGraph(ctx, memStore, targetStore, root, oras.DefaultCopyGraphOptions))
+						r.NoError(targetStore.Tag(ctx, root, "1.0.0"))
+						result, err = repo.ProcessResourceDigest(ctx, resource)
+					case "UploadResourceStream":
+						result, err = repo.UploadResourceStream(ctx, resource, stream)
+					case "UploadResource":
+						b, materializeErr := stream.Materialize(ctx)
+						r.NoError(materializeErr)
+						result, err = repo.UploadResource(ctx, resource, b)
+					default:
+						t.Fatalf("unknown operation %q", operation)
+					}
+
+					r.Equal(original, resource, "input resource, including access and digest, must not be mutated")
+					if tt.err != "" {
+						r.ErrorContains(err, tt.err)
+						if operation != "ProcessResourceDigest" {
+							exists, err := targetStore.Exists(ctx, root)
+							r.NoError(err)
+							r.False(exists, "rejected upload must not copy the root")
+							taggedRoot, err := targetStore.Resolve(ctx, "1.0.0")
+							r.NoError(err)
+							r.Equal(existingRoot.Digest, taggedRoot.Digest, "rejected upload must not change the tag")
+						}
+						return
+					}
+					r.NoError(err)
+					r.NotNil(result)
+					if tt.digest == nil || tt.digest.HashAlgorithm == "" || tt.digest.NormalisationAlgorithm == "" || tt.digest.Value == "" {
+						r.Equal(&correct, result.Digest, "new and incomplete digests must use OCI normalization and the root hash")
+					} else {
+						r.Equal(tt.digest, result.Digest, "existing digest triples must be preserved")
+					}
+					copiedRoot, err := targetStore.Resolve(ctx, "1.0.0")
+					r.NoError(err)
+					r.Equal(root.Digest, copiedRoot.Digest, "copying must preserve the OCI root digest")
+					copiedManifest, err := content.FetchAll(ctx, targetStore, copiedRoot)
+					r.NoError(err)
+					r.Equal(originalManifest, copiedManifest, "copying must preserve manifest/index bytes")
+				})
+			}
+		})
+	}
+}
+
+// TestRepository_UploadDigestControls covers the target access digest pin and the
+// root hash algorithm on every upload path; rejection must precede all writes.
+func TestRepository_UploadDigestControls(t *testing.T) {
+	// SHA-384 is opt-in in go-digest and deliberately absent from OCM's mapping.
+	digest.RegisterAlgorithm(digest.SHA384, crypto.SHA384)
+	type testCase struct {
+		method, state, pin string
+		algorithm          digest.Algorithm
+		untagged           bool
+		err                string
+	}
+	var tests []testCase
+	for _, method := range []string{"resource", "stream", "source"} {
+		states := []string{"absent", "incomplete", "correct"}
+		if method == "source" {
+			states = states[:1] // sources carry no digest
+		}
+		for _, state := range states {
+			for _, untagged := range []bool{false, true} {
+				tests = append(tests,
+					testCase{method: method, state: state, pin: "conflicting", untagged: untagged, err: "target access digest mismatch"},
+					testCase{method: method, state: state, pin: "matching", untagged: untagged})
+			}
+			sha384 := testCase{method: method, state: state, algorithm: digest.SHA384}
+			if method != "source" { // the transport accepts SHA-384, OCM resource digests do not
+				sha384.err = "unknown algorithm"
+			}
+			tests = append(tests, testCase{method: method, state: state, algorithm: digest.SHA512}, sha384)
+		}
+	}
+	for _, tt := range tests {
+		if tt.algorithm == "" {
+			tt.algorithm = digest.SHA256
+		}
+		t.Run(fmt.Sprintf("%s/%s/%s/pin=%s/untagged=%t", tt.method, tt.algorithm, tt.state, tt.pin, tt.untagged), func(t *testing.T) {
+			r := require.New(t)
+			ctx := t.Context()
+			fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+			r.NoError(err)
+			resolver := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+			repo := Repository(t, ocictf.WithCTF(resolver), oci.WithScheme(testScheme))
+			dst, err := resolver.StoreForReference(ctx, "test-repo")
+			r.NoError(err)
+			oldRoot := pushDigestUploadRoot(t, dst, digest.SHA256, "existing")
+			r.NoError(dst.Tag(ctx, oldRoot, "stable"))
+			src := memory.New()
+			root := pushDigestUploadRoot(t, src, tt.algorithm, "replacement")
+			ref := "test-repo"
+			if !tt.untagged {
+				ref += ":stable"
+			}
+			switch tt.pin {
+			case "conflicting":
+				ref += "@" + oldRoot.Digest.String()
+			case "matching":
+				ref += "@" + root.Digest.String()
+			}
+			targetAccess := &v1.OCIImage{Type: runtime.NewVersionedType(v1.OCIImageType, v1.Version), ImageReference: ref}
+			hashAlgorithm := map[digest.Algorithm]string{digest.SHA256: "SHA-256", digest.SHA512: "SHA-512", digest.SHA384: "SHA-384"}[tt.algorithm]
+			wantDigest := &descriptor.Digest{HashAlgorithm: hashAlgorithm, NormalisationAlgorithm: "ociArtifactDigest/v1", Value: root.Digest.Encoded()}
+			stream := &ocistream.OCIResourceStream{ReadOnlyGraphStorage: src, Descriptor: root, TempDir: t.TempDir()}
+
+			resource := &descriptor.Resource{Access: targetAccess}
+			if tt.state != "absent" {
+				resource.Digest = wantDigest.DeepCopy()
+				if tt.state == "incomplete" {
+					resource.Digest.NormalisationAlgorithm = ""
+				}
+			}
+			original := resource.DeepCopy() // the source shares targetAccess, so this also guards it
+			var result *descriptor.Resource
+			var source *descriptor.Source
+			switch tt.method {
+			case "source":
+				b, materializeErr := stream.Materialize(ctx)
+				r.NoError(materializeErr)
+				if source, err = repo.UploadSource(ctx, &descriptor.Source{Access: targetAccess}, b); err == nil {
+					result = &descriptor.Resource{Access: source.Access, Digest: wantDigest}
+				}
+			case "stream":
+				// Don't materialize the blob here that we don't read, otherwise the fd leaks
+				result, err = repo.UploadResourceStream(ctx, resource, stream)
+			case "resource":
+				b, materializeErr := stream.Materialize(ctx)
+				r.NoError(materializeErr)
+				result, err = repo.UploadResource(ctx, resource, b)
+			}
+			r.Equal(original, resource, "input must not be mutated")
+			if tt.err != "" {
+				r.ErrorContains(err, tt.err)
+				r.Nil(result)
+			} else {
+				r.NoError(err)
+				r.Equal(wantDigest, result.Digest)
+				r.Equal(ref, result.Access.(*v1.OCIImage).ImageReference, "the target reference, including a matching pin, must be preserved")
+			}
+			tagged, err := dst.Resolve(ctx, "stable")
+			r.NoError(err)
+			wantTag := oldRoot.Digest
+			if tt.err == "" && !tt.untagged {
+				wantTag = root.Digest
+			}
+			r.Equal(wantTag, tagged.Digest, "a rejected or untagged upload must not move the existing tag")
+			exists, err := dst.Exists(ctx, root)
+			r.NoError(err)
+			r.Equal(tt.err == "", exists, "a rejected upload must not write the root")
+		})
+	}
+}
+
+// pushDigestUploadRoot pushes a manifest hashed with algorithm; its unique SHA-256
+// config lets marker distinguish existing from replacement content.
+func pushDigestUploadRoot(t *testing.T, store content.Pusher, algorithm digest.Algorithm, marker string) ociImageSpecV1.Descriptor {
+	t.Helper()
+	r := require.New(t)
+	configData, err := json.Marshal(map[string]string{"marker": marker})
+	r.NoError(err)
+	config := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageConfig, configData)
+	manifest, err := json.Marshal(ociImageSpecV1.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ociImageSpecV1.MediaTypeImageManifest,
+		Config: config, Layers: []ociImageSpecV1.Descriptor{},
+	})
+	r.NoError(err)
+	root := ociImageSpecV1.Descriptor{MediaType: ociImageSpecV1.MediaTypeImageManifest, Digest: algorithm.FromBytes(manifest), Size: int64(len(manifest))}
+	r.NoError(store.Push(t.Context(), config, bytes.NewReader(configData)))
+	r.NoError(store.Push(t.Context(), root, bytes.NewReader(manifest)))
+	return root
+}
+
 func TestRepository_UploadResourceStream(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -2339,6 +3121,7 @@ func TestRepository_UploadResourceStream(t *testing.T) {
 			name:     "tag-only reference uploads and preserves tag",
 			imageRef: "test-repo:v1.0.0",
 			checkResult: func(t *testing.T, res *descriptor.Resource, manifestDesc ociImageSpecV1.Descriptor) {
+				t.Helper()
 				r := require.New(t)
 				access := res.Access.(*v1.OCIImage)
 				r.Equal("test-repo:v1.0.0", access.ImageReference, "tag preserved, no digest added for tag-only form")
@@ -2349,6 +3132,7 @@ func TestRepository_UploadResourceStream(t *testing.T) {
 		{
 			name: "digest-only reference uploads without tagging and preserves digest",
 			checkResult: func(t *testing.T, res *descriptor.Resource, manifestDesc ociImageSpecV1.Descriptor) {
+				t.Helper()
 				r := require.New(t)
 				access := res.Access.(*v1.OCIImage)
 				r.Contains(access.ImageReference, manifestDesc.Digest.String(), "digest preserved")
@@ -2361,6 +3145,7 @@ func TestRepository_UploadResourceStream(t *testing.T) {
 				return "test-repo:v1.0.0@" + manifestDesc.Digest.String()
 			},
 			checkResult: func(t *testing.T, res *descriptor.Resource, manifestDesc ociImageSpecV1.Descriptor) {
+				t.Helper()
 				r := require.New(t)
 				access := res.Access.(*v1.OCIImage)
 				r.Contains(access.ImageReference, "v1.0.0", "tag preserved")
@@ -2420,6 +3205,65 @@ func TestRepository_UploadResourceStream(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRepository_UploadResourceStream_MissingSubject verifies that a streamed
+// OCI artifact whose manifest references a subject that does not exist in the
+// source store is uploaded without the subject.
+func TestRepository_UploadResourceStream_MissingSubject(t *testing.T) {
+	newDanglingSubjectStream := func(t *testing.T) (*memory.Store, ociImageSpecV1.Descriptor) {
+		t.Helper()
+		ctx := t.Context()
+		r := require.New(t)
+
+		store := memory.New()
+		layerBytes := []byte("stream layer content")
+		layerDesc := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, layerBytes)
+		r.NoError(store.Push(ctx, layerDesc, bytes.NewReader(layerBytes)))
+		danglingSubject := &ociImageSpecV1.Descriptor{
+			MediaType: ociImageSpecV1.MediaTypeImageManifest,
+			Digest:    digest.FromString("subject that was never pushed"),
+			Size:      42,
+		}
+		manifestDesc, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1, "application/custom", oras.PackManifestOptions{
+			Layers:  []ociImageSpecV1.Descriptor{layerDesc},
+			Subject: danglingSubject,
+		})
+		r.NoError(err)
+		return store, manifestDesc
+	}
+
+	r := require.New(t)
+	ctx := t.Context()
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, ocictf.WithCTF(store), oci.WithScheme(testScheme))
+
+	src, manifestDesc := newDanglingSubjectStream(t)
+	resource := &descriptor.Resource{
+		ElementMeta: descriptor.ElementMeta{
+			ObjectMeta: descriptor.ObjectMeta{Name: "stream-res", Version: "1.0.0"},
+		},
+		Type:   "ociImage",
+		Access: &v1.OCIImage{ImageReference: "test-repo:v1.0.0"},
+	}
+
+	stream := &ocistream.OCIResourceStream{
+		ReadOnlyGraphStorage: src,
+		Descriptor:           manifestDesc,
+	}
+
+	res, err := repo.UploadResourceStream(ctx, resource, stream)
+	r.NoError(err)
+	r.NotNil(res)
+
+	targetStore, err := store.StoreForReference(ctx, "test-repo")
+	r.NoError(err)
+	exists, err := targetStore.Exists(ctx, manifestDesc)
+	r.NoError(err)
+	r.True(exists, "manifest must have been copied into the target store")
 }
 
 // ownershipArtifactAnnotation is a representative software.ocm.artifact value in
@@ -2528,7 +3372,219 @@ func TestRepository_AddLocalResource_CopiesOwnershipReferrer(t *testing.T) {
 	r.NoError(json.NewDecoder(rc).Decode(&copied))
 	r.Equal(component, copied.Annotations[annotations.OwnershipComponentName], "copied referrer must retain its component name")
 	r.Equal(version, copied.Annotations[annotations.OwnershipComponentVersion], "copied referrer must retain its component version")
-	r.Equal(ownershipArtifactAnnotation, copied.Annotations[annotations.ArtifactAnnotationKey], "copied referrer must retain its software.ocm.artifact annotation")
+	r.JSONEq(ownershipArtifactAnnotation, copied.Annotations[annotations.ArtifactAnnotationKey], "copied referrer must retain its software.ocm.artifact annotation")
+}
+
+// TestRepository_DownloadResourceStream_DigestPinnedWithReferrer covers a
+// digest-pinned OCI image that carries a referrer (e.g. an SBOM attestation).
+// ExtendedCopyGraph pulls the referrer along, so the materialized layout holds
+// more than one manifest and the index alone no longer says which one was
+// requested. The layout must therefore name the requested artifact, otherwise
+// packing it back in (--copy-resources) fails with "multiple manifests found in
+// oci store, but no manifest could be identified as the top level parent".
+func TestRepository_DownloadResourceStream_DigestPinnedWithReferrer(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, ocictf.WithCTF(store))
+
+	const imageRef = "ghcr.io/acme/backend:latest"
+	imgStore, err := store.StoreForReference(ctx, imageRef)
+	r.NoError(err)
+
+	layerData := []byte("layer")
+	layer := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, layerData)
+	r.NoError(imgStore.Push(ctx, layer, bytes.NewReader(layerData)))
+
+	main, err := oras.PackManifest(ctx, imgStore, oras.PackManifestVersion1_1, "application/vnd.test.artifact", oras.PackManifestOptions{
+		Layers: []ociImageSpecV1.Descriptor{layer},
+	})
+	r.NoError(err)
+	r.NoError(imgStore.Tag(ctx, main, "latest"))
+
+	// An SBOM-style referrer: a separate manifest whose subject is the image.
+	// It is not contained by the image, only weakly associated with it.
+	empty := ociImageSpecV1.DescriptorEmptyJSON
+	r.NoError(imgStore.Push(ctx, empty, bytes.NewReader(empty.Data)))
+	refBody, err := json.Marshal(ociImageSpecV1.Manifest{
+		Versioned:    specs.Versioned{SchemaVersion: 2},
+		MediaType:    ociImageSpecV1.MediaTypeImageManifest,
+		ArtifactType: "application/spdx+json",
+		Config:       empty,
+		Layers:       []ociImageSpecV1.Descriptor{empty},
+		Subject:      &main,
+	})
+	r.NoError(err)
+	referrer := ociImageSpecV1.Descriptor{
+		MediaType:    ociImageSpecV1.MediaTypeImageManifest,
+		ArtifactType: "application/spdx+json",
+		Digest:       digest.FromBytes(refBody),
+		Size:         int64(len(refBody)),
+	}
+	r.NoError(imgStore.Push(ctx, referrer, bytes.NewReader(refBody)))
+
+	// Digest-pinned access, no tag — this is what puts two unnamed manifests in
+	// the layout.
+	resource := &descriptor.Resource{
+		ElementMeta: descriptor.ElementMeta{ObjectMeta: descriptor.ObjectMeta{Name: "backend-sbom", Version: "1.0.0"}},
+		Type:        "ociArtifact",
+		Access: &v1.OCIImage{
+			Type:           runtime.NewVersionedType(v1.OCIImageType, v1.Version),
+			ImageReference: "ghcr.io/acme/backend@" + main.Digest.String(),
+		},
+	}
+
+	stream, err := repo.DownloadResourceStream(ctx, resource)
+	r.NoError(err)
+	layoutBlob, err := stream.Materialize(ctx)
+	r.NoError(err)
+
+	ociStore, err := tar.ReadOCILayout(ctx, layoutBlob)
+	r.NoError(err)
+	t.Cleanup(func() { r.NoError(ociStore.Close()) })
+	r.Greater(len(ociStore.Index.Manifests), 1, "referrer must travel with the subject, otherwise this test proves nothing")
+
+	top, err := tar.CopyOCILayoutWithIndex(ctx, memory.New(), layoutBlob, tar.CopyOCILayoutWithIndexOptions{})
+	r.NoError(err)
+	r.Equal(main.Digest, top.Digest, "the requested artifact must be the top level, not its referrer")
+}
+
+// TestRepository_DownloadResourceStream_MultiArchByDigest is the referrer-free
+// twin of the test above. A multi-arch index pinned by digest puts the index
+// and each of its children into the layout's index.json, so the ambiguity is
+// not specific to referrers.
+func TestRepository_DownloadResourceStream_MultiArchByDigest(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, ocictf.WithCTF(store))
+
+	imgStore, err := store.StoreForReference(ctx, "ghcr.io/acme/multi:latest")
+	r.NoError(err)
+
+	var children []ociImageSpecV1.Descriptor
+	for _, arch := range []string{"amd64", "arm64"} {
+		layerData := []byte("layer-" + arch)
+		layer := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, layerData)
+		r.NoError(imgStore.Push(ctx, layer, bytes.NewReader(layerData)))
+		m, err := oras.PackManifest(ctx, imgStore, oras.PackManifestVersion1_1, "application/vnd.test.artifact",
+			oras.PackManifestOptions{Layers: []ociImageSpecV1.Descriptor{layer}})
+		r.NoError(err)
+		m.Platform = &ociImageSpecV1.Platform{OS: "linux", Architecture: arch}
+		children = append(children, m)
+	}
+
+	idxBody, err := json.Marshal(ociImageSpecV1.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ociImageSpecV1.MediaTypeImageIndex,
+		Manifests: children,
+	})
+	r.NoError(err)
+	idx := ociImageSpecV1.Descriptor{
+		MediaType: ociImageSpecV1.MediaTypeImageIndex,
+		Digest:    digest.FromBytes(idxBody),
+		Size:      int64(len(idxBody)),
+	}
+	r.NoError(imgStore.Push(ctx, idx, bytes.NewReader(idxBody)))
+
+	resource := &descriptor.Resource{
+		ElementMeta: descriptor.ElementMeta{ObjectMeta: descriptor.ObjectMeta{Name: "multi", Version: "1.0.0"}},
+		Type:        "ociArtifact",
+		Access: &v1.OCIImage{
+			Type:           runtime.NewVersionedType(v1.OCIImageType, v1.Version),
+			ImageReference: "ghcr.io/acme/multi@" + idx.Digest.String(),
+		},
+	}
+
+	stream, err := repo.DownloadResourceStream(ctx, resource)
+	r.NoError(err)
+	layoutBlob, err := stream.Materialize(ctx)
+	r.NoError(err)
+
+	ociStore, err := tar.ReadOCILayout(ctx, layoutBlob)
+	r.NoError(err)
+	t.Cleanup(func() { r.NoError(ociStore.Close()) })
+	r.Greater(len(ociStore.Index.Manifests), 1, "index and children must all be listed, otherwise this test proves nothing")
+
+	top, err := tar.CopyOCILayoutWithIndex(ctx, memory.New(), layoutBlob, tar.CopyOCILayoutWithIndexOptions{})
+	r.NoError(err)
+	r.Equal(idx.Digest, top.Digest, "the index must be the top level, not one of its children")
+}
+
+// TestRepository_DownloadResourceStream_ReferrerIsTheRequestedArtifact pins the
+// access at the referrer rather than at its subject, which is what an SBOM
+// resource looks like. The layout holds both, and the subject-based heuristic
+// would answer with the subject here — so this is the case that separates a
+// recorded root from a guessed one.
+func TestRepository_DownloadResourceStream_ReferrerIsTheRequestedArtifact(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, ocictf.WithCTF(store))
+
+	imgStore, err := store.StoreForReference(ctx, "ghcr.io/acme/backend:latest")
+	r.NoError(err)
+
+	layerData := []byte("layer")
+	layer := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, layerData)
+	r.NoError(imgStore.Push(ctx, layer, bytes.NewReader(layerData)))
+	subject, err := oras.PackManifest(ctx, imgStore, oras.PackManifestVersion1_1, "application/vnd.test.artifact",
+		oras.PackManifestOptions{Layers: []ociImageSpecV1.Descriptor{layer}})
+	r.NoError(err)
+	r.NoError(imgStore.Tag(ctx, subject, "latest"))
+
+	empty := ociImageSpecV1.DescriptorEmptyJSON
+	r.NoError(imgStore.Push(ctx, empty, bytes.NewReader(empty.Data)))
+	refBody, err := json.Marshal(ociImageSpecV1.Manifest{
+		Versioned:    specs.Versioned{SchemaVersion: 2},
+		MediaType:    ociImageSpecV1.MediaTypeImageManifest,
+		ArtifactType: "application/spdx+json",
+		Config:       empty,
+		Layers:       []ociImageSpecV1.Descriptor{empty},
+		Subject:      &subject,
+	})
+	r.NoError(err)
+	referrer := ociImageSpecV1.Descriptor{
+		MediaType:    ociImageSpecV1.MediaTypeImageManifest,
+		ArtifactType: "application/spdx+json",
+		Digest:       digest.FromBytes(refBody),
+		Size:         int64(len(refBody)),
+	}
+	r.NoError(imgStore.Push(ctx, referrer, bytes.NewReader(refBody)))
+
+	resource := &descriptor.Resource{
+		ElementMeta: descriptor.ElementMeta{ObjectMeta: descriptor.ObjectMeta{Name: "backend-sbom", Version: "1.0.0"}},
+		Type:        "ociArtifact",
+		Access: &v1.OCIImage{
+			Type:           runtime.NewVersionedType(v1.OCIImageType, v1.Version),
+			ImageReference: "ghcr.io/acme/backend@" + referrer.Digest.String(),
+		},
+	}
+
+	stream, err := repo.DownloadResourceStream(ctx, resource)
+	r.NoError(err)
+	layoutBlob, err := stream.Materialize(ctx)
+	r.NoError(err)
+
+	ociStore, err := tar.ReadOCILayout(ctx, layoutBlob)
+	r.NoError(err)
+	t.Cleanup(func() { r.NoError(ociStore.Close()) })
+	r.Greater(len(ociStore.Index.Manifests), 1,
+		"the subject must travel with the referrer, otherwise this test proves nothing")
+
+	top, err := tar.CopyOCILayoutWithIndex(ctx, memory.New(), layoutBlob, tar.CopyOCILayoutWithIndexOptions{})
+	r.NoError(err)
+	r.Equal(referrer.Digest, top.Digest,
+		"the referrer was requested, so it is the top level — not the subject it describes")
 }
 
 // TestRepository_UploadResource_CopiesOwnershipReferrer is the by-reference twin
@@ -2586,7 +3642,7 @@ func TestRepository_UploadResource_CopiesOwnershipReferrer(t *testing.T) {
 	r.NoError(json.NewDecoder(rc).Decode(&copied))
 	r.Equal(component, copied.Annotations[annotations.OwnershipComponentName], "copied referrer must retain its component name")
 	r.Equal(version, copied.Annotations[annotations.OwnershipComponentVersion], "copied referrer must retain its component version")
-	r.Equal(ownershipArtifactAnnotation, copied.Annotations[annotations.ArtifactAnnotationKey], "copied referrer must retain its software.ocm.artifact annotation")
+	r.JSONEq(ownershipArtifactAnnotation, copied.Annotations[annotations.ArtifactAnnotationKey], "copied referrer must retain its software.ocm.artifact annotation")
 }
 
 // TestRepository_AddOwnershipByReference proves the by-reference attach path (ADR
@@ -2712,6 +3768,105 @@ func TestRepository_AddOwnership_ResolveErrors(t *testing.T) {
 	}
 }
 
+// redeployDisabledResolver hands out stores that emulate an immutable OCI
+// repo (e.g. Nexus with "redeploy" disabled): once a reference carries a tag,
+// re-pointing it is rejected, even to identical content.
+type redeployDisabledResolver struct{ oci.Resolver }
+
+func (r redeployDisabledResolver) StoreForReference(ctx context.Context, reference string) (spec.Store, error) {
+	s, err := r.Resolver.StoreForReference(ctx, reference)
+	if err != nil {
+		return nil, err
+	}
+	return &redeployDisabledStore{Store: s}, nil
+}
+
+// redeployDisabledStore rejects a Tag write when the reference already resolves,
+// mirroring a write-once policy. Reads and digest-addressed pushes pass through.
+type redeployDisabledStore struct{ spec.Store }
+
+func (s *redeployDisabledStore) Tag(ctx context.Context, desc ociImageSpecV1.Descriptor, reference string) error {
+	if _, err := s.Resolve(ctx, reference); err == nil {
+		return fmt.Errorf("redeploy disabled: %q cannot be updated as asset already exists", reference)
+	}
+	return s.Store.Tag(ctx, desc, reference)
+}
+
+func TestRepository_AddComponentVersion_ImmutableRegistry(t *testing.T) {
+	newRepo := func(t *testing.T) *oci.Repository {
+		t.Helper()
+		fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+		require.NoError(t, err)
+		store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+		return Repository(t, oci.WithResolver(redeployDisabledResolver{Resolver: store}))
+	}
+
+	desc := func(provider string) *descriptor.Descriptor {
+		return &descriptor.Descriptor{
+			Meta: descriptor.Meta{Version: "v2"},
+			Component: descriptor.Component{
+				Provider: descriptor.Provider{Name: provider},
+				ComponentMeta: descriptor.ComponentMeta{
+					ObjectMeta: descriptor.ObjectMeta{Name: "ocm.software/test-component", Version: "1.0.0"},
+				},
+			},
+		}
+	}
+
+	// Unchanged content yields the same manifest digest, so the tag already
+	// points where we would write it: the redeploy rejection is a no-op.
+	t.Run("identical content re-add is idempotent", func(t *testing.T) {
+		r := require.New(t)
+		ctx := t.Context()
+		repo := newRepo(t)
+
+		r.NoError(repo.AddComponentVersion(ctx, desc("test-provider")))
+		r.NoError(repo.AddComponentVersion(ctx, desc("test-provider")),
+			"re-adding identical content must succeed despite redeploy being disabled")
+	})
+
+	// Changed content yields a different digest, so the tag points elsewhere: a
+	// genuine conflict that must surface rather than be skipped.
+	t.Run("changed content surfaces the conflict", func(t *testing.T) {
+		r := require.New(t)
+		ctx := t.Context()
+		repo := newRepo(t)
+
+		r.NoError(repo.AddComponentVersion(ctx, desc("test-provider")))
+		err := repo.AddComponentVersion(ctx, desc("other-provider"))
+		r.Error(err, "re-tagging different content on an immutable registry must fail")
+		r.ErrorContains(err, "failed to tag manifest")
+	})
+}
+
+// UploadResourceStream (the by-reference ociArtifact transfer path) must also
+// tolerate re-tagging an identical artifact on a redeploy-disabled registry.
+func TestRepository_UploadResourceStream_ImmutableRegistry(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, oci.WithResolver(redeployDisabledResolver{Resolver: store}), oci.WithScheme(testScheme))
+
+	memStore, root := buildTestManifestStream(t)
+	newStream := func() *ocistream.OCIResourceStream {
+		return &ocistream.OCIResourceStream{
+			ReadOnlyGraphStorage: memStore,
+			Descriptor:           root,
+			TempDir:              t.TempDir(),
+			Tags:                 []string{"test-image:1.0.0"},
+		}
+	}
+	res := &descriptor.Resource{Access: &v1.OCIImage{ImageReference: "test-image:1.0.0"}}
+
+	_, err = repo.UploadResourceStream(ctx, res, newStream())
+	r.NoError(err, "first upload must succeed")
+	_, err = repo.UploadResourceStream(ctx, res, newStream())
+	r.NoError(err, "identical re-upload must be idempotent despite redeploy being disabled")
+}
+
 // blobValidatingResolver wraps a resolver so the stores it hands out reject a
 // manifest whose referenced config/layer blobs are not yet present — the
 // MANIFEST_BLOB_UNKNOWN behaviour of a conformant OCI registry, which the CTF
@@ -2742,7 +3897,7 @@ func (s *blobValidatingStore) Push(ctx context.Context, expected ociImageSpecV1.
 		return err
 	}
 	for _, ref := range append([]ociImageSpecV1.Descriptor{m.Config}, m.Layers...) {
-		exists, err := s.Store.Exists(ctx, ref)
+		exists, err := s.Exists(ctx, ref)
 		if err != nil {
 			return err
 		}
@@ -2912,4 +4067,154 @@ func TestRepository_AddOwnership_RawBlobSubjectSkipped(t *testing.T) {
 	_, body, err := pack.OwnershipReferrer(ctx, rawDesc, resource, component, version)
 	r.NoError(err)
 	r.Nil(body, "a raw-blob subject must yield no ownership referrer")
+}
+
+// TestRepository_UploadResource_DigestOnlyAccess verifies that the
+// materialized upload path accepts digest-only and bare image references
+// (mirroring UploadResourceStream): no tag is applied, a warning is logged,
+// and the resulting access is pinned to the pushed digest when the reference
+// did not already carry one.
+func TestRepository_UploadResource_DigestOnlyAccess(t *testing.T) {
+	r := require.New(t)
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, oci.WithResolver(store))
+
+	newLayoutBlob := func(t *testing.T) (blob.ReadOnlyBlob, ociImageSpecV1.Descriptor) {
+		t.Helper()
+		var buf bytes.Buffer
+		w, err := tar.NewOCILayoutWriterWithTempFile(&buf, t.TempDir())
+		require.NoError(t, err)
+		layer := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, []byte("layer"))
+		require.NoError(t, w.Push(t.Context(), layer, bytes.NewReader([]byte("layer"))))
+		manifest, err := oras.PackManifest(t.Context(), w, oras.PackManifestVersion1_1, "application/artifact", oras.PackManifestOptions{
+			Layers: []ociImageSpecV1.Descriptor{layer},
+		})
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+		return inmemory.New(bytes.NewReader(buf.Bytes())), manifest
+	}
+
+	newResource := func(ref string) *descriptor.Resource {
+		return &descriptor.Resource{
+			Relation:    descriptor.LocalRelation,
+			ElementMeta: descriptor.ElementMeta{ObjectMeta: descriptor.ObjectMeta{Name: "img", Version: "1.0.0"}},
+			Type:        "ociImage",
+			Access: &v1.OCIImage{
+				Type:           runtime.NewVersionedType(v1.OCIImageType, v1.Version),
+				ImageReference: ref,
+			},
+		}
+	}
+
+	t.Run("bare reference uploads untagged and pins the pushed digest", func(t *testing.T) {
+		r := require.New(t)
+		b, manifest := newLayoutBlob(t)
+
+		updated, err := repo.UploadResource(t.Context(), newResource("ghcr.io/acme/dst"), b)
+		r.NoError(err)
+
+		access, ok := updated.Access.(*v1.OCIImage)
+		r.True(ok, "expected an OCIImage access, got %T", updated.Access)
+		r.Equal("ghcr.io/acme/dst@"+manifest.Digest.String(), access.ImageReference,
+			"the access must be pinned to the pushed digest")
+
+		dstStore, err := store.StoreForReference(t.Context(), "ghcr.io/acme/dst")
+		r.NoError(err)
+		exists, err := dstStore.Exists(t.Context(), manifest)
+		r.NoError(err)
+		r.True(exists, "the pushed root must be content-addressable")
+		_, err = dstStore.Resolve(t.Context(), "latest")
+		r.ErrorIs(err, errdef.ErrNotFound, "no tag must be present for a digest-only upload")
+	})
+
+	t.Run("digest-only reference is preserved as-is and not tagged", func(t *testing.T) {
+		r := require.New(t)
+		b, manifest := newLayoutBlob(t)
+
+		ref := "ghcr.io/acme/dst-digest@" + manifest.Digest.String()
+		updated, err := repo.UploadResource(t.Context(), newResource(ref), b)
+		r.NoError(err)
+		r.Equal(ref, updated.Access.(*v1.OCIImage).ImageReference,
+			"a digest-only reference must be preserved, not re-pinned")
+
+		dstStore, err := store.StoreForReference(t.Context(), ref)
+		r.NoError(err)
+		resolved, err := dstStore.Resolve(t.Context(), manifest.Digest.String())
+		r.NoError(err)
+		r.Equal(manifest.Digest, resolved.Digest)
+		_, err = dstStore.Resolve(t.Context(), "latest")
+		r.ErrorIs(err, errdef.ErrNotFound, "no tag must be created for a digest-only upload")
+	})
+
+	t.Run("tagged access is applied as a tag and not re-pinned", func(t *testing.T) {
+		r := require.New(t)
+		b, manifest := newLayoutBlob(t)
+
+		updated, err := repo.UploadResource(t.Context(), newResource("ghcr.io/acme/dst-tagged:v1"), b)
+		r.NoError(err)
+		r.Equal("ghcr.io/acme/dst-tagged:v1", updated.Access.(*v1.OCIImage).ImageReference)
+
+		dstStore, err := store.StoreForReference(t.Context(), "ghcr.io/acme/dst-tagged")
+		r.NoError(err)
+		resolved, err := dstStore.Resolve(t.Context(), "v1")
+		r.NoError(err)
+		r.Equal(manifest.Digest, resolved.Digest, "the tag must point at the pushed root")
+	})
+}
+
+// TestRepository_AddOwnership_OCIImageLayerSubjectRejected asserts that ownership cannot
+// be attached to a layer access: a referrer needs a manifest as subject, and a layer is a
+// blob. The constructor only calls AddOwnership for ownershipPolicy Always, which must fail
+// when the ownership cannot be recorded instead of silently recording nothing.
+func TestRepository_AddOwnership_OCIImageLayerSubjectRejected(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+	const (
+		component = "ocm.software/test-component"
+		version   = "1.0.0"
+	)
+
+	fs, err := filesystem.NewFS(t.TempDir(), os.O_RDWR)
+	r.NoError(err)
+	store := ocictf.NewFromCTF(ctf.NewFileSystemCTF(fs))
+	repo := Repository(t, ocictf.WithCTF(store))
+
+	testdata := []byte("test layer content")
+	dig := digest.FromBytes(testdata)
+	layerStore, err := store.StoreForReference(ctx, "test-registry/test-layer")
+	r.NoError(err)
+	desc := content.NewDescriptorFromBytes(ociImageSpecV1.MediaTypeImageLayer, testdata)
+	r.NoError(layerStore.Push(ctx, desc, bytes.NewReader(testdata)))
+
+	resource := &descriptor.Resource{
+		Relation:    descriptor.ExternalRelation,
+		ElementMeta: descriptor.ElementMeta{ObjectMeta: descriptor.ObjectMeta{Name: "chart", Version: version}},
+		Type:        "helmChart",
+		Access: &v1.OCIImageLayer{
+			Type:      runtime.NewVersionedType(v1.OCIImageLayerType, v1.Version),
+			Reference: "test-registry/test-layer@" + dig.String(),
+			MediaType: ociImageSpecV1.MediaTypeImageLayer,
+			Digest:    dig,
+			Size:      int64(len(testdata)),
+		},
+	}
+
+	err = repo.AddOwnership(ctx, component, version, resource, nil)
+	r.ErrorContains(err, "cannot be the subject of an ownership referrer")
+
+	// The media type on a layer access is not trusted to decide this: a layer is a
+	// blob whatever it claims to be, so it is rejected without consulting the store.
+	manifestTyped := resource.DeepCopy()
+	manifestTyped.Access.(*v1.OCIImageLayer).MediaType = ociImageSpecV1.MediaTypeImageManifest
+	err = repo.AddOwnership(ctx, component, version, manifestTyped, nil)
+	r.ErrorContains(err, "cannot be the subject of an ownership referrer")
+
+	// Pushing a referrer always writes the empty config/layer blob first, so its
+	// absence proves nothing was pushed against the layer.
+	pushed, err := layerStore.Exists(ctx, ociImageSpecV1.DescriptorEmptyJSON)
+	r.NoError(err)
+	r.False(pushed, "no ownership referrer may be pushed against a layer")
 }

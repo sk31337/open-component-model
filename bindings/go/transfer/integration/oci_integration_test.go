@@ -16,6 +16,9 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
 
+	"ocm.software/open-component-model/bindings/go/blob/inmemory"
+	"ocm.software/open-component-model/bindings/go/descriptor/normalisation"
+	"ocm.software/open-component-model/bindings/go/descriptor/normalisation/json/v4alpha1"
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
 	descriptorv2 "ocm.software/open-component-model/bindings/go/descriptor/v2"
 	"ocm.software/open-component-model/bindings/go/oci"
@@ -23,8 +26,10 @@ import (
 	ociresource "ocm.software/open-component-model/bindings/go/oci/repository/resource"
 	urlresolver "ocm.software/open-component-model/bindings/go/oci/resolver/url"
 	ociaccessv1 "ocm.software/open-component-model/bindings/go/oci/spec/access/v1"
+	"ocm.software/open-component-model/bindings/go/oci/spec/layout"
 	ctfrepospec "ocm.software/open-component-model/bindings/go/oci/spec/repository/v1/ctf"
 	ocirepospec "ocm.software/open-component-model/bindings/go/oci/spec/repository/v1/oci"
+	ocitar "ocm.software/open-component-model/bindings/go/oci/tar"
 	"ocm.software/open-component-model/bindings/go/runtime"
 	"ocm.software/open-component-model/bindings/go/transfer"
 	transferv1alpha1 "ocm.software/open-component-model/bindings/go/transfer/v1alpha1/spec"
@@ -92,7 +97,7 @@ func pushTestOCIImage(t *testing.T, registryAddr, user, password, repoPath, tag 
 	return httpRef
 }
 
-func Test_Integration_TransferOCIImageResource_CopyModeAllResources(t *testing.T) {
+func Test_Integration_TransferOCIImageResource_LocalBlobUploader(t *testing.T) {
 	t.Parallel()
 	r := require.New(t)
 
@@ -137,7 +142,7 @@ func Test_Integration_TransferOCIImageResource_CopyModeAllResources(t *testing.T
 	}
 	r.NoError(ctfRepo.AddComponentVersion(t.Context(), desc))
 
-	// 4. Build the transfer graph with CopyModeAllResources.
+	// 4. Build the transfer graph with a local blob uploader.
 	sourceSpec := &ctfrepospec.Repository{
 		Type:     runtime.Type{Name: ctfrepospec.Type, Version: ctfrepospec.Version},
 		FilePath: sourceCTFPath,
@@ -154,7 +159,8 @@ func Test_Integration_TransferOCIImageResource_CopyModeAllResources(t *testing.T
 	)
 
 	tgd, err := transfer.BuildGraphDefinition(t.Context(),
-		&transferv1alpha1.Config{CopyMode: transferv1alpha1.CopyModeAllResources},
+		&transferv1alpha1.Config{},
+		[]transferv1alpha1.UploaderConfig{&transferv1alpha1.LocalBlobUploaderConfig{}},
 		transfer.Mapping{
 			Components: []transfer.ComponentID{{Component: componentName, Version: componentVersion}},
 			Target:     targetSpec,
@@ -164,8 +170,8 @@ func Test_Integration_TransferOCIImageResource_CopyModeAllResources(t *testing.T
 	r.NoError(err)
 	r.NotNil(tgd)
 
-	// Verify that CopyModeAllResources generated OCI artifact transformations.
-	// With CopyModeLocalBlobResources, an OCIImage resource would be skipped entirely.
+	// Verify that the local blob uploader generated OCI artifact transformations.
+	// Without the local blob uploader, an OCIImage resource would be kept by reference.
 	hasGetOCIArtifact := false
 	for _, tr := range tgd.Transformations {
 		if tr.Type.Name == "GetOCIArtifact" {
@@ -173,7 +179,7 @@ func Test_Integration_TransferOCIImageResource_CopyModeAllResources(t *testing.T
 			break
 		}
 	}
-	r.True(hasGetOCIArtifact, "CopyModeAllResources should generate GetOCIArtifact transformation for OCIImage resource")
+	r.True(hasGetOCIArtifact, "local blob uploader should generate GetOCIArtifact transformation for OCIImage resource")
 
 	// 5. Build and execute the graph.
 	ctx := t.Context()
@@ -205,7 +211,7 @@ func Test_Integration_TransferOCIImageResource_CopyModeAllResources(t *testing.T
 	gotAccess := gotDesc.Component.Resources[0].Access
 	r.NotNil(gotAccess, "resource access should not be nil")
 	r.Equal(descriptorv2.LocalBlobAccessType, gotAccess.GetType().Name,
-		"OCI image resource should be stored as localBlob in target after CopyModeAllResources transfer")
+		"OCI image resource should be stored as localBlob in target after local blob uploader transfer")
 
 	// Verify GlobalAccess is not set — transfer should produce a pure local blob without global access.
 	accessScheme := runtime.NewScheme(runtime.WithAllowUnknown())
@@ -295,7 +301,7 @@ func Test_Integration_TransferOCIArtifact_OCIToOCI(t *testing.T) {
 	r.NoError(ctfRepo.AddComponentVersion(t.Context(), desc))
 
 	// CTF → source OCI (seed).
-	seedTGD, err := transfer.BuildGraphDefinition(t.Context(), nil,
+	seedTGD, err := transfer.BuildGraphDefinition(t.Context(), nil, nil,
 		transfer.Mapping{
 			Components: []transfer.ComponentID{{Component: componentName, Version: componentVersion}},
 			Target:     sourceSpec,
@@ -307,7 +313,7 @@ func Test_Integration_TransferOCIArtifact_OCIToOCI(t *testing.T) {
 	r.NoError(err)
 	r.NoError(seedGraph.Process(t.Context()))
 
-	// 4. Transfer OCI → OCI with UploadAsOciArtifact (streaming path).
+	// 4. Transfer OCI → OCI with an OCI uploader (streaming path).
 	targetSpec := &ocirepospec.Repository{
 		Type:    runtime.Type{Name: ocirepospec.Type, Version: "v1"},
 		BaseUrl: fmt.Sprintf("http://%s", targetAddr),
@@ -325,10 +331,8 @@ func Test_Integration_TransferOCIArtifact_OCIToOCI(t *testing.T) {
 	r.NoError(err)
 
 	tgd, err := transfer.BuildGraphDefinition(t.Context(),
-		&transferv1alpha1.Config{
-			CopyMode:   transferv1alpha1.CopyModeAllResources,
-			UploadType: transferv1alpha1.UploadAsOciArtifact,
-		},
+		&transferv1alpha1.Config{},
+		[]transferv1alpha1.UploaderConfig{&transferv1alpha1.OCIUploaderConfig{}, &transferv1alpha1.LocalBlobUploaderConfig{}},
 		transfer.Mapping{
 			Components: []transfer.ComponentID{{Component: componentName, Version: componentVersion}},
 			Target:     targetSpec,
@@ -346,7 +350,7 @@ func Test_Integration_TransferOCIArtifact_OCIToOCI(t *testing.T) {
 		r.NotEqual("GetOCIArtifact", tr.Type.Name,
 			"streaming path must not emit GetOCIArtifact")
 	}
-	r.True(hasTransfer, "UploadAsOciArtifact OCI→OCI must emit TransferOCIArtifact")
+	r.True(hasTransfer, "OCI uploader OCI→OCI must emit TransferOCIArtifact")
 
 	// Execute the graph.
 	streamGraph, err := b.BuildAndCheck(tgd)
@@ -455,15 +459,13 @@ func pushTestDockerManifest(t *testing.T, registryAddr, user, password, repoPath
 	return fmt.Sprintf("http://%s", ref), manifestContent
 }
 
-// Test_Integration_TransferDockerManifestLocalBlob_CTFToOCI tests that a LocalBlob resource
-// with a Docker manifest media type is correctly transferred as an OCI artifact when using
-// UploadAsOciArtifact mode. This is a regression test for the bug where Docker manifests
-// were excluded from isOCICompliantManifest, causing them to be silently stored as local blobs.
+// Test_Integration_TransferDockerManifestLocalBlob_CTFToOCI tests that an OCIImage resource
+// pointing at a Docker manifest is correctly transferred as an OCI artifact by an OCI
+// uploader. This is a regression test for the bug where Docker manifests were excluded
+// from isOCICompliantManifest, causing them to be silently stored as local blobs.
 func Test_Integration_TransferDockerManifestLocalBlob_CTFToOCI(t *testing.T) {
 	t.Parallel()
 	r := require.New(t)
-
-	const dockerManifestMediaType = "application/vnd.docker.distribution.manifest.v2+json"
 
 	// 1. Start source and target registries.
 	sourceAddr, sourceUser, sourcePwd := startRegistry(t)
@@ -502,7 +504,7 @@ func Test_Integration_TransferDockerManifestLocalBlob_CTFToOCI(t *testing.T) {
 	}
 	r.NoError(ctfRepo.AddComponentVersion(t.Context(), desc))
 
-	// 4. Transfer with CopyModeAllResources + UploadAsOciArtifact.
+	// 4. Transfer with a local blob uploader and an OCI uploader.
 	//    The Docker manifest OCIImage resource must be correctly transferred end-to-end.
 	sourceSpec := &ctfrepospec.Repository{
 		Type:     runtime.Type{Name: ctfrepospec.Type, Version: ctfrepospec.Version},
@@ -519,10 +521,8 @@ func Test_Integration_TransferDockerManifestLocalBlob_CTFToOCI(t *testing.T) {
 	)
 
 	tgd, err := transfer.BuildGraphDefinition(t.Context(),
-		&transferv1alpha1.Config{
-			CopyMode:   transferv1alpha1.CopyModeAllResources,
-			UploadType: transferv1alpha1.UploadAsOciArtifact,
-		},
+		&transferv1alpha1.Config{},
+		[]transferv1alpha1.UploaderConfig{&transferv1alpha1.OCIUploaderConfig{}, &transferv1alpha1.LocalBlobUploaderConfig{}},
 		transfer.Mapping{
 			Components: []transfer.ComponentID{{Component: componentName, Version: componentVersion}},
 			Target:     targetSpec,
@@ -532,8 +532,8 @@ func Test_Integration_TransferDockerManifestLocalBlob_CTFToOCI(t *testing.T) {
 	r.NoError(err)
 	r.NotNil(tgd)
 
-	// With CopyModeAllResources + UploadAsOciArtifact targeting an OCI registry, the graph
-	// takes the streaming path and emits TransferOCIArtifact (not GetOCIArtifact).
+	// With an OCI uploader targeting an OCI registry, the graph takes the streaming path
+	// and emits TransferOCIArtifact (not GetOCIArtifact).
 	hasTransferOCIArtifact := false
 	for _, tr := range tgd.Transformations {
 		if tr.Type.Name == "TransferOCIArtifact" {
@@ -541,7 +541,7 @@ func Test_Integration_TransferDockerManifestLocalBlob_CTFToOCI(t *testing.T) {
 			break
 		}
 	}
-	r.True(hasTransferOCIArtifact, "Docker manifest OCIImage resource with CopyModeAllResources+UploadAsOciArtifact to OCI target should generate TransferOCIArtifact transformation")
+	r.True(hasTransferOCIArtifact, "Docker manifest OCIImage resource with an OCI uploader to an OCI target should generate TransferOCIArtifact transformation")
 
 	// 5. Execute the transfer.
 	ctx := t.Context()
@@ -568,12 +568,12 @@ func Test_Integration_TransferDockerManifestLocalBlob_CTFToOCI(t *testing.T) {
 	r.Equal(componentName, gotDesc.Component.Name)
 	r.Len(gotDesc.Component.Resources, 1)
 
-	// With UploadAsOciArtifact the Docker manifest image should be stored as an OCI artifact
+	// With an OCI uploader the Docker manifest image should be stored as an OCI artifact
 	// (OCIImage access) in the target, not as a local blob.
 	gotAccess := gotDesc.Component.Resources[0].Access
 	r.NotNil(gotAccess)
 	r.Equal(ociaccessv1.LegacyType, gotAccess.GetType().Name,
-		"Docker manifest resource should be stored as OCIImage access after CopyModeAllResources+UploadAsOciArtifact transfer")
+		"Docker manifest resource should be stored as OCIImage access after a transfer with an OCI uploader")
 
 	var typedOCIAccess ociaccessv1.OCIImage
 	rawAccess, err := json.Marshal(gotAccess)
@@ -581,4 +581,114 @@ func Test_Integration_TransferDockerManifestLocalBlob_CTFToOCI(t *testing.T) {
 	r.NoError(json.Unmarshal(rawAccess, &typedOCIAccess))
 	r.Contains(typedOCIAccess.ImageReference, targetAddr,
 		"OCIImage access should reference the target registry after transfer")
+}
+
+func Test_Integration_Transfer_PreservesNormalizedDigest(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+
+	// A real OCI layout exercises unpacking/repacking rather than copying an opaque blob.
+	var archive bytes.Buffer
+	writer, err := ocitar.NewOCILayoutWriterWithTempFile(&archive, t.TempDir())
+	r.NoError(err)
+	root, err := oras.PackManifest(ctx, writer, oras.PackManifestVersion1_1, "application/vnd.ocm.test", oras.PackManifestOptions{
+		ManifestAnnotations: map[string]string{"org.opencontainers.image.created": "2025-07-28T11:40:51Z"},
+	})
+	r.NoError(err)
+	r.NoError(writer.Close())
+
+	resourceDigest := descriptor.Digest{
+		HashAlgorithm:          "SHA-256",
+		NormalisationAlgorithm: "ociArtifactDigest/v1",
+		Value:                  root.Digest.Encoded(),
+	}
+	desc := &descriptor.Descriptor{
+		Meta: descriptor.Meta{Version: "v2"},
+		Component: descriptor.Component{
+			ComponentMeta: descriptor.ComponentMeta{
+				ObjectMeta:   descriptor.ObjectMeta{Name: "ocm.software/issue3674", Version: "1.0.0"},
+				CreationTime: "2025-07-28T11:40:51Z",
+			},
+			Provider: descriptor.Provider{Name: "test-provider"},
+			Resources: []descriptor.Resource{{
+				ElementMeta: descriptor.ElementMeta{
+					ObjectMeta: descriptor.ObjectMeta{Name: "artifact", Version: "1.0.0"},
+				},
+				Type:     "ociImage",
+				Relation: descriptor.LocalRelation,
+				Digest:   resourceDigest.DeepCopy(),
+				Access: &descriptorv2.LocalBlob{
+					Type:      runtime.NewVersionedType(descriptorv2.LocalBlobAccessType, descriptorv2.LocalBlobAccessTypeVersion),
+					MediaType: layout.MediaTypeOCIImageLayoutTarV1,
+				},
+			}},
+		},
+	}
+	before, err := normalisation.Normalise(desc, v4alpha1.Algorithm)
+	r.NoError(err)
+	wantDigest := digestOf(before)
+	creationTime := desc.Component.CreationTime
+
+	sourcePath, targetPath := t.TempDir(), t.TempDir()
+	sourceRepo := createCTFRepository(t, sourcePath)
+	artifact := inmemory.New(bytes.NewReader(archive.Bytes()),
+		inmemory.WithMediaType(layout.MediaTypeOCIImageLayoutTarV1))
+	seed := desc.Component.Resources[0].DeepCopy()
+	seed.Digest = nil
+	resource, err := sourceRepo.AddLocalResource(ctx, desc.Component.Name, desc.Component.Version, seed, artifact)
+	r.NoError(err)
+	// Seed v1 metadata independently of digest defaults used when packing a new resource.
+	resource.Digest = resourceDigest.DeepCopy()
+	desc.Component.Resources[0] = *resource
+	r.NoError(sourceRepo.AddComponentVersion(ctx, desc))
+
+	source, err := sourceRepo.GetComponentVersion(ctx, desc.Component.Name, desc.Component.Version)
+	r.NoError(err)
+	sourceNormalized, err := normalisation.Normalise(source, v4alpha1.Algorithm)
+	r.NoError(err)
+	r.Equal(wantDigest, digestOf(sourceNormalized))
+
+	sourceSpec := &ctfrepospec.Repository{
+		Type:     runtime.NewVersionedType(ctfrepospec.Type, ctfrepospec.Version),
+		FilePath: sourcePath,
+	}
+	targetSpec := &ctfrepospec.Repository{
+		Type:       runtime.NewVersionedType(ctfrepospec.Type, ctfrepospec.Version),
+		FilePath:   targetPath,
+		AccessMode: "readwrite|create",
+	}
+	definition, err := transfer.BuildGraphDefinition(ctx, nil, nil, transfer.Mapping{
+		Components: []transfer.ComponentID{{Component: desc.Component.Name, Version: desc.Component.Version}},
+		Target:     targetSpec,
+		Resolver:   transfer.NewRepositoryResolver(sourceRepo, sourceSpec),
+	})
+	r.NoError(err)
+	builder := transfer.NewDefaultBuilder(
+		provider.NewComponentVersionRepositoryProvider(provider.WithTempDir(t.TempDir())),
+		ociresource.NewResourceRepository(nil), newCredResolver(t),
+	)
+	graph, err := builder.BuildAndCheck(definition)
+	r.NoError(err)
+	r.NoError(graph.Process(ctx))
+
+	targetRepo := createCTFRepository(t, targetPath)
+	got, err := targetRepo.GetComponentVersion(ctx, desc.Component.Name, desc.Component.Version)
+	r.NoError(err)
+	after, err := normalisation.Normalise(got, v4alpha1.Algorithm)
+	r.NoError(err)
+	r.Equal(wantDigest, digestOf(after), "issue3674: transfer must not change the normalized component digest")
+	r.Equal(creationTime, got.Component.CreationTime)
+	r.Len(got.Component.Resources, 1)
+	r.Equal(&resourceDigest, got.Component.Resources[0].Digest)
+
+	// Ensure the graph copied the artifact, not just its descriptor and digest metadata.
+	blob, _, err := targetRepo.GetLocalResource(ctx, got.Component.Name, got.Component.Version, got.Component.Resources[0].ToIdentity())
+	r.NoError(err)
+	store := memory.New()
+	copied, err := ocitar.CopyOCILayoutWithIndex(ctx, store, blob, ocitar.CopyOCILayoutWithIndexOptions{})
+	r.NoError(err)
+	r.Equal(root.Digest, copied.Digest)
+	exists, err := store.Exists(ctx, root)
+	r.NoError(err)
+	r.True(exists)
 }

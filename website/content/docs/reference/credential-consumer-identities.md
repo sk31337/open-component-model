@@ -41,10 +41,34 @@ The following types are defined by the core OCM modules:
 |-----------------------------------------------|-----------------------------------------------------|
 | [`OCIRegistry`](#ociregistry)                 | Authenticating against OCI registries               |
 | [`HelmChartRepository`](#helmchartrepository) | Authenticating against Helm chart repositories      |
-| [`Wget`](#wget)                               | Authenticating against plain HTTP/HTTPS servers     |
+| [`Wget / HTTP`](#wget--http)                  | Authenticating against plain HTTP/HTTPS servers     |
 | [`S3`](#s3)                                   | Authenticating against S3 and S3-compatible buckets |
 | [`GitHubRepository`](#githubrepository)       | Authenticating against the GitHub REST API          |
+| [`Git`](#git)                                 | Authenticating against Git servers (HTTPS and SSH)  |
 | [`RSA/v1alpha1`](#rsav1alpha1)                | Providing signing and verification keys             |
+| [`TSA/v1alpha1`](#tsav1alpha1)                | Providing RFC 3161 timestamp verification roots     |
+
+### Path Patterns {#path-patterns}
+
+For every identity type, the `path` attribute of a consumer entry is a glob pattern matched against the whole path of
+the lookup identity, with `/` as separator. An entry without `path` matches every path.
+
+| Pattern  | Matches                                                          | Example                                                       |
+|----------|------------------------------------------------------------------|---------------------------------------------------------------|
+| `*`      | Any characters within one path segment (does not cross `/`)      | `my-org/*` matches `my-org/repo`, not `my-org/team/repo`      |
+| `**`     | Any characters across segments (crosses `/`)                     | `my-org/**` matches `my-org/repo` and `my-org/team/repo`      |
+| `?`      | Exactly one character other than `/`                             | `repo-?` matches `repo-a`                                     |
+| `[abc]`  | One character of the set; `[a-z]` for a range                    | `v[12]` matches `v1` and `v2`                                 |
+| `[!abc]` | One character not in the set; `[^abc]` works as well             | `v[!1]` matches `v2`, not `v1`                                |
+| `{a,b}`  | Any of the comma-separated alternatives, which may contain globs | `{my-org,my-org/**}` matches `my-org` and everything below it |
+| `\`      | Escapes the next character, so it matches literally              | `my-org/\*` matches only `my-org/*`                           |
+
+Quote patterns that start with `*`, `[`, or `{` in YAML, for example `path: "{my-org,my-org/**}"`. Unquoted, YAML reads
+them as an alias, a sequence, or a mapping.
+
+OCM v1 scoped entries with a `pathprefix` attribute instead. OCM still accepts `pathprefix: <prefix>`, converts it into
+`path: "{<prefix>,<prefix>/**}"`, and logs a warning. If an entry sets both, `path` wins. See
+[Migrate Legacy Credentials]({{< relref "docs/how-to/migration-guides/legacy-credential-compatibility.md" >}}).
 
 ---
 
@@ -77,8 +101,8 @@ Token fields take precedence over `username`/`password` when both are present. U
 
 Matching runs three chained checks — all must pass:
 
-1. **Path matcher** — compares `path` using `path.Match` (glob). `*` matches one segment, not across `/`. If the
-   configured entry has no `path`, any request path is accepted.
+1. **Path matcher** — compares `path` as a glob ([Path Patterns](#path-patterns)). `*` matches within one segment,
+   `**` matches across `/`. If the configured entry has no `path`, any request path is accepted.
 2. **URL matcher** — compares `scheme`, `hostname`, and `port`. Applies default ports when a scheme is present (
    `https` → `443`, `http` → `80`).
 3. **Equality matcher** — all remaining attributes (like `type`) must be exactly equal.
@@ -180,18 +204,19 @@ identity is derived from the Helm repository URL using the same URL-based attrib
 
 ---
 
-## Wget
+## Wget / HTTP
 
 Used when OCM fetches a resource over plain HTTP or HTTPS through the
 [`Wget/v1` access type]({{< relref "input-and-access-types.md#wgetv1-access" >}}) and the
 [`Wget/v1` input type]({{< relref "input-and-access-types.md#wgetv1-input" >}}). The identity is derived from the resource
 `url`; the access type and the input type derive it identically, so a single consumer entry covers both.
+Both identity type and access type names allow using the `HTTP` alias.
 
 ### Identity Attributes
 
 | Attribute  | Required | Description                                                                                                                            |
 |------------|----------|----------------------------------------------------------------------------------------------------------------------------------------|
-| `type`     | Yes      | Must be `Wget`                                                                                                                         |
+| `type`     | Yes      | `Wget` (recommended); also accepts `Wget/v1`, `HTTP`, `HTTP/v1`, `http`, and `http/v1`                                                 |
 | `hostname` | Yes      | Server hostname (e.g. `downloads.example.com`)                                                                                         |
 | `path`     | No       | URL path without the leading `/`. Supports glob patterns (`*` matches one path segment). If omitted, matches any path on the hostname. |
 | `scheme`   | No       | URL scheme (`https`, `http`). If omitted, matches any scheme. If set, must match exactly.                                              |
@@ -235,11 +260,11 @@ The same three chained checks as [`OCIRegistry`](#ociregistry) apply: path glob,
 default-port handling), then exact equality on the remaining attributes.
 
 {{< callout context="caution" >}}
-The identity type is matched by exact string and is **unversioned**, so it must be written as `type: Wget`. Neither
-`Wget/v1` (the name of the
-[access and input type]({{< relref "input-and-access-types.md#wgetv1-access" >}})) nor the lowercase `wget` used by OCM v1
-will match. A non-matching entry fails silently: no credentials are resolved and the request goes out unauthenticated,
-so the symptom is a `401` from the server rather than a configuration error.
+Consumer entries are canonicalized to the unversioned spelling before matching. Prefer `type: Wget`; the aliases
+`Wget/v1`, `HTTP`, `HTTP/v1`, `http`, and `http/v1` (the aliases of the
+[access type]({{< relref "input-and-access-types.md#wgetv1-access" >}})) are also accepted. The lowercase `wget`
+spelling used by OCM v1 never matches. A non-matching entry fails silently: no credentials are resolved and the
+request goes out unauthenticated, so the symptom is a `401` from the server rather than a configuration error.
 {{< /callout >}}
 
 ### Examples
@@ -302,10 +327,10 @@ conversion, and the inverted authentication precedence, see
 ## S3
 
 Used when OCM reads an object from an S3 or S3-compatible bucket. This applies to the
-[`S3/v2` access type]({{< relref "input-and-access-types.md#s3v2-access" >}}) and to the
+[S3 access types (v1, v2 and unversioned)]({{< relref "input-and-access-types.md#s3v2-access" >}}) and to the
 [`S3/v2` input type]({{< relref "input-and-access-types.md#s3v2-input" >}}). OCM derives the identity from
-`bucketName`, `objectKey` and the optional `endpoint`. The access type and the input type derive it the same way, so
-one consumer entry covers both.
+the bucket, object key and optional `endpoint`, normalizing v1 `bucket`/`key` to v2 `bucketName`/`objectKey`.
+All access variants and the input type derive the same identity, so one consumer entry covers them all.
 
 Credentials are optional. If no consumer entry matches, OCM gives no credentials to the AWS SDK. The SDK then uses its
 default credential chain:
@@ -315,6 +340,11 @@ default credential chain:
 - IAM instance roles and task roles
 
 Use this path for in-cluster and CI setups. Short-lived role credentials are safer than static keys in `.ocmconfig`.
+
+Public objects require explicit `anonymous: true` in an `S3Credentials/v1` entry to disable signing, even when AWS
+credentials are available. The optional boolean defaults to `false`. Missing credentials, provider errors and S3
+authentication errors never trigger anonymous access. Authentication settings belong only in credentials, not in
+access or input specifications.
 
 ### Identity Attributes
 
@@ -354,12 +384,14 @@ URL attributes. The path still names the object:
 | `accessKeyId`     | AWS access key ID                                        |
 | `secretAccessKey` | Secret access key paired with `accessKeyId`              |
 | `sessionToken`    | Session token for temporary (STS) credentials. Optional. |
+| `anonymous`       | Optional boolean; default `false`. Disables signing.     |
 
 Use [`S3Credentials/v1`]({{< relref "credential-types.md#s3credentialsv1" >}}) for the typed field reference.
 
-If an entry sets none of the three properties, OCM treats it as no credentials, and the AWS default credential chain
-applies. If an entry sets any of them, OCM passes the entry to the AWS SDK unchanged. An incomplete pair therefore
-fails in the SDK. It does not fall back to the default chain.
+When `anonymous` is false or omitted and no key or token is set, the AWS default credential chain applies. If any
+key or token is set, OCM passes the static credentials to the AWS SDK. An incomplete pair therefore fails in the
+SDK rather than falling back to the default chain. `anonymous: true` cannot be combined with keys or a token,
+including their legacy aliases.
 
 ### Matching Behavior
 
@@ -376,7 +408,7 @@ Two results of this are specific to S3:
   or do not scope them at all.
 - **`*` does not cross `/`.** Most object keys contain slashes. `path: acme-artifacts/*` matches
   `acme-artifacts/build.zip`, but it does not match `acme-artifacts/datasets/reference.parquet`. To cover a whole
-  bucket, write the full depth (`acme-artifacts/*/*/*`), or omit `path` and scope the entry another way.
+  bucket, use `**` (`acme-artifacts/**`), or omit `path` and scope the entry another way.
 
 {{< callout context="caution" >}}
 Write the identity type as `type: S3`. OCM matches the type as an exact string, and the type is **unversioned**.
@@ -384,11 +416,22 @@ Write the identity type as `type: S3`. OCM matches the type as an exact string, 
 [access and input type]({{< relref "input-and-access-types.md#s3v2-access" >}})) does not match.
 
 A wrong type gives no error message. OCM resolves no credentials, the AWS default credential chain takes over, and the
-request uses what that chain finds, which is often nothing. AWS then reports an access-denied error or a
-missing-credentials error, not a configuration error.
+request uses what that chain finds. Missing credentials or access-denied errors may then occur rather than an
+identity configuration error.
 {{< /callout >}}
 
 ### Examples
+
+**Anonymous access to one public object:**
+
+```yaml
+- identity:
+    type: S3
+    path: public-bucket/path/to/object
+  credentials:
+    - type: S3Credentials/v1
+      anonymous: true
+```
 
 **All objects in every bucket.** Use this form when one account owns everything that OCM reads:
 
@@ -435,7 +478,7 @@ The identity type is `S3` in OCM v1 and in OCM v2, but three other things change
 | Aspect                | OCM v1                                          | OCM v2                                                 |
 |-----------------------|-------------------------------------------------|--------------------------------------------------------|
 | Object location       | `pathprefix`, set to `<bucket>/<key>/<version>` | `path`, set to `<bucketName>/<objectKey>` (no version) |
-| Location matching     | Prefix match                                    | Glob match (`*` does not cross `/`)                    |
+| Location matching     | Prefix match                                    | Glob match (`*` within a segment, `**` across `/`)     |
 | Credential properties | `awsAccessKeyID`, `awsSecretAccessKey`, `token` | `accessKeyId`, `secretAccessKey`, `sessionToken`       |
 
 ```yaml
@@ -454,7 +497,7 @@ The identity type is `S3` in OCM v1 and in OCM v2, but three other things change
 # OCM v2
 - identity:
     type: S3
-    path: acme-artifacts/datasets/*
+    path: acme-artifacts/datasets/**
   credentials:
     - type: S3Credentials/v1
       accessKeyId: <access-key-id>
@@ -466,8 +509,9 @@ The old **property** names are still accepted, but only in an untyped
 `awsSecretAccessKey` and `token`, and maps them to `accessKeyId`, `secretAccessKey` and `sessionToken`. A typed
 `S3Credentials/v1` entry accepts the new names only.
 
-An OCM v1 entry without `pathprefix` still matches every S3 object. An entry with `pathprefix` never matches, because
-the OCM v2 lookup identity has no such attribute. Replace `pathprefix` with `path`.
+An OCM v1 entry without `pathprefix` still matches every S3 object. An entry with `pathprefix` is converted to `path`
+patterns that match the prefix and every key below it. Because the OCM v2 lookup path has no version, a prefix that
+ends with a version no longer matches. Replace `pathprefix` with `path`.
 
 For the matching access specification changes, see
 [Input and Access Types: Migrating from OCM v1]({{< relref "input-and-access-types.md" >}}#s3-migration-from-ocm-v1).
@@ -523,6 +567,95 @@ optional; see the note on anonymous access under
 ```
 
 Omitting `path` matches every repository on that host.
+
+---
+
+## Git
+
+Used when OCM fetches a repository with the
+[`Git/v1` access type]({{< relref "input-and-access-types.md#gitv1-access" >}}) or the
+[`Git/v1` input type]({{< relref "input-and-access-types.md#gitv1-input" >}}). The identity is derived from the
+`repository` URL. The access type and the input type derive it in the same way, so one consumer entry covers both.
+Credentials are optional. See [Git credential selection]({{< relref "credential-types.md#git-credential-selection" >}})
+for supported types and their schemas.
+
+### Identity Attributes
+
+| Attribute  | Required | Description                                                                                                                        |
+|------------|----------|------------------------------------------------------------------------------------------------------------------------------------|
+| `type`     | Yes      | Must be `Git`                                                                                                                      |
+| `hostname` | Yes      | Server hostname (e.g. `gitlab.com`)                                                                                                |
+| `path`     | No       | Repository path without the leading `/`. Supports glob patterns (`*` matches one path segment). If omitted, matches any path.      |
+| `scheme`   | No       | Transport: `https`, `http`, `ssh` or `git`. If omitted, matches any transport. If set, must match exactly.                         |
+| `port`     | No       | Port number as string. If omitted, `https` URLs match `443` and `http` URLs match `80`. For `ssh` and `git` URLs, you must set it. |
+
+### Derivation from the repository URL
+
+OCM derives every attribute from the URL. The port is the explicit port, or the default port of the transport. The
+user part of the URL (`git@`) is never part of the identity.
+
+| `repository`                                  | `scheme` | `hostname`        | `port` | `path`                |
+|-----------------------------------------------|----------|-------------------|--------|-----------------------|
+| `https://gitlab.com/group/project.git`        | `https`  | `gitlab.com`      | `443`  | `group/project.git`   |
+| `http://git.example.com:8080/org/repo.git`    | `http`   | `git.example.com` | `8080` | `org/repo.git`        |
+| `ssh://git@git.example.com/org/repo.git`      | `ssh`    | `git.example.com` | `22`   | `org/repo.git`        |
+| `git@github.com:org/repo.git` (scp-style)     | `ssh`    | `github.com`      | `22`   | `org/repo.git`        |
+| `ssh://git@git.example.com:2222/org/repo.git` | `ssh`    | `git.example.com` | `2222` | `org/repo.git`        |
+| `git://git.example.com/org/repo.git`          | `git`    | `git.example.com` | `9418` | `org/repo.git`        |
+
+OCM lowercases the scheme and hostname of the URL before matching. It does not change the identity in your
+configuration, so write `scheme` and `hostname` in lowercase there. The `path` keeps a `.git` suffix if the URL has one,
+so `path: org/repo` does not match `https://example.com/org/repo.git`. Use `org/*` or the exact path with `.git`.
+
+### Matching Behavior
+
+The same three chained checks as [`OCIRegistry`](#ociregistry) apply: path glob, URL (scheme, hostname, port), then
+exact equality on the remaining attributes.
+
+{{< callout context="caution" >}}
+For an `ssh` or `git` URL, set `port` (`"22"` or `"9418"`, or the port in the URL). OCM fills in a missing default port
+only for `https` and `http`, so an SSH entry without `port` never matches.
+
+Set `scheme` when HTTPS and SSH need different credentials: an SSH key does not work for an HTTPS URL, and a token does
+not work for an SSH URL. If no entry matches, OCM reports no error. It sends the request without credentials, and the
+server answers with an authentication error.
+{{< /callout >}}
+
+### Examples
+
+**All repositories of a group, over HTTPS:**
+
+```yaml
+- identity:
+    type: Git/v1
+    hostname: gitlab.com
+    scheme: https
+    path: example-group/*
+  credentials:
+    - type: GitHTTPSCredentials/v1
+      username: oauth2
+      password: glpat-example-token
+```
+
+**Every repository on a host, over SSH:**
+
+```yaml
+- identity:
+    type: Git/v1
+    hostname: git.example.com
+    scheme: ssh
+    port: "22"
+  credentials:
+    - type: GitSSHCredentials/v1
+      privateKey: /home/user/.ssh/id_ed25519
+```
+
+### Migrating from OCM v1 {#git-identity-migration-from-ocm-v1}
+
+The identity type is `Git` in OCM v1 and OCM v2, and the credential property names are the same. OCM v1 only matched
+`pathprefix` for `file://` repositories; for remote repositories an entry with `pathprefix` never matched. OCM v2
+converts `pathprefix: org` into `path: "{org,org/**}"`, so such an entry now matches the repositories below `org`.
+Prefer writing `path` directly. The path includes a `.git` suffix if the repository URL has one.
 
 ---
 
@@ -620,6 +753,74 @@ ocm sign cv --signature prod <component-version>
   credentials:
     - type: RSACredentials/v1
       privateKeyPEMFile: /path/to/private-key.pem
+```
+
+---
+
+## TSA/v1alpha1
+
+Used **only during verification** when a signature carries an RFC 3161 timestamp. OCM resolves the root
+certificates that anchor the timestamp token's PKCS#7 chain from the credential graph using a `TSA/v1alpha1`
+consumer identity. The signing path does **not** consult this identity — the TSA server is selected there via the
+`--tsa` / `--tsa-url` flags. See [Concept: Signing and Verification → RFC 3161 Timestamping]({{< relref "docs/concepts/signing-and-verification-concept.md#rfc-3161-timestamping" >}}).
+
+### Identity Attributes
+
+| Attribute  | Required | Description                                                                                                                        |
+|------------|----------|------------------------------------------------------------------------------------------------------------------------------------|
+| `type`     | Yes      | Must be `TSA/v1alpha1`                                                                                                             |
+| `hostname` | No       | TSA server hostname (e.g. `timestamp.digicert.com`). Derived from the TSA URL label during verification.                           |
+| `scheme`   | No       | URL scheme (`https`, `http`). If omitted, matches any scheme.                                                                      |
+| `port`     | No       | Port number as string. Default ports are applied when `scheme` is set: `https` → `443`, `http` → `80`.                             |
+| `path`     | No       | URL path of the TSA endpoint. Supports glob patterns (`*` matches one path segment). If omitted, matches any path on the hostname. |
+
+The verifier reads the TSA URL from the unsigned `url.tsa.ocm.software/{signature}` label on the descriptor and
+decomposes it into these URL attributes for URL-specific matching. A consumer entry with only `type: TSA/v1alpha1` (no URL attributes) acts as a generic
+fallback that matches any TSA, including timestamps created by the OCM v1 CLI, which carry no URL.
+
+### Credential Properties
+
+| Property           | Description                                                                      |
+|--------------------|----------------------------------------------------------------------------------|
+| `rootCertsPEM`     | Inline PEM bundle of root CA certificates for the TSA's PKCS#7 timestamp chain   |
+| `rootCertsPEMFile` | Path to a PEM file containing root CA certificates for the TSA's timestamp chain |
+
+`rootCertsPEM` takes precedence over `rootCertsPEMFile` when both are set. Without a matching entry, timestamp
+verification degrades to structural-only mode (PKCS#7 parsing and imprint match, no chain verification) and a warning
+is logged. Credential resolution errors other than "not found" fail the verification. Use [`TSACredentials/v1alpha1`]({{< relref "credential-types.md#tsacredentialsv1alpha1" >}}) for the typed
+field reference.
+
+When using the legacy `Credentials/v1` `properties:` map instead of `TSACredentials/v1alpha1`, the snake_case keys
+(`root_certs_pem`, `root_certs_pem_file`) are accepted as a deprecated backward-compatibility fallback.
+
+### Matching Behavior
+
+The same three chained checks as [`OCIRegistry`](#ociregistry) apply: path glob, URL (scheme, hostname, port with
+default-port handling), then exact equality on the remaining attributes. A generic entry with no URL attributes matches
+any TSA URL; a URL-specific entry is preferred when its attributes match.
+
+### Examples
+
+**URL-specific TSA roots** (matches only DigiCert's timestamp endpoint):
+
+```yaml
+- identity:
+    type: TSA/v1alpha1
+    hostname: timestamp.digicert.com
+    scheme: http
+  credentials:
+    - type: TSACredentials/v1alpha1
+      rootCertsPEMFile: /path/to/digicert-tsa-root.pem
+```
+
+**Generic fallback** (matches any TSA — useful when a single trust bundle covers all TSAs you use):
+
+```yaml
+- identity:
+    type: TSA/v1alpha1
+  credentials:
+    - type: TSACredentials/v1alpha1
+      rootCertsPEMFile: /path/to/tsa-roots.pem
 ```
 
 ---

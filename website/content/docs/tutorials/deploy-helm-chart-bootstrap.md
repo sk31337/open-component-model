@@ -4,6 +4,8 @@ description: "Bootstrap a Helm chart deployment with OCM and kro, delivered thro
 icon: "⚙️"
 weight: 61
 toc: true
+aliases:
+  - /docs/tutorials/deploy-helm-charts-with-bootstrap-setup/
 ---
 
 ## What You'll Learn
@@ -31,7 +33,7 @@ Before starting, make sure you have set up your environment as described in the 
 {{< /callout >}}
 
 - [Controller environment]({{< relref "setup-controller-environment.md" >}}) with OCM Controllers, kro, and a deployer (Flux or Argo CD) installed
-- [Custom RBAC]({{< relref "custom-rbac.md" >}}) configured to allow the controller to manage `ResourceGraphDefinitions` (also see [RBAC for CRDs kro creates at runtime]({{< relref "custom-rbac.md#rbac-for-crds-kro-creates-at-runtime" >}}) if you're running a hardened cluster)
+- [Custom RBAC]({{< relref "custom-rbac.md#grant-the-controller-read-access" >}}) configured to allow the controller to watch `ResourceGraphDefinitions`
 - [OCM CLI]({{< relref "ocm-cli-installation.md" >}}) installed
 - Access to an OCI registry (e.g., [ghcr.io](https://docs.github.com/en/packages/learn-github-packages/introduction-to-github-packages))
 - `envsubst` installed (pre-installed on most Linux/macOS systems; part of `gettext`)
@@ -53,7 +55,7 @@ export OCM_REPO=ghcr.io/$GITHUB_USERNAME/ocm-tutorial
 
 ### The Bootstrap Pattern
 
-In the [basic Helm deployment guide]({{< relref "deploy-helm-chart.md" >}}), you manually created a `ResourceGraphDefinition` and applied it to the cluster. The **bootstrap pattern** improves on this by packaging the RGD inside the OCM component itself. The Deployer controller extracts and applies it automatically.
+In the [basic Helm deployment guide]({{< relref "deploy-helm-chart.md" >}}), you manually created a `ResourceGraphDefinition` and applied it to the cluster. The **bootstrap pattern** improves on this by packaging the RGD inside the OCM component itself. The NamespacedDeployer extracts and applies it automatically.
 
 This means:
 
@@ -65,7 +67,7 @@ This means:
 
 **Localization** keeps image references in sync when components move between registries:
 
-1. **During transfer**: When you run `ocm transfer cv --copy-resources --upload-as ociArtifact`, OCM uploads artifacts to the new registry as OCI artifacts and updates the descriptor's image references accordingly
+1. **During transfer**: When you run `ocm transfer cv` with an OCI uploader configuration (in your OCM configuration, for example `.ocmconfig` in the working directory), OCM uploads artifacts to the new registry as OCI artifacts and updates the descriptor's image references accordingly
 2. **During deployment**: The RGD reads the updated image reference from the component and injects it into Helm values
 
 This ensures your deployment always uses images from the current registry, not hardcoded original locations.
@@ -81,7 +83,7 @@ refer back to it as you work through the steps.
 <summary>View Resource Overview Diagram</summary>
 
 (Continues from [Concept: Kubernetes Deployer]({{< relref "docs/concepts/kubernetes-deployer.md" >}}), which
-shows the `Repository` → `Component` → `Resource` → `Deployer` chain that gets the RGD here.)
+shows the `Repository` → `Component` → `Resource` → `NamespacedDeployer` chain that gets the RGD here.)
 
 ```mermaid
 flowchart TB
@@ -94,7 +96,7 @@ flowchart TB
                 k8sResourceHelm[Resource: HelmChart]
                 k8sResourceImage[Resource: Image]
             end
-            subgraph deployer[Deployer]
+            subgraph deployer[NamespacedDeployer]
                 source[Source]
                 helmRelease[Release]
             end
@@ -420,7 +422,7 @@ kubectl create secret docker-registry ghcr-secret \
 Then update the resources to use credentials:
 
 1. **OCM Controller resources**: Add `ocmConfig` to the Repository in `bootstrap.yaml`. The credentials propagate
-   automatically to Component, Resource, and Deployer objects that reference this
+   automatically to Component, Resource, and NamespacedDeployer objects that reference this
    Repository:
 
    ```yaml
@@ -469,10 +471,21 @@ Build the component version locally:
 ocm add cv
 ```
 
-Transfer to your registry with `--copy-resources --upload-as ociArtifact` to enable localization. The `--upload-as ociArtifact` flag is required so the Helm chart and image land as OCI artifacts in the target registry, keeping image references the RGD can rewrite:
+Transfer to your registry with the OCI uploader to enable localization. An OCI uploader entry makes the Helm chart and image land as OCI artifacts in the target registry, keeping image references the RGD can rewrite; a local blob catch-all copies every other resource:
+
+```yaml
+cat > .ocmconfig << 'EOF'
+type: generic.config.ocm.software/v1
+configurations:
+  - type: oci.uploader.transfer.config.ocm.software/v1alpha1
+  - type: localblob.uploader.transfer.config.ocm.software/v1alpha1
+EOF
+```
+
+> **Note:** The CLI merges `.ocmconfig` from the current directory with your other OCM configuration (such as `$HOME/.ocmconfig`), so credentials and resolvers stay in effect.
 
 ```bash
-ocm transfer cv --copy-resources --upload-as ociArtifact transport-archive//ocm.software/ocm-k8s-toolkit/bootstrap:1.0.0 $OCM_REPO
+ocm transfer cv transport-archive//ocm.software/ocm-k8s-toolkit/bootstrap:1.0.0 $OCM_REPO
 ```
 
 {{< /step >}}
@@ -500,7 +513,7 @@ Now create the bootstrap resources that will fetch and apply the RGD from the co
 
 ### Create bootstrap resources
 
-The bootstrap resources form a chain: Repository → Component → Resource → Deployer. The Deployer extracts the RGD and applies it to the cluster.
+The bootstrap resources form a chain: Repository → Component → Resource → NamespacedDeployer. The NamespacedDeployer extracts the RGD and applies it to the cluster with the permissions of the `bootstrap-deployer` service account. RGDs are cluster-scoped, so that service account needs a `ClusterRole` for them.
 
 Create `bootstrap.yaml` with the following content:
 
@@ -553,22 +566,46 @@ spec:
   # ocmConfig is required, if the OCM repository requires credentials to access it.
   # ocmConfig:
 ---
-apiVersion: delivery.ocm.software/v1alpha1
-kind: Deployer
+apiVersion: v1
+kind: ServiceAccount
 metadata:
   name: bootstrap-deployer
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bootstrap-deployer
+rules:
+  - apiGroups: ["kro.run"]
+    resources: ["resourcegraphdefinitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bootstrap-deployer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bootstrap-deployer
+subjects:
+  - kind: ServiceAccount
+    name: bootstrap-deployer
+    namespace: default
+---
+apiVersion: delivery.ocm.software/v1alpha1
+kind: NamespacedDeployer
+metadata:
+  name: bootstrap-deployer
+  namespace: default
 spec:
   resourceRef:
     # Reference to the Kubernetes resource OCM resource that contains the ResourceGraphDefinition.
     name: bootstrap-rgd
-    # As kro processes resources in cluster-scope*, the deployer must also be cluster-scoped. Accordingly, we have to
-    # set the namespace of the resource here (usually, when the namespace is not specified, it is derived from the
-    # referencing Kubernetes resource).
-    # Check out the kro documentation for more details:
-    # https://github.com/kro-run/kro/blob/8f53372bfde232db7ddd6809eebb6a1d69b34f2e/website/docs/docs/concepts/20-access-control.md
-    namespace: default
+  # The deployer applies the RGD with the permissions of this service account.
+  serviceAccountName: bootstrap-deployer
   # ocmConfig is required, if the OCM repository requires credentials to access it.
-  # (You also need to specify the namespace of the reference as the 'deployer' is cluster-scoped.)
   # ocmConfig:
 EOF
 ```
@@ -578,10 +615,51 @@ EOF
 
 {{< step >}}
 
+### Grant kro access to the instances
+
+kro needs a `ClusterRole` for the `Bootstrap` instances that the RGD in your component defines. The roles for OCM resources and for your deployer come from the [setup guide]({{< relref "setup-controller-environment.md" >}}). See [Access Control](https://kro.run/docs/advanced/access-control) in the kro documentation for details.
+
+This is separate from the `bootstrap-deployer` service account, which only allows the NamespacedDeployer to apply the RGD itself.
+
+Create `kro-rbac.yaml`:
+
+```shell
+cat > kro-rbac.yaml << 'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kro:controller:bootstraps
+  labels:
+    # kro picks up every ClusterRole with this label, see https://kro.run/docs/advanced/access-control
+    rbac.kro.run/aggregate-to-controller: "true"
+rules:
+  - apiGroups:
+      - kro.run
+    resources:
+      - bootstraps
+      - bootstraps/status
+    verbs:
+      - get
+      - list
+      - patch
+      - update
+      - watch
+EOF
+```
+
+Apply it:
+
+```bash
+kubectl apply -f kro-rbac.yaml
+```
+{{< /step >}}
+
+{{< step >}}
+
 ### Apply the bootstrap resources
 
-{{< callout context="caution" title="RBAC required before you apply" icon="outline/alert-triangle" >}}
-Please make sure that you updated your RBAC permissions before applying this command. Follow our [Configure Custom RBAC for Deployers]({{< relref "custom-rbac.md" >}}) guide to know how to do that.
+{{< callout context="caution" title="Controller watch permissions" icon="outline/alert-triangle" >}}
+The controller watches deployed objects for drift with its own identity, so it needs `get`, `list` and `watch` on `ResourceGraphDefinitions`. Follow [Configure Custom RBAC for Deployers]({{< relref "custom-rbac.md" >}}) to grant them.
 {{< /callout >}}
 
 ```bash
@@ -685,16 +763,6 @@ The image reference points to your registry with a digest. Localization worked!
 {{< /step >}}
 {{< /steps >}}
 
-{{< callout context="caution" title="Going to production: tighten kro's RBAC" icon="outline/lock" >}}
-This tutorial uses a dev-friendly kro install with broad permissions (see [Prerequisites](#prerequisites)).
-A hardened cluster locks that down; see [RBAC for CRDs kro creates at runtime]({{< relref "custom-rbac.md#rbac-for-crds-kro-creates-at-runtime" >}})
-for why kro needs its own grant, separate from the `resourcegraphdefinitions.kro.run` grant the
-OCM controller already needs. For this tutorial, grant kro's service account
-`bootstraps.kro.run` (the instance) and `resources.delivery.ocm.software` (the chart and image),
-plus `ocirepositories.source.toolkit.fluxcd.io` and `helmreleases.helm.toolkit.fluxcd.io` for
-Flux, or `applications.argoproj.io` for Argo CD.
-{{< /callout >}}
-
 ## Troubleshooting
 
 ### Authentication Errors (401 Unauthorized)
@@ -714,9 +782,25 @@ kubectl logs -n ocm-k8s-toolkit-system deployment/ocm-k8s-toolkit-controller-man
 
 Common causes: missing component, wrong repository URL, credential issues.
 
+If the RGD exists but `kubectl get rgd` shows the state `Inactive`, check the reason:
+
+```bash
+kubectl get rgd bootstrap -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}'
+```
+
+A message like `cache sync timeout for kro.run/v1alpha1, Resource=bootstraps` often means that kro lacks access to the `Bootstrap` instances. Check that you applied `kro-rbac.yaml`, as described in [Grant kro access to the instances](#grant-kro-access-to-the-instances).
+
+To see which access kro lacks, check its logs for `forbidden`:
+
+```bash
+kubectl logs -n kro-system deployment/kro | grep forbidden
+```
+
 ### RBAC Permission Errors
 
-If the controller logs show permission errors like `forbidden` or `cannot create resource`, the controller lacks RBAC permissions to manage `ResourceGraphDefinitions`. Follow the [Custom RBAC guide]({{< relref "custom-rbac.md" >}}) to grant the necessary permissions.
+If the NamespacedDeployer reports `forbidden` or `cannot create resource`, the `bootstrap-deployer` service account lacks write access to `ResourceGraphDefinitions`. Check its `ClusterRole` from [Create bootstrap resources](#create-bootstrap-resources).
+
+If the controller logs show that it cannot list or watch `ResourceGraphDefinitions`, the controller lacks read access. Follow the [Custom RBAC guide]({{< relref "custom-rbac.md#grant-the-controller-read-access" >}}) to grant it.
 
 ### Instance Not Syncing
 
@@ -737,7 +821,7 @@ If pods show `ImagePullBackOff` or `ErrImagePull` errors, the kubelet cannot pul
 You've successfully:
 
 - Created an OCM component with embedded deployment instructions (RGD)
-- Used `--copy-resources --upload-as ociArtifact` to enable localization during transfer
+- Used an OCI uploader configuration to enable localization during transfer
 - Deployed the component using the bootstrap pattern
 - Verified that localization kept image references in sync
 

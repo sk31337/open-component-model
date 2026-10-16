@@ -16,12 +16,27 @@ Get component version(s) from an OCM repository
 Get component version(s) from an OCM repository.
 
 The format of a component reference is:
-	[type::]{repository}/[valid-prefix]/{component}[:version]
+
+	[type::]{repository}/[valid-prefix]/{component}[:version][@digest]
 
 For valid prefixes {component-descriptors|none} are available. If <none> is used, it defaults to "component-descriptors". This is because by default,
 OCM components are stored within a specific sub-repository.
 
 For known types, currently only {OCIRepository|CommonTransportFormat} are supported, which can be shortened to {OCI|oci|CTF|ctf} respectively for convenience.
+
+A digest pins the component version: the command fails unless the component version matches it.
+Two forms are accepted, each with sha256 or sha512:
+
+- "@sha256:<hex>" (OCI digest) is the digest of the OCI image index or manifest the component version is
+  stored as, the digest its version tag resolves to (for example "oras resolve
+  {repository}/component-descriptors/{component}:{version}"). The component version is then read from that
+  artifact instead of through the tag, like an OCI image pinned by digest. The digest covers the descriptor
+  and all local blobs, so the version may be omitted; if given, the artifact must hold it. Only OCI
+  registries and CTF archives support it, and it changes when the version is transferred or signed.
+- "@jsonNormalisation.v4alpha1+sha256:<hex>" (normalized) is the hash of the descriptor normalised with
+  jsonNormalisation/v4alpha1, the digest "ocm sign" signs and logs. It stays the same across transfer and
+  signing, but does not cover access information or labels that are excluded from signing. A reference
+  pinned to it must name the version.
 
 If no type is given, the repository path is interpreted based on introspection and heuristics.
 
@@ -38,12 +53,19 @@ Getting a single component version:
 get component-version ghcr.io/open-component-model//ocm.software/cli:0.12.0
 get cv ./path/to/ctf//ocm.software/cli:0.12.0
 get cv ./path/to/ctf/component-descriptors/ocm.software/cli:0.12.0
+get cv ghcr.io/open-component-model//ocm.software/cli@sha256:<oci-digest>
+get cv ghcr.io/open-component-model//ocm.software/cli:0.12.0@jsonNormalisation.v4alpha1+sha256:<signed-digest>
 
 Listing many component versions:
 
 get component-versions ghcr.io/open-component-model//ocm.software/cli
 get cvs ghcr.io/open-component-model//ocm.software/cli --output json
 get cvs ghcr.io/open-component-model//ocm.software/cli -oyaml
+
+Showing the resources of each component version in the tree output:
+
+get cv ./path/to/ctf//ocm.software/cli:0.12.0 -o widetree
+get cvs ghcr.io/open-component-model//ocm.software/cli -o widetree --recursive
 
 Specifying types and schemes:
 
@@ -54,16 +76,16 @@ get cvs oci::http://localhost:8080//ocm.software/cli
 ### Options
 
 ```
-      --display-mode enum          display mode can be used in combination with --recursive
-                                     static: print the output once the complete component graph is discovered
-                                     live (experimental): continuously updates the output to represent the current discovery state of the component graph
-                                   (must be one of [live static]) (default static)
-  -h, --help                       help for component-version
-      --latest                     if set, only the latest version of the component is returned
-  -o, --output enum                output format of the component descriptors
-                                   (must be one of [json ndjson table tree yaml]) (default table)
-      --recursive int[=-1]         depth of recursion for resolving referenced component versions (0=none, -1=unlimited, >0=levels (not implemented yet))
-      --semver-constraint string   semantic version constraint restricting which versions to output (default "> 0.0.0-0")
+      --constraint string    version constraint restricting which versions to output, evaluated by each version's configured scheme; versions with no applicable scheme are retained (default "> 0.0.0-0")
+      --display-mode enum    display mode can be used in combination with --recursive
+                               static: print the output once the complete component graph is discovered
+                               live (experimental): continuously updates the output to represent the current discovery state of the component graph
+                             (must be one of [live static]) (default static)
+  -h, --help                 help for component-version
+      --latest               if set, only the latest version of the component is returned
+  -o, --output enum          output format of the component descriptors
+                             (must be one of [json ndjson table tree widetree yaml]) (default tree)
+      --recursive int[=-1]   depth of recursion for resolving referenced component versions (0=none, -1=unlimited, >0=levels (not implemented yet))
 ```
 
 ### Options inherited from parent commands
@@ -88,6 +110,9 @@ get cvs oci::http://localhost:8080//ocm.software/cli
                                            If multiple configuration files are found, they will be merged in the order they are discovered.
                                            Later entries have higher priority.
                                            Using the option, the specified configuration file(s) will be used instead of the lookup above.
+                                           Use "-" to read configuration documents from stdin. It is an entry like any other: on its own it
+                                           replaces the lookup above, so add --config <file> to keep a file, and a repeated "-" is ignored.
+                                           Other documents on stdin stay there for commands that read it, such as transfer with --transfer-spec -.
       --logformat enum                     set the log output format that is used to print individual logs
                                               json: Output logs in JSON format, suitable for machine processing
                                               text: Output logs in human-readable text format, suitable for console output

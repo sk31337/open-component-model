@@ -21,6 +21,7 @@ import (
 	orasoci "oras.land/oras-go/v2/content/oci"
 	"oras.land/oras-go/v2/errdef"
 
+	"ocm.software/open-component-model/bindings/go/oci/spec/annotations"
 	"ocm.software/open-component-model/bindings/go/oci/spec/layout"
 )
 
@@ -129,7 +130,7 @@ func TestCopyToOCILayoutInMemory(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test copying with tags
-	testCopy(t, err, src, manifest, manifest)
+	testCopy(t, src, manifest, manifest)
 }
 
 // TestCopyToOCILayoutInMemoryBasedOnIndex tests the CopyToOCILayoutInMemory function with an index as source
@@ -160,10 +161,10 @@ func TestCopyToOCILayoutInMemoryBasedOnIndex(t *testing.T) {
 	require.NoError(t, src.Push(t.Context(), indexDesc, bytes.NewReader(indexSerialized)))
 
 	// Test copying with tags
-	testCopy(t, err, src, indexDesc, manifest)
+	testCopy(t, src, indexDesc, manifest)
 }
 
-func testCopy(t *testing.T, err error, src *memory.Store, indexDesc ociImageSpecV1.Descriptor, manifest ociImageSpecV1.Descriptor) {
+func testCopy(t *testing.T, src *memory.Store, indexDesc ociImageSpecV1.Descriptor, manifest ociImageSpecV1.Descriptor) {
 	t.Helper()
 	opts := CopyToOCILayoutOptions{
 		Tags: []string{"latest", "v1"},
@@ -192,17 +193,17 @@ func TestCopyToOCILayoutInMemory_ErrorCases(t *testing.T) {
 	invalidStore := &invalidStore{}
 	opts := CopyToOCILayoutOptions{}
 	b, err := CopyToOCILayoutInMemory(t.Context(), invalidStore, ociImageSpecV1.Descriptor{}, opts)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	rc, err := b.ReadCloser()
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Nil(t, rc)
 
 	// Test with invalid descriptor
 	src := memory.New()
 	b, err = CopyToOCILayoutInMemory(t.Context(), src, ociImageSpecV1.Descriptor{}, opts)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	rc, err = b.ReadCloser()
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Nil(t, rc)
 }
 
@@ -444,7 +445,7 @@ func TestCopyOCILayoutWithIndex_ErrorCases(t *testing.T) {
 	store := memory.New()
 	opts := CopyOCILayoutWithIndexOptions{}
 	_, err := CopyOCILayoutWithIndex(t.Context(), store, &testReadOnlyBlob{data: []byte("invalid")}, opts)
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	// Test with invalid store
 	_, err = CopyOCILayoutWithIndex(t.Context(), &invalidStore{}, &testReadOnlyBlob{data: []byte("test")}, opts)
@@ -491,4 +492,31 @@ func (b *testReadOnlyBlob) ReadCloser() (io.ReadCloser, error) {
 
 func (b *testReadOnlyBlob) Close() error {
 	return nil
+}
+
+// TestCopyOCILayoutWithIndex_UnmarkedMultiArch covers a layout written before
+// the marker existed: no marker, no ref name, index and both children listed,
+// so only containment settles which of the three is the root.
+func TestCopyOCILayoutWithIndex_UnmarkedMultiArch(t *testing.T) {
+	r := require.New(t)
+
+	var buf bytes.Buffer
+	w, err := NewOCILayoutWriterWithTempFile(&buf, t.TempDir())
+	r.NoError(err)
+	idx := packIndex(t, w, pack(t, w, "amd64", "", nil), pack(t, w, "arm64", "", nil))
+	r.NoError(w.Close())
+	layoutBytes := buf.Bytes()
+
+	store, err := ReadOCILayout(t.Context(), &testReadOnlyBlob{data: layoutBytes})
+	r.NoError(err)
+	r.Len(store.Index.Manifests, 3, "index and both children must be listed, otherwise this test proves nothing")
+	for _, manifest := range store.Index.Manifests {
+		r.Empty(manifest.Annotations[annotations.OCMLayoutRoot], "the layout must be unmarked")
+		r.Empty(manifest.Annotations[ociImageSpecV1.AnnotationRefName], "the layout must be untagged")
+	}
+	r.NoError(store.Close())
+
+	top, err := CopyOCILayoutWithIndex(t.Context(), memory.New(), &testReadOnlyBlob{data: layoutBytes}, CopyOCILayoutWithIndexOptions{})
+	r.NoError(err)
+	r.Equal(idx.Digest, top.Digest, "the children are contained by the index, so the index is the root")
 }

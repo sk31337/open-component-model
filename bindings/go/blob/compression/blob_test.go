@@ -26,6 +26,35 @@ func (b *testBlob) ReadCloser() (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(b.data)), nil
 }
 
+func TestDecompressMediaTypes(t *testing.T) {
+	for _, tt := range []struct {
+		mediaType string
+		want      string
+	}{
+		{"application/gzip", "application/octet-stream"},
+		{"application/x-tar+gzip", "application/x-tar"},
+	} {
+		t.Run(tt.mediaType, func(t *testing.T) {
+			r := require.New(t)
+			data := []byte("archive contents")
+			compressed := compression.Compress(&testBlob{data: data})
+			compressed.SetMediaType(tt.mediaType)
+
+			decompressed, err := compression.Decompress(compressed)
+			r.NoError(err)
+			mediaType, known := decompressed.(blob.MediaTypeAware).MediaType()
+			r.True(known)
+			r.Equal(tt.want, mediaType)
+			reader, err := decompressed.ReadCloser()
+			r.NoError(err)
+			t.Cleanup(func() { r.NoError(reader.Close()) })
+			got, err := io.ReadAll(reader)
+			r.NoError(err)
+			r.Equal(data, got)
+		})
+	}
+}
+
 func TestCompressedBlob(t *testing.T) {
 	t.Run("successful compression and decompression", func(t *testing.T) {
 		r := require.New(t)
@@ -64,14 +93,14 @@ func TestCompressedBlob(t *testing.T) {
 		t.Run("decompressed blob", func(t *testing.T) {
 			a := assert.New(t)
 			decompressedBlob, err := compression.Decompress(compressedBlob)
-			a.NoError(err)
+			r.NoError(err)
 			a.IsType(&compression.DecompressedBlob{}, decompressedBlob)
 			mediaType, ok := decompressedBlob.(blob.MediaTypeAware).MediaType()
 			a.True(ok)
 			a.Equal("application/octet-stream", mediaType)
 
 			drc, err := decompressedBlob.ReadCloser()
-			a.NoError(err)
+			r.NoError(err)
 			t.Cleanup(func() { r.NoError(drc.Close()) })
 			decompressedData, err = io.ReadAll(drc)
 			r.NoError(err)
@@ -89,7 +118,7 @@ func TestCompressedBlob(t *testing.T) {
 
 		// Attempt to get reader
 		rc, err := compressedBlob.ReadCloser()
-		assert.ErrorIs(t, err, expectedErr)
+		require.ErrorIs(t, err, expectedErr)
 		assert.Nil(t, rc)
 	})
 
@@ -159,7 +188,7 @@ func TestCompressedBlob(t *testing.T) {
 		t.Cleanup(func() { r.NoError(rc.Close()) })
 
 		data, err := io.ReadAll(rc)
-		a.NoError(err)
+		r.NoError(err)
 		a.Equal(nogzip, data)
 	})
 

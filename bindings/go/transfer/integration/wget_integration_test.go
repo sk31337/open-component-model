@@ -25,11 +25,11 @@ import (
 	wgetv1alpha1 "ocm.software/open-component-model/bindings/go/wget/transformation/spec/v1alpha1"
 )
 
-// Test_Integration_TransferWgetResource_CopyModeAllResources verifies that a wget resource (content
+// Test_Integration_TransferWgetResource_LocalBlobUploader verifies that a wget resource (content
 // behind an HTTP URL, not stored in the source CTF) is transferred by value: the content is
 // downloaded from the URL and embedded as a localBlob in the target OCI registry. wget resources are
-// external, so they are only copied under CopyModeAllResources.
-func Test_Integration_TransferWgetResource_CopyModeAllResources(t *testing.T) {
+// external, so they are only copied when a local blob uploader is configured.
+func Test_Integration_TransferWgetResource_LocalBlobUploader(t *testing.T) {
 	t.Parallel()
 	r := require.New(t)
 
@@ -85,7 +85,7 @@ func Test_Integration_TransferWgetResource_CopyModeAllResources(t *testing.T) {
 	}
 	r.NoError(ctfRepo.AddComponentVersion(t.Context(), desc))
 
-	// 4. Build the transfer graph with CopyModeAllResources (external resources are skipped otherwise).
+	// 4. Build the transfer graph with a local blob uploader (external resources are kept by reference otherwise).
 	sourceSpec := &ctfrepospec.Repository{
 		Type:     runtime.Type{Name: ctfrepospec.Type, Version: ctfrepospec.Version},
 		FilePath: sourceCTFPath,
@@ -96,7 +96,8 @@ func Test_Integration_TransferWgetResource_CopyModeAllResources(t *testing.T) {
 	}
 
 	tgd, err := transfer.BuildGraphDefinition(t.Context(),
-		&transferv1alpha1.Config{CopyMode: transferv1alpha1.CopyModeAllResources},
+		&transferv1alpha1.Config{},
+		[]transferv1alpha1.UploaderConfig{&transferv1alpha1.LocalBlobUploaderConfig{}},
 		transfer.Mapping{
 			Components: []transfer.ComponentID{{Component: componentName, Version: componentVersion}},
 			Target:     targetSpec,
@@ -159,10 +160,10 @@ func Test_Integration_TransferWgetResource_CopyModeAllResources(t *testing.T) {
 	r.Nil(typedLocalBlob.GlobalAccess, "localBlob should not have globalAccess after transfer")
 	r.Equal("text/plain", typedLocalBlob.MediaType, "localBlob should preserve the wget media type")
 
-	// The stored resource must be fully described: a digest over the downloaded content.
-	r.NotNil(gotDesc.Component.Resources[0].Digest, "transferred resource should carry a digest")
-	r.Equal(digestOf(resourceData).Encoded(), gotDesc.Component.Resources[0].Digest.Value,
-		"resource digest should be the sha256 of the served content")
+	// The source resource carried no digest, so transfer must preserve that absence rather
+	// than inventing one over the downloaded content (which would break a signature that
+	// excluded this resource).
+	r.Nil(gotDesc.Component.Resources[0].Digest, "transfer must not inject a digest the source resource lacked")
 
 	// 7. Verify the blob is present and its content matches what the HTTP server served.
 	resourceIdentity := gotDesc.Component.Resources[0].ToIdentity()

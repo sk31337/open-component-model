@@ -72,3 +72,21 @@ func WithReferenceCache(refs *cache.ReferenceCache) Option {
 		resolver.SetReferenceCache(refs)
 	})
 }
+
+// WithChunkedPush enables chunked blob upload for remote repositories handed
+// out by this resolver. chunkSize is the target PATCH chunk size in bytes;
+// threshold is the minimum blob size for chunking to engage (blobs below it and
+// all manifests use monolithic upload). A chunkSize <= 0 disables chunking; a
+// threshold <= 0 uses remotestore.DefaultChunkThreshold.
+//
+// Chunked upload also enables streaming pushes (see remotestore.StreamingPusher)
+// so blobs of unknown size or digest can be uploaded without buffering. Chunked
+// upload survives an active blob or reference cache on the resolver: the cache
+// decorator carries the chunk configuration (see cache.ProxyRepository),
+// so its Push and PushStreaming remain reachable.
+func WithChunkedPush(chunkSize, threshold int64) Option {
+	return OptionFunc(func(resolver *CachingResolver) {
+		resolver.chunkSize = chunkSize
+		resolver.chunkThreshold = threshold
+	})
+}

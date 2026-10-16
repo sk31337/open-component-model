@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -14,20 +16,22 @@ import (
 )
 
 const (
-	ComponentConstructor = "component-constructor.yaml"
-	Bootstrap            = "bootstrap.yaml"
-	Manifests            = "manifests.yaml"
-	Rgd                  = "rgd.yaml"
-	Instance             = "instance.yaml"
-	K8sManifest          = "k8s-manifest.yaml"
-	PublicKey            = "ocm.software.pub"
-	PrivateKey           = "ocm.software"
+	ComponentConstructor  = "component-constructor.yaml"
+	Bootstrap             = "bootstrap.yaml"
+	Manifests             = "manifests.yaml"
+	Rgd                   = "kro-rgd.yaml"
+	Instance              = "kro-instance.yaml"
+	K8sManifest           = "k8s-manifest.yaml"
+	OCMConfig             = ".ocmconfig"
+	CrossplaneComposition = "crossplane-composition.yaml"
+	CrossplaneInstance    = "crossplane-instance.yaml"
 )
 
 // ignoreExamples lists examples that are tested elsewhere or should be skipped.
 var ignoreExamples = map[string]struct{}{
 	"applyset-pruning":   {}, // tested in e2e_applyset_test.go
 	"replication-simple": {}, // tested in e2e_replication_test.go
+	"kustomize":          {}, // container dir for argocd/fluxcd sub-examples, not a standalone example
 }
 
 var _ = Describe("controller", func() {
@@ -72,17 +76,11 @@ var _ = Describe("controller", func() {
 				Expect(files).To(ContainElements(reqFiles), "required files %s not found in example directory %q", reqFiles, example.Name())
 
 				By("creating and transferring a component version for " + example.Name())
-				// If directory contains a private key, the component version must signed.
-				signingKey := ""
-				if slices.Contains(files, PrivateKey) {
-					signingKey = filepath.Join(examplesDir, example.Name(), PrivateKey)
-				}
 				Expect(utils.PrepareOCMComponent(
 					ctx,
 					example.Name(),
 					filepath.Join(examplesDir, example.Name(), ComponentConstructor),
 					imageRegistry,
-					signingKey,
 				)).To(Succeed())
 
 				By("bootstrapping the example")
@@ -128,6 +126,53 @@ var _ = Describe("controller", func() {
 
 				}
 
+				// Crossplane flow: apply XRD+Composition directly, then XR instance
+				// Crossplane flow: the bootstrap already deployed the OCM Resource and
+				// Deployer for crossplane-xrd alongside the kro ones. Here we just wait
+				// for the XRD to be Established, then create the XR instance.
+				if slices.Contains(files, CrossplaneComposition) &&
+					slices.Contains(files, CrossplaneInstance) {
+					crossplaneName := example.Name() + "-crossplane"
+
+					By("waiting for XRD to be Established")
+					xrdName, xrdErr := xrdNameFromComposition(filepath.Join(examplesDir, example.Name(), CrossplaneComposition))
+					Expect(xrdErr).NotTo(HaveOccurred())
+					Expect(utils.WaitForResource(ctx, "condition=Established=true", timeout,
+						"compositeresourcedefinitions.apiextensions.crossplane.io/"+xrdName)).To(Succeed())
+
+					By("creating the Crossplane XR instance")
+					Expect(utils.DeployAndWaitForResource(
+						ctx, filepath.Join(examplesDir, example.Name(), CrossplaneInstance),
+						"condition=Ready=true",
+						timeout,
+					)).To(Succeed())
+
+					By("validating the Crossplane FluxCD-managed deployment")
+					name = "deployment.apps/" + crossplaneName + "-podinfo"
+					Expect(utils.WaitForResource(ctx, "create", timeout, name)).To(Succeed())
+					Expect(utils.WaitForResource(ctx, "condition=Available", timeout, name)).To(Succeed())
+					Expect(utils.WaitForResource(
+						ctx, "condition=Ready=true",
+						timeout,
+						"pod", "-l", "app.kubernetes.io/name="+crossplaneName+"-podinfo",
+					)).To(Succeed())
+
+					By("checking for Crossplane ArgoCD Application")
+					argoCDAppName := "applications.argoproj.io/" + crossplaneName
+					Expect(utils.WaitForResource(ctx, "create", timeout, argoCDAppName, "-n", "argocd")).To(Succeed())
+					Expect(utils.WaitForResource(ctx, "jsonpath={.status.sync.status}=Synced", timeout, argoCDAppName, "-n", "argocd")).To(Succeed())
+
+					By("validating the Crossplane ArgoCD-managed deployment")
+					name = "deployment.apps/" + crossplaneName + "-podinfo"
+					Expect(utils.WaitForResource(ctx, "create", timeout, name, "-n", "default-argocd")).To(Succeed())
+					Expect(utils.WaitForResource(ctx, "condition=Available", timeout, name, "-n", "default-argocd")).To(Succeed())
+					Expect(utils.WaitForResource(
+						ctx, "condition=Ready=true",
+						timeout,
+						"pod", "-l", "app.kubernetes.io/name="+crossplaneName+"-podinfo", "-n", "default-argocd",
+					)).To(Succeed())
+				}
+
 				By("validating the example")
 				name = "deployment.apps/" + example.Name() + "-podinfo"
 				Expect(utils.WaitForResource(ctx, "create", timeout, name)).To(Succeed())
@@ -137,6 +182,50 @@ var _ = Describe("controller", func() {
 					timeout,
 					"pod", "-l", "app.kubernetes.io/name="+example.Name()+"-podinfo",
 				)).To(Succeed())
+
+				// Check for verifications
+				if slices.Contains(files, OCMConfig) {
+					// Every signature configured in the example's .ocmconfig must produce a
+					// "verified signature" log entry naming it. Ready alone doesn't prove the
+					// handler ran (the resolver cache could serve a warmed descriptor).
+					sigNames, err := utils.SigningConfigSignatureNames(filepath.Join(examplesDir, example.Name(), OCMConfig))
+					Expect(err).ToNot(HaveOccurred())
+					for _, sig := range sigNames {
+						By(fmt.Sprintf("confirming signature %q was verified by the controller", sig))
+						// signature names are based on the example names, so this should be enough to make sure it got
+						// verified
+						expected := fmt.Sprintf(`"verified signature","signature":%q`, sig)
+						// The controller wraps every handler error (wrong key, missing
+						// credential, cosign/gpg failure) into this message. It is logged only
+						// after the descriptor and signature are fetched and verification
+						// actually ran, so it is terminal for a fixed-config example: a retry
+						// cannot make a bad key good. Transient fetch errors surface as a
+						// different message, so matching on this one does not flake. Abort the
+						// poll immediately instead of burning the full timeout.
+						failed := fmt.Sprintf("signature verification failed for signature %s:", sig)
+						Eventually(func(g Gomega) string {
+							out, err := utils.Run(exec.CommandContext(ctx,
+								"kubectl", "logs",
+								"-n", "ocm-k8s-toolkit-system",
+								"-l", "app.kubernetes.io/name=ocm-k8s-toolkit",
+								"--tail=-1",
+							))
+							g.Expect(err).ToNot(HaveOccurred())
+							logs := string(out)
+							if strings.Contains(logs, failed) {
+								StopTrying(fmt.Sprintf("controller reported a terminal verification failure for signature %q", sig)).Now()
+							}
+							return logs
+						}, timeout).Should(ContainSubstring(expected))
+					}
+				}
+
+				if strings.HasSuffix(example.Name(), "-cross-namespace") {
+					By("validating the object in the other namespace")
+					Expect(utils.WaitForResource(ctx, "create", timeout,
+						"configmap/"+example.Name()+"-dashboard", "-n", example.Name()+"-monitoring",
+					)).To(Succeed())
+				}
 
 				// Check for configuration and localization
 				if strings.HasSuffix(example.Name(), "-configuration-localization") {
@@ -175,3 +264,31 @@ var _ = Describe("controller", func() {
 		}
 	})
 })
+
+// xrdNameFromComposition reads the metadata.name of the first
+// CompositeResourceDefinition in a crossplane-composition.yaml file.
+func xrdNameFromComposition(compositionPath string) (string, error) {
+	data, err := os.ReadFile(compositionPath)
+	if err != nil {
+		return "", err
+	}
+	// Simple line-by-line parse: find the first "kind: CompositeResourceDefinition"
+	// and the "  name:" line that follows it.
+	inXRD := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "kind: CompositeResourceDefinition" {
+			inXRD = true
+			continue
+		}
+		if inXRD && strings.HasPrefix(trimmed, "name:") {
+			name := strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
+			return name, nil
+		}
+		// Reset on next document separator
+		if trimmed == "---" {
+			inXRD = false
+		}
+	}
+	return "", fmt.Errorf("no CompositeResourceDefinition name found in %s", compositionPath)
+}

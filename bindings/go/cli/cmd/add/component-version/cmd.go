@@ -24,6 +24,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/cli/internal/render/graph/tree"
 	"ocm.software/open-component-model/bindings/go/cli/internal/repository/ocm"
 	"ocm.software/open-component-model/bindings/go/cli/internal/subsystem"
+	versioningspec "ocm.software/open-component-model/bindings/go/configuration/versioning/v1alpha1/spec"
 	"ocm.software/open-component-model/bindings/go/constructor"
 	constructorruntime "ocm.software/open-component-model/bindings/go/constructor/runtime"
 	constructorv1 "ocm.software/open-component-model/bindings/go/constructor/spec/v1"
@@ -315,6 +316,11 @@ func AddComponentVersion(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("getting component constructor failed: %w", err)
 	}
+	deprecationWarnings := findDeprecatedTypes(
+		pluginManager.ResourcePluginRegistry.ResourceScheme(),
+		pluginManager.InputRegistry.InputRepositoryScheme(),
+		constructorSpec,
+	)
 
 	output, err := enum.Get(cmd.Flags(), FlagOutput)
 	if err != nil {
@@ -354,6 +360,11 @@ func AddComponentVersion(cmd *cobra.Command, _ []string) error {
 		graph:              credentialGraph,
 	}
 
+	registry, err := versioningspec.RegistryFromConfig(config)
+	if err != nil {
+		return fmt.Errorf("could not build versioning registry: %w", err)
+	}
+
 	opts := constructor.Options{
 		TargetRepositoryProvider:            instance,
 		ResourceRepositoryProvider:          instance,
@@ -366,13 +377,17 @@ func AddComponentVersion(cmd *cobra.Command, _ []string) error {
 		ConcurrencyLimit:                    concurrencyLimit,
 		ComponentVersionConflictPolicy:      ComponentVersionConflictPolicy(cvConflictPolicy).ToConstructorConflictPolicy(),
 		ExternalComponentVersionCopyPolicy:  ExternalComponentVersionCopyPolicy(evCopyPolicy).ToConstructorPolicy(),
+		VersioningRegistry:                  registry,
 	}
 	if !skipReferenceDigestProcessing {
 		opts.ResourceDigestProcessorProvider = instance
 	}
 
 	constr := constructor.NewDefaultConstructor(constructorSpec, opts)
-	if err := renderComponents(cmd, constr, output, displayMode); err != nil {
+	err = renderComponents(cmd, constr, output, displayMode)
+	// Print the notice even when the build fails, so authors still see what to migrate.
+	renderDeprecatedTypeNotice(cmd.ErrOrStderr(), deprecationWarnings)
+	if err != nil {
 		return fmt.Errorf("failed to render components recursively: %w", err)
 	}
 	return nil
@@ -626,12 +641,12 @@ func serializeVertexToDescriptorTree(vertex *dag.Vertex[string]) (tree.Row, erro
 		return tree.Row{}, fmt.Errorf("converting descriptor to v2 failed: %w", err)
 	}
 	identity := descriptorV2.Component.ToIdentity()
-	return tree.Row{
-		Component: descriptorV2.Component.Name,
-		Version:   descriptorV2.Component.Version,
-		Provider:  descriptorV2.Component.Provider,
-		Identity:  identity.String(),
-	}, nil
+	return tree.Row{Cells: []string{
+		descriptorV2.Component.Name,
+		descriptorV2.Component.Version,
+		descriptorV2.Component.Provider,
+		identity.String(),
+	}}, nil
 }
 
 func serializeVertexToDescriptor(vertex *dag.Vertex[string]) (any, error) {
