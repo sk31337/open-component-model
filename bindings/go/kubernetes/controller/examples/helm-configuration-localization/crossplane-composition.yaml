@@ -230,6 +230,10 @@ spec:
                   chart: podinfo
                   helm:
                     releaseName: helm-configuration-localization
+                    parameters:
+                      - name: image.repository
+                      - name: image.tag
+                      - name: ui.message
                   path: .
                 destination:
                   server: https://kubernetes.default.svc
@@ -273,8 +277,11 @@ spec:
                     fmt: "%s/%s"
                 toFieldPath: spec.source.helm.parameters[0].value
               - type: FromCompositeFieldPath
-                fromFieldPath: spec.podinfo.message
+                fromFieldPath: status.imageTag
                 toFieldPath: spec.source.helm.parameters[1].value
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.podinfo.message
+                toFieldPath: spec.source.helm.parameters[2].value
     - step: auto-ready
       functionRef:
         name: crossplane-contrib-function-auto-ready
