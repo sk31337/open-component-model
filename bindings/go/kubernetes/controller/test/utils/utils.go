@@ -172,7 +172,8 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 	}
 
 	componentName := componentNamePrefix + filepath.Base(filepath.Dir(componentConstructorPath))
-	transferRef := fmt.Sprintf("ctf::%s//%s", ctfDir, componentName)
+	componentVersion := componentVersionFromConstructor(componentConstructorPath)
+	transferRef := fmt.Sprintf("ctf::%s//%s:%s", ctfDir, componentName, componentVersion)
 
 	// If the example ships its own .ocmconfig, use it to sign each configured signature
 	// and materialize a Kubernetes Secret carrying the same file for the controller.
@@ -433,4 +434,35 @@ func GetResourceField(ctx context.Context, resource, fieldSelector string) (stri
 
 	result := strings.Trim(strings.TrimSpace(string(output)), "'")
 	return result, nil
+}
+
+// componentVersionFromConstructor reads the component version from an OCM
+// component-constructor.yaml file. Current OCM requires an explicit version in
+// the transfer reference (a versionless ctf::dir//name resolves to an empty
+// "name:" tag and fails), and fixtures such as applyset-pruning ship a 2.0.0
+// component, so the version cannot be hardcoded. Falls back to signingVersion.
+func componentVersionFromConstructor(constructorPath string) string {
+	data, err := os.ReadFile(constructorPath)
+	if err != nil {
+		return signingVersion
+	}
+	inComponent := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- name: "+componentNamePrefix) {
+			inComponent = true
+			continue
+		}
+		if inComponent && strings.HasPrefix(trimmed, "version:") {
+			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "version:"))
+			v = strings.Trim(v, `"'`)
+			if v != "" {
+				return v
+			}
+		}
+		if inComponent && strings.HasPrefix(trimmed, "- name:") {
+			break
+		}
+	}
+	return signingVersion
 }
