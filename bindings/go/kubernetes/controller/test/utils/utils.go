@@ -86,12 +86,14 @@ func DeployResource(ctx context.Context, manifestFilePath string) error {
 		return err
 	}
 	DeferCleanup(func(ctx SpecContext) error {
-		// Generous --timeout: the OCM finalizer teardown is a dependency cascade
+		// No --timeout: the OCM finalizer teardown is a dependency cascade
 		// (Deployer -> Resource -> Component -> Repository) whose controllers
 		// return errors on the transient "still referenced" condition, so
 		// controller-runtime's exponential backoff can stretch a brief ordering
-		// conflict into a minute or two on slow teardowns.
-		cmd = exec.CommandContext(ctx, "kubectl", "delete", "--ignore-not-found", "--wait=true", "--timeout=180s", "-f", manifestFilePath)
+		// conflict into several minutes. Let the Ginkgo spec deadline bound the
+		// wait instead of a fixed timeout that flakes on slow teardowns (observed
+		// exceeding 180s on the cross-namespace Repository finalizer).
+		cmd = exec.CommandContext(ctx, "kubectl", "delete", "--ignore-not-found", "--wait=true", "-f", manifestFilePath)
 		_, err := Run(cmd)
 		if err != nil {
 			GinkgoLogr.V(3).Info("WARNING: cleanup failed", "manifest", manifestFilePath)
@@ -172,8 +174,7 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 	}
 
 	componentName := componentNamePrefix + filepath.Base(filepath.Dir(componentConstructorPath))
-	componentVersion := componentVersionFromConstructor(componentConstructorPath)
-	transferRef := fmt.Sprintf("ctf::%s//%s:%s", ctfDir, componentName, componentVersion)
+	transferRef := fmt.Sprintf("ctf::%s//%s", ctfDir, componentName)
 
 	// If the example ships its own .ocmconfig, use it to sign each configured signature
 	// and materialize a Kubernetes Secret carrying the same file for the controller.
@@ -434,35 +435,4 @@ func GetResourceField(ctx context.Context, resource, fieldSelector string) (stri
 
 	result := strings.Trim(strings.TrimSpace(string(output)), "'")
 	return result, nil
-}
-
-// componentVersionFromConstructor reads the component version from an OCM
-// component-constructor.yaml file. Current OCM requires an explicit version in
-// the transfer reference (a versionless ctf::dir//name resolves to an empty
-// "name:" tag and fails), and fixtures such as applyset-pruning ship a 2.0.0
-// component, so the version cannot be hardcoded. Falls back to signingVersion.
-func componentVersionFromConstructor(constructorPath string) string {
-	data, err := os.ReadFile(constructorPath)
-	if err != nil {
-		return signingVersion
-	}
-	inComponent := false
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "- name: "+componentNamePrefix) {
-			inComponent = true
-			continue
-		}
-		if inComponent && strings.HasPrefix(trimmed, "version:") {
-			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "version:"))
-			v = strings.Trim(v, `"'`)
-			if v != "" {
-				return v
-			}
-		}
-		if inComponent && strings.HasPrefix(trimmed, "- name:") {
-			break
-		}
-	}
-	return signingVersion
 }
