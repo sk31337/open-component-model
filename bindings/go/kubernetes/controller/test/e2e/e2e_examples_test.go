@@ -20,7 +20,7 @@ const (
 	Bootstrap             = "bootstrap.yaml"
 	Manifests             = "manifests.yaml"
 	Rgd                   = "kro-rgd.yaml"
-	Instance              = "kro-instance.yaml"
+	KroInstance              = "kro-instance.yaml"
 	K8sManifest           = "k8s-manifest.yaml"
 	OCMConfig             = ".ocmconfig"
 	CrossplaneComposition = "crossplane-composition.yaml"
