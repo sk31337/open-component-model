@@ -308,7 +308,7 @@ metadata:
   name: crossplane-ocm-resources-e2e
 rules:
   - apiGroups: ["delivery.ocm.software"]
-    resources: ["resources","resources/status","components","repositories","deployers"]
+    resources: ["resources","resources/status","components","repositories"]
     verbs: ["create","delete","get","list","patch","update","watch"]
   - apiGroups: ["examples.ocm.software"]
     resources: ["*","*/status"]

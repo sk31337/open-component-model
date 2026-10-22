@@ -19,8 +19,8 @@ const (
 	ComponentConstructor  = "component-constructor.yaml"
 	Bootstrap             = "bootstrap.yaml"
 	Manifests             = "manifests.yaml"
-	Rgd                   = "kro-rgd.yaml"
-	KroInstance              = "kro-instance.yaml"
+	Rgd                   = "rgd.yaml"
+	KroInstance           = "kro-instance.yaml"
 	K8sManifest           = "k8s-manifest.yaml"
 	OCMConfig             = ".ocmconfig"
 	CrossplaneComposition = "crossplane-composition.yaml"
@@ -31,7 +31,6 @@ const (
 var ignoreExamples = map[string]struct{}{
 	"applyset-pruning":   {}, // tested in e2e_applyset_test.go
 	"replication-simple": {}, // tested in e2e_replication_test.go
-	"kustomize":          {}, // container dir for argocd/fluxcd sub-examples, not a standalone example
 }
 
 var _ = Describe("controller", func() {
@@ -97,10 +96,10 @@ var _ = Describe("controller", func() {
 					)
 				}
 
-				if slices.Contains(files, Instance) {
+				if slices.Contains(files, KroInstance) {
 					By("creating an instance of the example")
 					Expect(utils.DeployAndWaitForResource(
-						ctx, filepath.Join(examplesDir, example.Name(), Instance),
+						ctx, filepath.Join(examplesDir, example.Name(), KroInstance),
 						"condition=Ready=true",
 						timeout,
 					)).To(Succeed())
