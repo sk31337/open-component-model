@@ -1,7 +1,10 @@
 package e2e
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +13,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/test/utils"
 	"ocm.software/open-component-model/bindings/go/oci/looseref"
@@ -264,30 +269,37 @@ var _ = Describe("controller", func() {
 	})
 })
 
-// xrdNameFromComposition reads the metadata.name of the first
-// CompositeResourceDefinition in a crossplane-composition.yaml file.
+// xrdNameFromComposition reads metadata.name of the first
+// CompositeResourceDefinition document in a crossplane-composition.yaml file.
+// It decodes each YAML document into a minimal typed struct, so it is robust
+// against comments, flow-style, reordered keys, and document ordering.
 func xrdNameFromComposition(compositionPath string) (string, error) {
 	data, err := os.ReadFile(compositionPath)
 	if err != nil {
 		return "", err
 	}
-	// Simple line-by-line parse: find the first "kind: CompositeResourceDefinition"
-	// and the "  name:" line that follows it.
-	inXRD := false
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "kind: CompositeResourceDefinition" {
-			inXRD = true
+
+	decoder := utilyaml.NewYAMLToJSONDecoder(bytes.NewReader(data))
+	for {
+		var doc struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := decoder.Decode(&doc); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("parsing %s: %w", compositionPath, err)
+		}
+		if doc.Kind != "CompositeResourceDefinition" {
 			continue
 		}
-		if inXRD && strings.HasPrefix(trimmed, "name:") {
-			name := strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
-			return name, nil
+		if doc.Metadata.Name == "" {
+			return "", fmt.Errorf("CompositeResourceDefinition in %s has no metadata.name", compositionPath)
 		}
-		// Reset on next document separator
-		if trimmed == "---" {
-			inXRD = false
-		}
+		return doc.Metadata.Name, nil
 	}
 	return "", fmt.Errorf("no CompositeResourceDefinition name found in %s", compositionPath)
 }
