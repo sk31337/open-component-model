@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   resolve:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     name: Resolve latest stable release
     outputs:
       version: ${{ steps.find.outputs.version }}
@@ -67,7 +67,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-latest, ubuntu-26.04-arm]
         # Pin both legacy (cli/v-prefixed) and modern (bare) URL shapes so each
         # release-tag scheme is verified end-to-end. The empty string opts into
         # the script's own autodetect path (extract_stable_version) - without
@@ -83,7 +83,7 @@ jobs:
         include:
           - runner: ubuntu-latest
             ocm_version: ${{ inputs.version }}
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             ocm_version: ${{ inputs.version }}
     env:
       OCM_VERSION: ${{ matrix.ocm_version }}
@@ -116,7 +116,8 @@ jobs:
 
       - name: Verify installed binary
         run: |
-          version_json=$(ocm version 2>/dev/null)
+          # --output legacyjson added in 0.17; older builds emit JSON by default
+          version_json=$(ocm version --output legacyjson 2>/dev/null || ocm version 2>/dev/null)
           actual=$(echo "${version_json}" | jq -r '"\(.major).\(.minor).\(.patch)"')
           if [[ "${actual}" != "${EXPECTED_VERSION}" ]]; then
             echo "::error::Version mismatch: expected ${EXPECTED_VERSION}, got ${actual}"
@@ -128,7 +129,7 @@ jobs:
   install-without-auth:
     needs: resolve
     name: Install without attestation
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     env:
       EXPECTED_VERSION: ${{ needs.resolve.outputs.version }}
     steps:
@@ -165,7 +166,8 @@ jobs:
 
       - name: Verify installed binary
         run: |
-          version_json=$(ocm version 2>/dev/null)
+          # --output legacyjson added in 0.17; older builds emit JSON by default
+          version_json=$(ocm version --output legacyjson 2>/dev/null || ocm version 2>/dev/null)
           actual=$(echo "${version_json}" | jq -r '"\(.major).\(.minor).\(.patch)"')
           if [[ "${actual}" != "${EXPECTED_VERSION}" ]]; then
             echo "::error::Version mismatch: expected ${EXPECTED_VERSION}, got ${actual}"
@@ -177,7 +179,7 @@ jobs:
   install-custom-name:
     needs: resolve
     name: Install with custom binary name
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     permissions:
       contents: read
     env:
@@ -208,7 +210,8 @@ jobs:
             echo "::error::Unexpected default-named binary at ${INSTALL_DIR}/ocm; OCM_BIN_NAME was not honored"
             exit 1
           fi
-          version_json=$("${INSTALL_DIR}/ocm-custom" version 2>/dev/null)
+          # --output legacyjson added in 0.17; older builds emit JSON by default
+          version_json=$("${INSTALL_DIR}/ocm-custom" version --output legacyjson 2>/dev/null || "${INSTALL_DIR}/ocm-custom" version 2>/dev/null)
           actual=$(echo "${version_json}" | jq -r '"\(.major).\(.minor).\(.patch)"')
           if [[ "${actual}" != "${EXPECTED_VERSION}" ]]; then
             echo "::error::Version mismatch: expected ${EXPECTED_VERSION}, got ${actual}"

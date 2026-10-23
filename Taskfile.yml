@@ -8,6 +8,10 @@ output: prefixed
 includes:
   tools:
     taskfile: ./tools.Taskfile.yml
+  conformance/compatibility:
+    optional: true
+    taskfile: ./conformance/scenarios/compatibility/Taskfile.yml
+    dir: ./conformance/scenarios/compatibility
   # bindings/go is a single Go module. Unit tests are run via `bindings/go:test`,
   # integration tests via `bindings/go:test/integration`.
   bindings/go:
@@ -84,4 +88,6 @@ tasks:
         vars:
           CLI_DOCUMENTATION_MODE: "hugo"
           CLI_DOCUMENTATION_DIRECTORY: '{{ .ROOT_DIR }}/bindings/go/cli/docs/reference'
+      # Documentation tables derived from golangci.yml depguard rules and doc.go package comments
+      - task: 'tools:dependency-list/generate'
       - task: 'tidy'

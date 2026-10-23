@@ -12,9 +12,11 @@ The OCM controllers reconcile OCM component versions into a Kubernetes cluster. 
 - **Repository** validates that an OCM repository is reachable.
 - **Component** resolves and verifies a component version from that repository.
 - **Resource** fetches a specific resource from the component version.
-- **[Deployer]({{< relref "kubernetes-deployer.md" >}})** downloads the resource content and applies it to the cluster.
+- **[Deployer and NamespacedDeployer]({{< relref "kubernetes-deployer.md" >}})** download the resource content and apply it to the cluster.
 
 A fifth resource, **Replication**, sits alongside the chain rather than within it. Instead of delivering content into the cluster, it transfers a resolved component version from one OCM repository to another, mirroring `ocm transfer` as a controller.
+
+A sixth resource, **Discovery**, also sits alongside the chain. It publishes a filtered, optionally projected view of a `Component`'s transitive reference graph without downloading artifacts or applying anything to the cluster.
 
 ## Architecture
 
@@ -75,6 +77,9 @@ You can attach CEL expressions via `additionalStatusFields` to extract values fr
 
 A `Deployer` is a cluster-scoped object that watches a `Resource` and, once it is `Ready`, downloads the resource blob and applies the contained Kubernetes manifests to the cluster using server-side apply. It manages the full lifecycle of what it deploys: *creating* resources on first apply, *updating* them when the component version changes, and *pruning* resources that are no longer part of the manifest set.
 
+A `NamespacedDeployer` does the same, but applies with the permissions of a service account in its namespace instead
+of the controller's. Use it: the cluster-scoped `Deployer` is discouraged because of its cluster-wide permissions.
+
 See [Kubernetes Deployer]({{< relref "kubernetes-deployer.md" >}}) for a full description of its apply semantics, drift detection, and caching behavior.
 
 [API reference]({{< relref "/docs/reference/kubernetes-api/deployer.md" >}})
@@ -111,9 +116,17 @@ A few more things about replication:
 - The transferred version is the one recorded in the source `Component`'s *status*, meaning a version that has already been successfully reconciled (and verified, if verification is configured). It does not re-evaluate the `Component`'s semver constraint itself.
 - A successful transfer records the source digest in `status.lastTransferredDigest`. A reconciliation observing the same digest is a no-op, so re-applying or requeueing does not re-transfer unchanged content.
 - First, it walks the component's reference graph through the [resolution worker pool](#asynchronous-component-resolution), reporting `ResolutionInProgress` until every referenced descriptor is available. Then, it executes the transfer, reporting `TransferInProgress` until completion. Per-transformation failures are recorded in `status.lastFailedTransferEvents` and cleared on the next success.
-- Recursion depth, copy mode, upload type, and the credentials for the target registry are supplied as OCM configuration referenced from `spec.ocmConfig` (a `Secret` or a `ConfigMap` object carrying a `transfer.config.ocm.software` entry). See [Replicate Component Versions with the Controller]({{< relref "docs/how-to/replicate-component-versions-controller.md" >}}) for a concrete example.
+- Recursion depth, copy mode, upload type, and the credentials for the target registry are supplied as OCM configuration referenced from `spec.ocmConfig` (a `Secret` or a `ConfigMap` object carrying a `transfer.config.ocm.software` entry). See [Replicate Component Versions with the Controller]({{< relref "docs/guides/transfer/replicate-component-versions.md" >}}) for a concrete example.
 
 [API reference]({{< relref "/docs/reference/kubernetes-api/replication.md" >}})
+
+## Discovery
+
+A `Discovery` publishes a filtered, optionally projected view of the transitive reference graph of a `Component`. It is a read-only, query-style resource: it downloads no artifacts, creates no external resources, and provides no signature-verification guarantees for the descriptors it filters.
+
+See [Kubernetes Component Discovery]({{< relref "/docs/concepts/component-discovery.md" >}}) for a full description and its querying behaviour.
+
+[API reference]({{< relref "/docs/reference/kubernetes-api/discovery.md" >}})
 
 ## Asynchronous Component Resolution
 
@@ -177,7 +190,8 @@ deployer. Please refer to the respective installation guides for these tools:
 
 ## Related Documentation
 
-- [Concept: Kubernetes Deployer]({{< relref "kubernetes-deployer.md" >}}), how the Deployer applies and manages resources
-- [Getting-Started: Setup Controller Environment]({{< relref "setup-controller-environment.md" >}}), prerequisites for running the controllers
-- [How-To: Configuring Credentials for OCM Controllers]({{< relref "docs/how-to/configure-credentials-ocm-controllers.md" >}}), setting up access to private OCM repositories
-- [How-To: Replicate Component Versions with the Controller]({{< relref "docs/how-to/replicate-component-versions-controller.md" >}}), transferring component versions between repositories
+- [Concept: Kubernetes Deployer]({{< relref "kubernetes-deployer.md" >}}) - how the Deployer applies and manages resources
+- [Getting Started: Setup Controller Environment]({{< relref "setup-controller-environment.md" >}}) - prerequisites for running the controllers
+- [Guides: Configuring Credentials for OCM Controllers]({{< relref "docs/guides/deploy/configure-controller-credentials.md" >}}) - setting up access to private OCM repositories
+- [Guides: Replicate Component Versions with the Controller]({{< relref "docs/guides/transfer/replicate-component-versions.md" >}}) - transferring component versions between repositories
+- [Guides: Discover Component Graphs]({{< relref "docs/guides/deploy/discover-component-graphs.md" >}}) - publishing a filtered view of a Component's reference graph

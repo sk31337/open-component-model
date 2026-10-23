@@ -152,11 +152,13 @@ func (a *AccessOrInput) ValidateWithSchemes(accessScheme, inputScheme *runtime.S
 
 	switch {
 	case a.HasAccess():
-		if err := validateSpecification(a.Access, accessScheme); err != nil {
+		access, err := validateSpecification(a.Access, accessScheme)
+		if err != nil {
 			return fmt.Errorf("access specification: %w", err)
 		}
+		a.Access = access
 	case a.HasInput():
-		if err := validateSpecification(a.Input, inputScheme); err != nil {
+		if _, err := validateSpecification(a.Input, inputScheme); err != nil {
 			return fmt.Errorf("input specification: %w", err)
 		}
 	}
@@ -167,52 +169,56 @@ func (a *AccessOrInput) ValidateWithSchemes(accessScheme, inputScheme *runtime.S
 // validateSpecification decodes spec into the type registered for it and, if that type implements
 // runtime.Validatable, checks it with Validate. A specification of a type that is not registered is
 // not validated.
-func validateSpecification(spec runtime.Typed, scheme *runtime.Scheme) error {
+func validateSpecification(spec runtime.Typed, scheme *runtime.Scheme) (runtime.Typed, error) {
 	if scheme == nil {
-		return nil
+		return spec, nil
 	}
 	typ := spec.GetType()
 	if typ.IsEmpty() || !scheme.IsRegistered(typ) {
-		return nil
+		return spec, nil
 	}
 
 	obj, err := decodeSpecification(spec, typ, scheme)
 	if err != nil {
-		return fmt.Errorf("type %q cannot be decoded: %w", typ, err)
+		return nil, fmt.Errorf("type %q cannot be decoded: %w", typ, err)
 	}
 
 	validatable, ok := obj.(runtime.Validatable)
 	if !ok {
-		return nil
+		return spec, nil
 	}
 	if err := validatable.Validate(); err != nil {
-		return fmt.Errorf("type %q is invalid: %w", typ, err)
+		return nil, fmt.Errorf("type %q is invalid: %w", typ, err)
 	}
 
-	return nil
+	if normalizer, ok := obj.(interface {
+		NormalizeTyped() (runtime.Typed, error)
+	}); ok {
+		normalized, err := normalizer.NormalizeTyped()
+		if err != nil {
+			return nil, fmt.Errorf("type %q cannot be normalized: %w", typ, err)
+		}
+		raw := &runtime.Raw{}
+		if err := scheme.Convert(normalized, raw); err != nil {
+			return nil, fmt.Errorf("type %q cannot be encoded after normalization: %w", typ, err)
+		}
+		return raw, nil
+	}
+	return spec, nil
 }
 
 // decodeSpecification decodes spec into the type registered for it, rejecting any field that the
 // type does not declare. Decoding with json.Unmarshal drops unknown fields silently, which turns a
 // misspelled option into a silently ignored one: an input written with "compres" instead of
 // "compress" would be accepted and then stored uncompressed.
-//
-// json.Decoder reports the first unknown field it meets, not all of them.
 func decodeSpecification(spec runtime.Typed, typ runtime.Type, scheme *runtime.Scheme) (runtime.Typed, error) {
-	data, err := json.Marshal(spec)
-	if err != nil {
-		return nil, fmt.Errorf("type %q cannot be encoded: %w", typ, err)
-	}
-
 	obj, err := scheme.NewObject(typ)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create an object of type %q: %w", typ, err)
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(obj); err != nil {
-		return nil, fmt.Errorf("type %q cannot be decoded: %w", typ, err)
+	if err := runtime.DecodeStrict(spec, obj); err != nil {
+		return nil, err
 	}
 
 	return obj, nil

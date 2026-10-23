@@ -144,7 +144,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
 		}
 
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{Requeue: true}, nil //nolint:staticcheck // SA1019: pending replacement, see https://github.com/open-component-model/open-component-model/issues/2120
 	}
 
 	if ocmRepo.Spec.Suspend {
@@ -215,8 +215,11 @@ func (r *Reconciler) validate(ctx context.Context, repoSpec runtime.Typed, confi
 }
 
 func (r *Reconciler) deleteRepository(ctx context.Context, obj *v1alpha1.Repository) error {
+	// Component.spec.repositoryRef is a LocalObjectReference, so only
+	// same-namespace components can reference this repository.
 	componentList := &v1alpha1.ComponentList{}
 	if err := r.List(ctx, componentList, &client.ListOptions{
+		Namespace:     obj.GetNamespace(),
 		FieldSelector: fields.OneTermEqualSelector(repositoryKey, client.ObjectKeyFromObject(obj).Name),
 	}); err != nil {
 		status.MarkNotReady(r.EventRecorder, obj, v1alpha1.DeletionFailedReason, err.Error())

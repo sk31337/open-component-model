@@ -1,8 +1,10 @@
 ---
 title: "Resource Repositories"
 description: "Technical reference for built-in resource repositories: supported access types, credential resolution, and capabilities."
-weight: 6
+weight: 4
 toc: true
+aliases:
+  - /docs/reference/resource-repositories/
 ---
 
 This page is the technical reference for built-in resource repositories. For an introduction to what resource
@@ -133,9 +135,9 @@ Handles resources served over plain HTTP or HTTPS.
 
 ### Supported Access Types
 
-| Access Type                                                           |
-|-----------------------------------------------------------------------|
-| [`Wget/v1`]({{< relref "input-and-access-types.md" >}}#wgetv1-access) |
+| Access Type                                                                                                                                             |
+|---------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`Wget/v1`]({{< relref "input-and-access-types.md" >}}#wgetv1-access), also accepted as `HTTP/v1`, `HTTP`, `http/v1`, `http`, `wget/v1`, `Wget`, `wget` |
 
 ### Capabilities
 
@@ -153,7 +155,7 @@ and stores it as a [`LocalBlob/v1`]({{< relref "input-and-access-types.md" >}}#l
 ### Credential Resolution
 
 The credential consumer identity is derived from the `url` field in the access specification. The identity type is
-`Wget`.
+`Wget`, and stays `Wget` even when the access is declared under one of the `HTTP` aliases.
 
 **Example:** For a resource with `url: https://downloads.example.com/myapp/1.0.0/myapp.tar.gz`:
 
@@ -167,7 +169,7 @@ The credential consumer identity is derived from the `url` field in the access s
 The [`Wget/v1` input type]({{< relref "input-and-access-types.md" >}}#wgetv1-input) derives the identity the same way,
 so one consumer entry covers construction and later downloads.
 
-See [Credential Consumer Identities: Wget]({{< relref "credential-consumer-identities.md" >}}#wget) for matching rules.
+See [Credential Consumer Identities: Wget / HTTP]({{< relref "credential-consumer-identities.md" >}}#wget--http) for matching rules and the accepted aliases for the consumer identity type.
 
 ### Download Behavior
 
@@ -178,7 +180,7 @@ there is no size limit by default. The media type of the blob is taken from `med
 `Content-Type` and then to `application/octet-stream`.
 
 Request timeouts, retries, and per-host settings come from the
-[HTTP client configuration]({{< relref "http-client-configuration.md" >}}).
+[HTTP client configuration]({{< relref "http-client.md" >}}).
 
 ### Digest Processing
 
@@ -190,7 +192,7 @@ changes will not verify against a previously recorded digest.
 A resource can carry a digest before it has ever been fetched: setting the optional `digest` field on the resource in
 `component-constructor.yaml` turns the recorded value into an assertion, so `ocm add cv` fails rather than recording
 whatever the server returned. See
-[Tutorial: Work with HTTP Resources]({{< relref "docs/tutorials/wget-http-resources.md#pin-a-digest" >}}).
+[Tutorial: Work with HTTP Resources]({{< relref "docs/guides/pack/add-http-resources.md#pin-a-digest" >}}).
 
 ---
 
@@ -249,7 +251,7 @@ limit by default. The media type of the blob comes from `mediaType`. If `mediaTy
 `Content-Type` of the object, and then `application/octet-stream`.
 
 Requests go through the shared OCM HTTP client, so timeouts, TLS settings and per-host overrides come from the
-[HTTP client configuration]({{< relref "http-client-configuration.md" >}}). The AWS SDK does the retries. It retries
+[HTTP client configuration]({{< relref "http-client.md" >}}). The AWS SDK does the retries. It retries
 the whole operation and signs each attempt again. The configured `retry.maxRetries` sets its attempt count. The SDK
 resolves the request host for AWS, so a per-host retry entry takes effect only for a custom `endpoint`. For AWS, the
 global setting applies.
@@ -270,6 +272,12 @@ See
 ## GitHub Resource Repository
 
 Handles source archives of a pinned commit in a GitHub (or GitHub Enterprise) repository.
+
+{{< callout context="caution" >}}
+The `GitHub/v1` access type is **deprecated**. Use the
+[Git Resource Repository](#git-resource-repository) with `Git/v1` for new resources. This
+repository stays so component versions published with `GitHub/v1` keep working.
+{{< /callout >}}
 
 ### Supported Access Types
 
@@ -335,6 +343,92 @@ and normalisation algorithms are only compared when they are set: an empty field
 
 ---
 
+## Git Resource Repository
+
+Handles snapshots of a commit in any Git repository, fetched over HTTPS, HTTP, SSH, the Git protocol or from a local
+path.
+
+### Supported Access Types
+
+| Access Type                                                                   |
+|-------------------------------------------------------------------------------|
+| [`Git/v1`]({{< relref "input-and-access-types.md" >}}#gitv1-access)           |
+
+The [`Git/v1` input type]({{< relref "input-and-access-types.md" >}}#gitv1-input) uses the same download, archive
+format and credentials.
+
+### Capabilities
+
+| Operation         | Supported |
+|-------------------|-----------|
+| Download          | Yes       |
+| Upload            | No        |
+| Digest Processing | Yes       |
+
+{{< callout context="note" >}}
+Upload is not supported: the `Git/v1` access type is a read-only source reference. A commit is pushed with Git, not
+with OCM.
+{{< /callout >}}
+
+### Credential Resolution
+
+The credential consumer identity is derived from the `repository` field in the access specification. The identity type
+is `Git`.
+
+**Example:** For a resource with `repository: https://gitlab.com/example-group/example-project.git`:
+
+| Attribute  | Value                                |
+|------------|--------------------------------------|
+| `type`     | `Git`                                |
+| `scheme`   | `https`                              |
+| `hostname` | `gitlab.com`                         |
+| `port`     | `443`                                |
+| `path`     | `example-group/example-project.git`  |
+
+Credentials are optional. See [Git credential selection]({{< relref "credential-types.md#git-credential-selection" >}})
+for supported authentication methods.
+
+See [Credential Consumer Identities: Git]({{< relref "credential-consumer-identities.md" >}}#git) for how each URL form
+maps to the identity, and for matching rules.
+
+### Download Behavior
+
+OCM fetches the pinned commit into a temporary bare repository. If the server does not allow a fetch by commit SHA, OCM
+fetches all refs instead. With only a `ref`, OCM fetches all refs and resolves the `ref` to a commit. An annotated tag
+is resolved to the commit it points to. `ref: HEAD` without a `commit` is the one case where OCM clones the whole
+repository, with all refs and tags, instead of fetching.
+
+OCM then writes the files of the commit into a gzip-compressed tar (`application/x-tgz`). It reads the Git objects
+directly, so no working tree is checked out. The archive is deterministic:
+
+- Entries are sorted by path, depth first, without a root directory.
+- Owner and group are `0`, and all modification times are the Unix epoch.
+- Files have mode `0644`, executable files and directories `0755`, and symbolic links `0777`.
+- Symbolic links are kept as links. Submodules are empty directories.
+
+The same commit therefore gives the same archive bytes with the same OCM version. A different Go version in a later
+OCM release may compress differently.
+
+The archive is streamed to a file under the `tempFolder` of the `filesystem.config.ocm.software/v1alpha1`
+configuration type. When `tempFolder` is unset, OCM uses the temporary directory of the operating system. The temporary
+Git storage is removed after the download.
+
+### Digest Processing
+
+If the access has only a `ref`, the Git digest processor resolves it to a `commit` and writes that commit onto the
+resource. This works like an OCI tag that is pinned to a digest. The `ref` stays in the access, but only as
+information. The processor hashes the archive of that commit in the same download: `SHA-256` over the compressed
+archive bytes, normalisation `genericBlobDigest/v1`.
+
+If the access already has a `commit`, the `ref` is not resolved again. A branch can move on, or be deleted after a
+merge, and that must not break a component version that has not changed.
+
+The digest is checked on every download. If the resource already declares one, the computed value must match it. The
+hash and normalisation algorithms are only compared when they are set: an empty field is filled in with the computed
+value.
+
+---
+
 ## External Resource Repositories (Plugins)
 
 External plugins declare supported access types in their capability specification and implement the same three
@@ -346,11 +440,11 @@ plugins.
 
 ## Related Documentation
 
-- [Concept: Resource Repositories]({{< relref "docs/concepts/resource-repositories.md" >}}): why resource repositories
+- [Concept: Resource Repositories]({{< relref "docs/concepts/resource-repositories.md" >}}) - why resource repositories
   exist and how they fit into OCM
-- [Reference: Input and Access Types]({{< relref "input-and-access-types.md" >}}): access type specifications handled by
+- [Reference: Input and Access Types]({{< relref "input-and-access-types.md" >}}) - access type specifications handled by
   resource repositories
-- [Reference: Credential Consumer Identities]({{< relref "credential-consumer-identities.md" >}}): identity types and
+- [Reference: Credential Consumer Identities]({{< relref "credential-consumer-identities.md" >}}) - identity types and
   matching rules for credential resolution
-- [Concept: Transfer and Transport]({{< relref "docs/concepts/transfer-concept.md" >}}): how resource repositories
+- [Concept: Transfer and Transport]({{< relref "docs/concepts/transfer-concept.md" >}}) - how resource repositories
   enable artifact transfer

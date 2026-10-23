@@ -12,6 +12,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/credentials"
 	credconfigruntime "ocm.software/open-component-model/bindings/go/credentials/spec/config/runtime"
 	credv1 "ocm.software/open-component-model/bindings/go/credentials/spec/config/v1"
+	gitcredsv1 "ocm.software/open-component-model/bindings/go/git/spec/credentials/v1"
 	gpgcredsv1alpha1 "ocm.software/open-component-model/bindings/go/gpg/spec/credentials/v1alpha1"
 	gpgidentityv1alpha1 "ocm.software/open-component-model/bindings/go/gpg/spec/identity/v1alpha1"
 	helmcredsv1 "ocm.software/open-component-model/bindings/go/helm/spec/credentials/v1"
@@ -23,6 +24,8 @@ import (
 	rsacredsv1 "ocm.software/open-component-model/bindings/go/rsa/spec/credentials/v1"
 	rsaidentityv1 "ocm.software/open-component-model/bindings/go/rsa/spec/identity/v1"
 	"ocm.software/open-component-model/bindings/go/runtime"
+	tsacredsv1alpha1 "ocm.software/open-component-model/bindings/go/signing/tsa/spec/credentials/v1alpha1"
+	tsaidentityv1alpha1 "ocm.software/open-component-model/bindings/go/signing/tsa/spec/identity/v1alpha1"
 	oidctokenv1alpha1 "ocm.software/open-component-model/bindings/go/sigstore/spec/credentials/oidcidentitytoken/v1alpha1"
 	trustedrootv1alpha1 "ocm.software/open-component-model/bindings/go/sigstore/spec/credentials/trustedroot/v1alpha1"
 	sigstoresignerv1alpha1 "ocm.software/open-component-model/bindings/go/sigstore/spec/identity/signer/v1alpha1"
@@ -30,25 +33,29 @@ import (
 )
 
 // TestCredentialTypeSchemePopulatedByBuiltinRegister verifies that calling builtin.Register
-// populates the credential type scheme inside PluginManager.CredentialRepositoryRegistry with
+// populates the credential type scheme inside PluginManager.CredentialTypeRegistry with
 // the typed consumer credential structs declared by each built-in binding
 func TestCredentialTypeSchemePopulatedByBuiltinRegister(t *testing.T) {
 	pm := manager.NewPluginManager(context.Background())
-	require.NoError(t, builtin.Register(pm, &filesystemv1alpha1.Config{}, &httpv1alpha1.Config{}, slog.Default()))
+	require.NoError(t, builtin.Register(pm, &filesystemv1alpha1.Config{}, &httpv1alpha1.Config{}, nil, slog.Default()))
 
-	scheme := pm.CredentialRepositoryRegistry.GetCredentialTypeScheme()
+	scheme := pm.CredentialTypeRegistry.GetCredentialTypeScheme()
 	require.NotNil(t, scheme)
 
 	tests := []struct {
 		name          string
 		versionedType runtime.Type
 	}{
+		{"GitHTTPSCredentials/v1", runtime.NewVersionedType(gitcredsv1.GitHTTPSCredentialsType, gitcredsv1.Version)},
+		{"GitBearerCredentials/v1", runtime.NewVersionedType(gitcredsv1.GitBearerCredentialsType, gitcredsv1.Version)},
+		{"GitSSHCredentials/v1", runtime.NewVersionedType(gitcredsv1.GitSSHCredentialsType, gitcredsv1.Version)},
 		{"OCICredentials/v1", runtime.NewVersionedType(ocicredsv1.OCICredentialsType, ocicredsv1.Version)},
 		{"HelmHTTPCredentials/v1", runtime.NewVersionedType(helmcredsv1.HelmHTTPCredentialsType, helmcredsv1.Version)},
 		{"RSACredentials/v1", rsacredsv1.VersionedType},
 		{"GPGCredentials/v1alpha1", runtime.NewVersionedType(gpgcredsv1alpha1.GPGCredentialsType, gpgcredsv1alpha1.Version)},
 		{"OIDCIdentityToken/v1alpha1", oidctokenv1alpha1.VersionedType},
 		{"TrustedRoot/v1alpha1", trustedrootv1alpha1.VersionedType},
+		{"TSACredentials/v1alpha1", tsacredsv1alpha1.VersionedType},
 	}
 
 	for _, tc := range tests {
@@ -66,7 +73,7 @@ func TestCredentialGraphResolvesTypedCredentials(t *testing.T) {
 	ctx := t.Context()
 
 	pm := manager.NewPluginManager(ctx)
-	require.NoError(t, builtin.Register(pm, &filesystemv1alpha1.Config{}, &httpv1alpha1.Config{}, slog.Default()))
+	require.NoError(t, builtin.Register(pm, &filesystemv1alpha1.Config{}, &httpv1alpha1.Config{}, nil, slog.Default()))
 
 	tests := []struct {
 		name       string
@@ -74,6 +81,33 @@ func TestCredentialGraphResolvesTypedCredentials(t *testing.T) {
 		credential runtime.Typed
 		assertType func(t *testing.T, resolved runtime.Typed)
 	}{
+		{
+			name:       "GitHTTPSCredentials/v1",
+			identity:   runtime.Identity{"type": "Git", "hostname": "git.example.com"},
+			credential: &gitcredsv1.GitHTTPSCredentials{Type: runtime.NewVersionedType(gitcredsv1.GitHTTPSCredentialsType, gitcredsv1.Version), Username: "user", Password: "access-token"},
+			assertType: func(t *testing.T, resolved runtime.Typed) {
+				t.Helper()
+				require.Equal(t, &gitcredsv1.GitHTTPSCredentials{Type: runtime.NewVersionedType(gitcredsv1.GitHTTPSCredentialsType, gitcredsv1.Version), Username: "user", Password: "access-token"}, resolved)
+			},
+		},
+		{
+			name:       "GitBearerCredentials/v1",
+			identity:   runtime.Identity{"type": "Git", "hostname": "git.example.com"},
+			credential: &gitcredsv1.GitBearerCredentials{Type: runtime.NewVersionedType(gitcredsv1.GitBearerCredentialsType, gitcredsv1.Version), Token: "access-token"},
+			assertType: func(t *testing.T, resolved runtime.Typed) {
+				t.Helper()
+				require.Equal(t, &gitcredsv1.GitBearerCredentials{Type: runtime.NewVersionedType(gitcredsv1.GitBearerCredentialsType, gitcredsv1.Version), Token: "access-token"}, resolved)
+			},
+		},
+		{
+			name:       "GitSSHCredentials/v1",
+			identity:   runtime.Identity{"type": "Git", "hostname": "git.example.com"},
+			credential: &gitcredsv1.GitSSHCredentials{Type: runtime.NewVersionedType(gitcredsv1.GitSSHCredentialsType, gitcredsv1.Version), Username: "git", PrivateKey: "/keys/key", Passphrase: "key-passphrase"},
+			assertType: func(t *testing.T, resolved runtime.Typed) {
+				t.Helper()
+				require.Equal(t, &gitcredsv1.GitSSHCredentials{Type: runtime.NewVersionedType(gitcredsv1.GitSSHCredentialsType, gitcredsv1.Version), Username: "git", PrivateKey: "/keys/key", Passphrase: "key-passphrase"}, resolved)
+			},
+		},
 		{
 			name: "OCICredentials/v1",
 			identity: runtime.Identity{
@@ -181,6 +215,22 @@ func TestCredentialGraphResolvesTypedCredentials(t *testing.T) {
 			},
 		},
 		{
+			name: "TSACredentials/v1alpha1",
+			identity: runtime.Identity{
+				"type": tsaidentityv1alpha1.VersionedType.String(),
+			},
+			credential: &tsacredsv1alpha1.TSACredentials{
+				Type:             tsacredsv1alpha1.VersionedType,
+				RootCertsPEMFile: "/path/to/tsa-root.pem",
+			},
+			assertType: func(t *testing.T, resolved runtime.Typed) {
+				t.Helper()
+				creds, ok := resolved.(*tsacredsv1alpha1.TSACredentials)
+				require.True(t, ok, "expected *TSACredentials, got %T", resolved)
+				require.Equal(t, "/path/to/tsa-root.pem", creds.RootCertsPEMFile)
+			},
+		},
+		{
 			name: "Credentials/v1 falls back to DirectCredentials",
 			identity: runtime.Identity{
 				"type":     credidentityv1.Type.String(),
@@ -208,7 +258,7 @@ func TestCredentialGraphResolvesTypedCredentials(t *testing.T) {
 			}
 
 			graph, err := credentials.ToGraph(ctx, cfg, credentials.Options{
-				CredentialTypeSchemeProvider: pm.CredentialRepositoryRegistry,
+				CredentialTypeSchemeProvider: pm.CredentialTypeRegistry,
 			})
 			require.NoError(t, err)
 

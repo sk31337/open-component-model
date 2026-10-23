@@ -24,6 +24,11 @@ Resources can be accessed either locally or via a plugin that supports remote fe
 
 When --output is not provided, the output filename is the resource name.
 
+A reference can pin the component version with a digest: "{component}[:{version}]@sha256:<hex>" (OCI digest
+of the artifact the component version is stored as, which local resources are then read from) or
+"{component}:{version}@jsonNormalisation.v4alpha1+sha256:<hex>" (normalized: the digest signatures sign).
+See "ocm get cv --help" for when to use which. The resource content is then verified against its digest in the pinned descriptor.
+
 With --sbom, the Software Bills of Materials describing the resource are downloaded instead of the
 resource itself. This is EXPERIMENTAL: what is discovered, how it is written out and the flags
 themselves may change in a future release. They are looked for in two ways, in order:
@@ -46,23 +51,23 @@ ocm download resource [flags]
 ### Examples
 
 ```
- # Download a resource with identity 'name=example' and write to default output
-  ocm download resource ghcr.io/org/component:v1 --identity name=example
+ # Download a resource with identity 'name=image' and write to default output
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image
 
-  # Download a resource with identity 'name=example' and 'architecture=amd64' and write to default output
-  ocm download resource ghcr.io/org/component:v1 --identity name=example,architecture=amd64
+  # Download a resource with identity 'name=cli', 'architecture=amd64' and 'os=windows' and write to default output
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=cli,architecture=amd64,os=windows
 
   # Download a resource and specify an output file
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --output ./my-resource.tar.gz
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --output ./ocmcli-image-0.17.0/
 
   # Download a resource and apply a transformer
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --transformer my-transformer
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --transformer my-transformer
 
   # Download every SBOM describing a resource into a directory
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --sbom --output ./sboms
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --sbom --output ./sboms
 
   # Scan every SBOM found for a resource
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --sbom | xargs -n1 grype sbom:
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --sbom | xargs -n1 grype sbom:
 ```
 
 ### Options
@@ -99,6 +104,9 @@ ocm download resource [flags]
                                            If multiple configuration files are found, they will be merged in the order they are discovered.
                                            Later entries have higher priority.
                                            Using the option, the specified configuration file(s) will be used instead of the lookup above.
+                                           Use "-" to read configuration documents from stdin. It is an entry like any other: on its own it
+                                           replaces the lookup above, so add --config <file> to keep a file, and a repeated "-" is ignored.
+                                           Other documents on stdin stay there for commands that read it, such as transfer with --transfer-spec -.
       --logformat enum                     set the log output format that is used to print individual logs
                                               json: Output logs in JSON format, suitable for machine processing
                                               text: Output logs in human-readable text format, suitable for console output

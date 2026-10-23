@@ -56,10 +56,22 @@ Take a look at our [installation guide](https://ocm.software/docs/getting-starte
 ## Deployers
 
 The OCM Kubernetes Controller Toolkit is deployer-agnostic: the kro.run `ResourceGraphDefinition` (RGD) you write determines
-which tool reconciles the final workload. Both **FluxCD** and **ArgoCD** are supported and tested.
+which tool reconciles the final workload. **FluxCD**, **ArgoCD**, and **Crossplane** are supported and tested.
 
 See the working examples under [`examples/`](./examples/) — each `rgd.yaml` contains both a FluxCD and an
-ArgoCD deployer block side by side.
+ArgoCD deployer block side by side, and the `crossplane-composition.yaml`/`crossplane-instance.yaml` pair shows the
+same deployment driven by a Crossplane Composition.
+
+
+## Discovery
+
+The `Discovery` controller resolves a component graph and puts the resulting component
+descriptor into the `status` of the `Discovery` object. It selects a repository per component
+identity, using the effective OCM configuration (including inherited config and credentials) and
+following the same resolver precedence as the `ocm` CLI.
+
+To read more about how the `Discovery` works and how it could be used to fetch available
+versions of certain components, please read the [Discovery Controller Documentation](https://ocm.software/docs/how-to/discover-component-graphs).
 
 ## Development
 
@@ -69,7 +81,7 @@ ArgoCD deployer block side by side.
 |---|---|
 | `task test/e2e/setup/local` | Create `ocm-e2e` Kind cluster with kro, FluxCD, and ArgoCD installed |
 | `task test/e2e/setup/teardown` | Delete the `ocm-e2e` cluster and its registry container |
-| `task test/e2e` | Run e2e tests against the running cluster. Pass ginkgo flags after `--`, e.g. `task test/e2e -- -ginkgo.focus=helm-simple` |
+| `task test/e2e` | Run e2e tests against the running cluster (4 parallel Ginkgo processes). Pass Ginkgo CLI flags after `--`, e.g. `task test/e2e -- --focus=helm-simple` |
 | `task test/e2e/fresh` | Tear down + setup + run in one shot. Accepts the same ginkgo flags |
 
 ## Contributing

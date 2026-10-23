@@ -2,10 +2,12 @@ package internal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base32"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 
@@ -23,6 +25,10 @@ import (
 type discoveryValue struct {
 	Descriptor       *descriptor.Descriptor
 	SourceRepository runtime.Typed
+	// Pin is the OCI digest of the source artifact the descriptor was read from if the
+	// component version is pinned to it (see [repository.DigestPinnableRepository]), else empty.
+	// Local resources are then read from the same artifact.
+	Pin string
 }
 
 // multiResolver dispatches component version resolution to per-component resolvers.
@@ -32,9 +38,12 @@ type discoveryValue struct {
 // The resolverMap is shared with the discoverer so that recursively discovered children
 // inherit their parent's resolver (see discoverer.Discover).
 type multiResolver struct {
-	mu             *sync.Mutex // shared with discoverer to protect resolverMap
-	resolverMap    map[string]resolvers.ComponentVersionRepositoryResolver
-	expectedDigest func(id runtime.Identity) *descriptor.Digest
+	mu          *sync.Mutex // shared with discoverer to protect resolverMap
+	resolverMap map[string]resolvers.ComponentVersionRepositoryResolver
+	// rootPin returns the digest a root component key is pinned to, nil if it is not pinned.
+	rootPin func(key string) *descriptor.Digest
+	// expectedDigests returns the digests parents' component references expect for id.
+	expectedDigests func(id runtime.Identity) []descriptor.Digest
 }
 
 // Resolve fetches the component descriptor for the given key from the appropriate resolver.
@@ -44,8 +53,10 @@ type multiResolver struct {
 //   - If the spec is nil (e.g., when using FromRepository which wraps a concrete repo directly),
 //     it falls back to GetComponentVersionRepositoryForComponent.
 //
-// After fetching the descriptor, it optionally verifies the digest against the expected value
-// recorded during recursive discovery of parent component references.
+// The descriptor is verified against the root pin of the component version and against the
+// digest recorded during recursive discovery of parent component references; if both exist,
+// both must match. An OCI digest root pin (see [repository.ParseDigestPin]) reads the component
+// version from the artifact with that digest instead of resolving the version tag.
 func (r *multiResolver) Resolve(ctx context.Context, key string) (*discoveryValue, error) {
 	parts := strings.SplitN(key, ":", 2)
 	if len(parts) != 2 {
@@ -88,9 +99,26 @@ func (r *multiResolver) Resolve(ctx context.Context, key string) (*discoveryValu
 		repo = resolved
 	}
 
-	desc, err := repo.GetComponentVersion(ctx, component, version)
+	pin := r.rootPin(key)
+	_, desc, err := repository.GetPinnedComponentVersion(ctx, repo, component, version, pin)
 	if err != nil {
 		return nil, fmt.Errorf("failed getting component version %s:%s: %w", component, version, err)
+	}
+
+	// Every digest a parent's reference expects must match. They may be spelled differently
+	// (hash or normalisation algorithm) and still all be valid for the same descriptor.
+	for _, expected := range r.expectedDigests(runtime.Identity{
+		descriptor.IdentityAttributeName:    component,
+		descriptor.IdentityAttributeVersion: version,
+	}) {
+		slog.DebugContext(ctx, "verifying digest for resolved descriptor",
+			"component", component, "version", version,
+			"expectedDigest", expected.Value)
+		if err := signing.VerifyDigestMatchesDescriptor(
+			ctx, desc, descriptor.Signature{Digest: expected}, slog.Default(),
+		); err != nil {
+			return nil, fmt.Errorf("failed verifying resolved descriptor matches expected digest: %w", err)
+		}
 	}
 
 	slog.DebugContext(ctx, "resolved component version",
@@ -98,21 +126,14 @@ func (r *multiResolver) Resolve(ctx context.Context, key string) (*discoveryValu
 		"resources", len(desc.Component.Resources),
 		"references", len(desc.Component.References))
 
-	if expected := r.expectedDigest(desc.Component.ToIdentity()); expected != nil {
-		slog.DebugContext(ctx, "verifying digest for resolved descriptor",
-			"component", component, "version", version,
-			"expectedDigest", expected.Value)
-		if err := signing.VerifyDigestMatchesDescriptor(
-			ctx, desc, descriptor.Signature{Digest: *expected}, slog.Default(),
-		); err != nil {
-			return nil, fmt.Errorf("failed verifying resolved descriptor matches expected digest: %w", err)
-		}
-	}
-
-	return &discoveryValue{
+	value := &discoveryValue{
 		Descriptor:       desc,
 		SourceRepository: repoSpec,
-	}, nil
+	}
+	if pin != nil && pin.NormalisationAlgorithm == "" {
+		value.Pin = repository.FormatDigestPin(pin)
+	}
+	return value, nil
 }
 
 // discoverer implements the dagsync.Discoverer interface for recursive component reference traversal.
@@ -138,8 +159,9 @@ type discoverer struct {
 
 	// discoveredDigests stores expected digests from component references.
 	// When a parent references a child with a pinned digest, the digest is recorded here
-	// and later verified by the multiResolver after fetching the child descriptor.
-	discoveredDigests map[string]descriptor.Digest
+	// and later verified by the multiResolver after fetching the child descriptor. All
+	// distinct digests of a child are kept, so a later parent cannot replace an earlier one.
+	discoveredDigests map[string][]descriptor.Digest
 
 	// targetMap tracks which target repositories each component should be transferred to.
 	// Seeded from explicit TransferRoots and propagated to children during Discover.
@@ -185,8 +207,11 @@ func (d *discoverer) Discover(ctx context.Context, parent *discoveryValue) ([]st
 
 		// Record expected digest for later verification during resolution.
 		if ref.Digest.Value != "" {
+			id := ref.ToComponentIdentity().String()
 			d.mu.Lock()
-			d.discoveredDigests[ref.ToComponentIdentity().String()] = ref.Digest
+			if !slices.Contains(d.discoveredDigests[id], ref.Digest) {
+				d.discoveredDigests[id] = append(d.discoveredDigests[id], ref.Digest)
+			}
 			d.mu.Unlock()
 		}
 
@@ -229,35 +254,28 @@ func (d *discoverer) Discover(ctx context.Context, parent *discoveryValue) ([]st
 	return children, nil
 }
 
-var toWordRunes = []rune{',', '.', '/', '-'}
-
-// identityToTransformationID converts a component identity (name + version) to a camelCase
-// transformation ID suitable for use as a DAG vertex key. The identity map keys are sorted
-// alphabetically for determinism, and separator characters (dots, slashes, dashes, commas)
-// are treated as word boundaries for camelCase conversion.
+// identityToTransformationID derives a stable, opaque transformation ID from a component or
+// resource identity. The identity map keys are sorted alphabetically and the key/value pairs
+// are serialized with NUL separators, then hashed with SHA-256. The sorting makes the digest
+// independent of map iteration order, and the NUL separators prevent key/value pairs from
+// combining into the same byte stream, e.g. {"ab": "c"} and {"a": "bc"}.
 //
-// Example: {"name": "ocm.software/my-app", "version": "1.0.0"} → "transformOcmSoftwareMyApp100"
+// IDs must satisfy (^[a-z][a-zA-Z0-9]*$), so we prefix with a 't' and use base32 for the
+// rest of the ID. We use 8 bytes of the 32 byte digest to not explode the ID length.
+// 8 bytes of entropy is plenty, collision probability ~1 in 10⁹ chance at around 6000 nodes
+//
+// Example: {"name": "ocm.software/my-app", "version": "1.0.0"} -> "tamgtopseg3tay"
 func identityToTransformationID(id runtime.Identity) string {
-	// TODO(jakobmoellerdev): decide if we really wanna keep such strict limits on transformation ids,
-	//   if we really dont need them to be that strict.
-	//   Currently Im forced to convert a map to a camel case string here.
-	words := []string{"transform"}
-	keys := make([]string, 0, len(id))
-	for k := range id {
-		keys = append(keys, k)
+	keys := slices.Sorted(maps.Keys(id))
+	hash := sha256.New()
+	for _, key := range keys {
+		hash.Write([]byte(key))
+		hash.Write([]byte{0})
+		hash.Write([]byte(id[key]))
+		hash.Write([]byte{0})
 	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		words = append(words, strings.FieldsFunc(id[k], func(r rune) bool {
-			return slices.Contains(toWordRunes, r)
-		})...)
-	}
-	result := strings.ToLower(words[0])
-	for i := 1; i < len(words); i++ {
-		w := strings.ToLower(words[i])
-		if len(w) > 0 {
-			result += strings.ToUpper(w[:1]) + w[1:]
-		}
-	}
-	return result
+	return "t" + base32Lower.EncodeToString(hash.Sum(nil)[:8])
 }
+
+// Standard base32 is shouty due to uppercase characters, use lowercase instead, no other difference
+var base32Lower = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
