@@ -102,7 +102,7 @@ func prepareOCMwithCredentials(ctx SpecContext, testName string, testdata string
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred())
 
-	ctfRef := "ctf::" + ctfDir + "//ocm.software/ocm-k8s-toolkit/" + testName + ":1.0.0"
+	ctfRef := "ctf::" + ctfDir + "//ocm.software/ocm-k8s-toolkit/" + testName
 	cmd = exec.CommandContext(ctx, ocm,
 		"transfer", "cv",
 		ctfRef,
