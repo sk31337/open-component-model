@@ -1,12 +1,31 @@
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	v2 "ocm.software/open-component-model/bindings/go/descriptor/v2"
 	"ocm.software/open-component-model/bindings/go/runtime"
 )
+
+// Selector filters elements of the transitive component graph of a Discovery.
+// All specified clauses are ANDed. A nil or empty selector matches everything.
+type Selector struct {
+	// MatchIdentity matches elements whose identity contains all specified
+	// key-value pairs. Keys must be present even when compared against an
+	// empty value.
+	// +optional
+	MatchIdentity map[string]string `json:"matchIdentity,omitempty"`
+
+	// MatchLabels matches elements carrying labels with the specified string
+	// values. Non-string label values are matched via Expression only.
+	// +optional
+	MatchLabels map[string]string `json:"matchLabels,omitempty"`
+
+	// Expression is a CEL expression evaluated for each element. It must
+	// evaluate to a boolean. An empty expression is a no-op.
+	// +optional
+	Expression string `json:"expression,omitempty"`
+}
 
 // NamespacedObjectKindReference contains enough information to locate the typed referenced Kubernetes resource object
 // in any namespace.
@@ -38,7 +57,7 @@ const (
 // OCMConfiguration defines a configuration applied to the reconciliation of an
 // ocm k8s object as well as the policy for its propagation of this
 // configuration.
-// +kubebuilder:validation:XValidation:rule="((!has(self.apiVersion) || self.apiVersion == \"\" || self.apiVersion == \"v1\") && (self.kind == \"Secret\" || self.kind == \"ConfigMap\")) || (self.apiVersion == \"delivery.ocm.software/v1alpha1\" && (self.kind == \"Repository\" || self.kind == \"Component\" || self.kind == \"Resource\" || self.kind == \"Replication\"))",message="apiVersion must be one of \"v1\" with kind \"Secret\" or \"ConfigMap\" or \"delivery.ocm.software/v1alpha1\" with the kind of an OCM kubernetes object"
+// +kubebuilder:validation:XValidation:rule="((!has(self.apiVersion) || self.apiVersion == \"\" || self.apiVersion == \"v1\") && (self.kind == \"Secret\" || self.kind == \"ConfigMap\")) || (self.apiVersion == \"delivery.ocm.software/v1alpha1\" && (self.kind == \"Repository\" || self.kind == \"Component\" || self.kind == \"Resource\"))",message="apiVersion must be one of \"v1\" with kind \"Secret\" or \"ConfigMap\" or \"delivery.ocm.software/v1alpha1\" with the kind of an OCM kubernetes object"
 type OCMConfiguration struct {
 	// Ref reference config maps or secrets containing arbitrary
 	// ocm config data (in the ocm config file or .dockerconfigjson format), or other configurable
@@ -59,25 +78,6 @@ type ObjectKey struct {
 	Namespace string `json:"namespace,omitempty"`
 	// +required
 	Name string `json:"name,omitempty"`
-}
-
-type Verification struct {
-	// Signature defines the name of the signature to be verified in the component version.
-	// +required
-	Signature string `json:"signature,omitempty"`
-	// Public Key Secret Format
-	// A secret containing public keys for signature verification is expected to be of the structure:
-	//
-	//  Data:
-	//	  <Signature-Name>: <PublicKey/Certificate>
-	//
-	// Additionally, to prepare for a common ocm secret management, it might make sense to introduce a specific secret type
-	// for these secrets.
-	// +optional
-	SecretRef corev1.LocalObjectReference `json:"secretRef,omitempty"`
-	// Value defines a PEM/base64 encoded public key value.
-	// +optional
-	Value string `json:"value,omitempty"`
 }
 
 // ResourceID defines the configuration of the repository.

@@ -1,9 +1,13 @@
 package http_test
 
 import (
+	"bytes"
+	"compress/gzip"
+	"io"
 	nethttp "net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,7 +106,6 @@ func TestNew(t *testing.T) {
 		_, isRetry := c.Transport.(*retry.Transport)
 		assert.False(t, isRetry, "expected hostRouter to wrap the retry transport when Hosts is set")
 	})
-
 }
 
 func TestNewClient_PerHostRouting(t *testing.T) {
@@ -136,13 +139,13 @@ func TestNewClient_PerHostRouting(t *testing.T) {
 	}
 	c := ocmhttp.NewClient(cfg)
 
-	_, err := c.Get(slow.URL)
+	_, err := getURL(t, c, slow.URL)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timeout awaiting response headers")
 
 	// Request to the unmatched host uses the global config (no
 	// responseHeaderTimeout) and completes normally.
-	resp, err := c.Get(fast.URL)
+	resp, err := getURL(t, c, fast.URL)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 }
@@ -156,10 +159,86 @@ func TestNew_UserAgent_RoundTrip(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := ocmhttp.New(ocmhttp.WithUserAgent("ocm/1.0"))
-	resp, err := c.Get(srv.URL)
+	resp, err := getURL(t, c, srv.URL)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	assert.Equal(t, "ocm/1.0", gotUA)
+}
+
+func TestNew_Compression(t *testing.T) {
+	payload := []byte(strings.Repeat("ocm compression payload\n", 64))
+	stored := gz(t, payload)
+
+	var gotAcceptEncoding string
+	mux := nethttp.NewServeMux()
+	mux.HandleFunc("/", func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		gotAcceptEncoding = r.Header.Get("Accept-Encoding")
+		if strings.Contains(gotAcceptEncoding, "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			_, _ = w.Write(gz(t, payload))
+			return
+		}
+		_, _ = w.Write(payload)
+	})
+	// /stored serves an object stored gzipped, announced via Content-Encoding
+	// regardless of what the client asked for.
+	mux.HandleFunc("/stored", func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(stored)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	get := func(t *testing.T, c *nethttp.Client, path string) []byte {
+		t.Helper()
+		r := require.New(t)
+		resp, err := getURL(t, c, srv.URL+path)
+		r.NoError(err)
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		body, err := io.ReadAll(resp.Body)
+		r.NoError(err)
+		return body
+	}
+
+	t.Run("default does not request compression", func(t *testing.T) {
+		r := require.New(t)
+		body := get(t, ocmhttp.New(), "/")
+		r.Empty(gotAcceptEncoding)
+		r.Equal(payload, body)
+	})
+
+	t.Run("default returns stored gzip bytes undecoded", func(t *testing.T) {
+		r := require.New(t)
+		r.Equal(stored, get(t, ocmhttp.New(), "/stored"))
+	})
+
+	t.Run("WithCompression requests and decodes gzip", func(t *testing.T) {
+		r := require.New(t)
+		body := get(t, ocmhttp.New(ocmhttp.WithCompression()), "/")
+		r.Equal("gzip", gotAcceptEncoding)
+		r.Equal(payload, body)
+	})
+
+	t.Run("per-host chain returns stored gzip bytes undecoded", func(t *testing.T) {
+		r := require.New(t)
+		cfg := &httpv1alpha1.Config{
+			Hosts: map[string]*httpv1alpha1.HostConfig{
+				mustHost(t, srv.URL): {},
+			},
+		}
+		r.Equal(stored, get(t, ocmhttp.New(ocmhttp.WithConfig(cfg)), "/stored"))
+	})
+}
+
+// gz returns the gzip encoding of b.
+func gz(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err := zw.Write(b)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
 }
 
 func TestNew_NilHostEntry_Skipped(t *testing.T) {
@@ -189,7 +268,7 @@ func TestNew_NilHostEntry_Skipped(t *testing.T) {
 	_, isTransport := c.Transport.(*nethttp.Transport)
 	assert.True(t, isTransport, "expected plain *http.Transport, not a hostRouter, got %T", c.Transport)
 
-	resp, err := c.Get(srv.URL)
+	resp, err := getURL(t, c, srv.URL)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 }
@@ -221,7 +300,7 @@ func TestRetryConfig_Wiring(t *testing.T) {
 			},
 		}
 		c := ocmhttp.New(ocmhttp.WithConfig(cfg))
-		resp, err := c.Get(srv.URL)
+		resp, err := getURL(t, c, srv.URL)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 		assert.Equal(t, 6, hits, "default 5 retries = 1 initial + 5 attempts")
@@ -245,7 +324,7 @@ func TestRetryConfig_Wiring(t *testing.T) {
 			},
 		}
 		c := ocmhttp.New(ocmhttp.WithConfig(cfg))
-		resp, err := c.Get(srv.URL)
+		resp, err := getURL(t, c, srv.URL)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 		assert.Equal(t, 1, hits, "maxRetries:-1 must not retry")
@@ -271,7 +350,7 @@ func TestRetryConfig_Wiring(t *testing.T) {
 			},
 		}
 		c := ocmhttp.New(ocmhttp.WithConfig(cfg))
-		resp, err := c.Get(srv.URL)
+		resp, err := getURL(t, c, srv.URL)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 		assert.Equal(t, 3, hits, "maxRetries:2 = 1 initial + 2 retries")
@@ -306,10 +385,19 @@ func TestRetryConfig_Wiring(t *testing.T) {
 			},
 		}
 		c := ocmhttp.New(ocmhttp.WithConfig(cfg))
-		resp, err := c.Get(srv.URL)
+		resp, err := getURL(t, c, srv.URL)
 		require.NoError(t, err)
 		_ = resp.Body.Close()
 		// Per-host maxRetries:-1 overrides global maxRetries:2 — exactly 1 hit.
 		assert.Equal(t, 1, hits, "per-host maxRetries:-1 must override global maxRetries:2")
 	})
+}
+
+// getURL issues a GET with the test context, replacing (*http.Client).Get so the
+// request is cancellation-aware (noctx).
+func getURL(t *testing.T, c *nethttp.Client, url string) (*nethttp.Response, error) {
+	t.Helper()
+	req, err := nethttp.NewRequestWithContext(t.Context(), nethttp.MethodGet, url, nil)
+	require.NoError(t, err)
+	return c.Do(req)
 }

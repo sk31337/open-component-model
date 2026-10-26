@@ -58,6 +58,11 @@ Resources can be accessed either locally or via a plugin that supports remote fe
 
 When --output is not provided, the output filename is the resource name.
 
+A reference can pin the component version with a digest: "{component}[:{version}]@sha256:<hex>" (OCI digest
+of the artifact the component version is stored as, which local resources are then read from) or
+"{component}:{version}@jsonNormalisation.v4alpha1+sha256:<hex>" (normalized: the digest signatures sign).
+See "ocm get cv --help" for when to use which. The resource content is then verified against its digest in the pinned descriptor.
+
 With --sbom, the Software Bills of Materials describing the resource are downloaded instead of the
 resource itself. This is EXPERIMENTAL: what is discovered, how it is written out and the flags
 themselves may change in a future release. They are looked for in two ways, in order:
@@ -72,23 +77,23 @@ Every SBOM found is written to its own file in a directory, byte for byte as pub
 and signatures over them still apply. The directory is --output, or the values of the resource
 identity joined by "-" when that is not given, so --identity name=image,architecture=amd64 writes
 into "image-amd64". The paths written are printed to standard output, one per line.`,
-		Example: ` # Download a resource with identity 'name=example' and write to default output
-  ocm download resource ghcr.io/org/component:v1 --identity name=example
+		Example: ` # Download a resource with identity 'name=image' and write to default output
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image
 
-  # Download a resource with identity 'name=example' and 'architecture=amd64' and write to default output
-  ocm download resource ghcr.io/org/component:v1 --identity name=example,architecture=amd64
+  # Download a resource with identity 'name=cli', 'architecture=amd64' and 'os=windows' and write to default output
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=cli,architecture=amd64,os=windows
 
   # Download a resource and specify an output file
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --output ./my-resource.tar.gz
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --output ./ocmcli-image-0.17.0/
 
   # Download a resource and apply a transformer
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --transformer my-transformer
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --transformer my-transformer
 
   # Download every SBOM describing a resource into a directory
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --sbom --output ./sboms
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --sbom --output ./sboms
 
   # Scan every SBOM found for a resource
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --sbom | xargs -n1 grype sbom:`,
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --sbom | xargs -n1 grype sbom:`,
 		RunE:              DownloadResource,
 		DisableAutoGenTag: true,
 	}
@@ -164,7 +169,7 @@ func DownloadResource(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("could not access ocm repository: %w", err)
 	}
 
-	desc, err := repo.GetComponentVersion(cmd.Context(), ref.Component, ref.Version)
+	repo, desc, err := ocm.GetPinnedComponentVersion(cmd.Context(), repo, ref)
 	if err != nil {
 		return fmt.Errorf("getting component version failed: %w", err)
 	}
@@ -198,7 +203,7 @@ func DownloadResource(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	data, err := shared.DownloadResourceData(cmd.Context(), pluginManager, credentialGraph, ref.Component, ref.Version, repo, res, requestedIdentity)
+	data, err := shared.DownloadResourceData(cmd.Context(), pluginManager, credentialGraph, ref, desc, repo, res, requestedIdentity)
 	if err != nil {
 		return fmt.Errorf("downloading resource for identity %q failed: %w", requestedIdentity, err)
 	}

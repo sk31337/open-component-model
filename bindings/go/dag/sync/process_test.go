@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
 	"ocm.software/open-component-model/bindings/go/dag"
 )
 
@@ -51,11 +52,11 @@ func TestProcessTopology(t *testing.T) {
 		for i, v := range order {
 			idxMap[v] = i
 		}
-		r.True(idxMap["A"] < idxMap["B"], "A before B")
-		r.True(idxMap["A"] < idxMap["C"], "A before C")
-		r.True(idxMap["B"] < idxMap["D"], "B before D")
-		r.True(idxMap["C"] < idxMap["D"], "C before D")
-		r.Equal(4, len(order), "all vertices processed")
+		r.Less(idxMap["A"], idxMap["B"], "A before B")
+		r.Less(idxMap["A"], idxMap["C"], "A before C")
+		r.Less(idxMap["B"], idxMap["D"], "B before D")
+		r.Less(idxMap["C"], idxMap["D"], "C before D")
+		r.Len(order, 4, "all vertices processed")
 	})
 
 	t.Run("returns error if processor fails", func(t *testing.T) {
@@ -123,11 +124,11 @@ func TestProcessReverseTopology(t *testing.T) {
 		for i, v := range order {
 			idxMap[v] = i
 		}
-		r.True(idxMap["D"] < idxMap["B"], "D before B")
-		r.True(idxMap["D"] < idxMap["C"], "D before C")
-		r.True(idxMap["B"] < idxMap["A"], "B before A")
-		r.True(idxMap["C"] < idxMap["A"], "C before A")
-		r.Equal(4, len(order), "all vertices processed")
+		r.Less(idxMap["D"], idxMap["B"], "D before B")
+		r.Less(idxMap["D"], idxMap["C"], "D before C")
+		r.Less(idxMap["B"], idxMap["A"], "B before A")
+		r.Less(idxMap["C"], idxMap["A"], "C before A")
+		r.Len(order, 4, "all vertices processed")
 	})
 
 	t.Run("returns error if processor fails", func(t *testing.T) {
@@ -190,4 +191,78 @@ func TestProcessTopology_ConcurrentExecution(t *testing.T) {
 	r.NoError(processor.Process(ctx))
 
 	r.LessOrEqual(int(maxConcurrent), 2, "must never exceed concurrency limit 2")
+}
+
+func TestProcessTopology_NoBatchBarrier(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+
+	// A (fast) -> C; B (slow) is an independent root.
+	// C must start as soon as A is done, without waiting for B.
+	graph := dag.NewDirectedAcyclicGraph[string]()
+	r.NoError(graph.AddVertex("A", map[string]any{AttributeValue: "A"}))
+	r.NoError(graph.AddVertex("B", map[string]any{AttributeValue: "B"}))
+	r.NoError(graph.AddVertex("C", map[string]any{AttributeValue: "C"}))
+	r.NoError(graph.AddEdge("A", "C", nil))
+
+	// B only finishes once C has started, so the old level barrier
+	// (C waits for B) times out instead of passing by scheduling luck.
+	cStarted := make(chan struct{})
+	var mu sync.Mutex
+	var processed []string
+	processorFunc := ProcessorFunc[string](func(ctx context.Context, v string) error {
+		mu.Lock()
+		processed = append(processed, v)
+		mu.Unlock()
+		switch v {
+		case "B":
+			select {
+			case <-cStarted:
+			case <-time.After(5 * time.Second):
+				return fmt.Errorf("C did not start while unrelated node B was in flight")
+			}
+		case "C":
+			close(cStarted)
+		}
+		return nil
+	})
+
+	processor := NewGraphProcessor(ToSyncedGraph(graph), &GraphProcessorOptions[string, string]{
+		Processor:   processorFunc,
+		Concurrency: 2,
+	})
+	r.NoError(processor.Process(ctx))
+	r.ElementsMatch([]string{"A", "B", "C"}, processed, "all nodes processed exactly once")
+}
+
+func TestProcessTopology_StallReturnsError(t *testing.T) {
+	r := require.New(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// R -> A -> B, then B -> A injected behind the DAG's cycle check:
+	// A and B can never become ready once R is done.
+	graph := dag.NewDirectedAcyclicGraph[string]()
+	r.NoError(graph.AddVertex("R", map[string]any{AttributeValue: "R"}))
+	r.NoError(graph.AddVertex("A", map[string]any{AttributeValue: "A"}))
+	r.NoError(graph.AddVertex("B", map[string]any{AttributeValue: "B"}))
+	r.NoError(graph.AddEdge("R", "A", nil))
+	r.NoError(graph.AddEdge("A", "B", nil))
+	graph.Vertices["B"].Edges["A"] = nil
+	graph.Vertices["B"].OutDegree++
+	graph.Vertices["A"].InDegree++
+
+	var processed atomic.Int32
+	processor := NewGraphProcessor(ToSyncedGraph(graph), &GraphProcessorOptions[string, string]{
+		Processor: ProcessorFunc[string](func(ctx context.Context, v string) error {
+			processed.Add(1)
+			return nil
+		}),
+		Concurrency: 2,
+	})
+
+	err := processor.Process(ctx)
+	r.ErrorContains(err, "2 of 3 vertices can never become ready")
+	r.NoError(ctx.Err(), "must fail fast, not wait for the context deadline")
+	r.Equal(int32(1), processed.Load(), "only the root is processed")
 }

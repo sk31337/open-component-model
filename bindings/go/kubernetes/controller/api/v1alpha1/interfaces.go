@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -42,10 +43,22 @@ type OCMK8SObject interface {
 	ConfigRefProvider
 }
 
-// VerificationProvider are objects that may provide verification information. The interface allows all implementers to
-// use the same function to retrieve and parse the contained or referenced public keys.
+// DeployerObject is implemented by Deployer and NamespacedDeployer so both kinds share one reconciler.
 // +kubebuilder:object:generate=false
-type VerificationProvider interface {
-	GetNamespace() string
-	GetVerifications() []Verification
+type DeployerObject interface {
+	OCMK8SObject
+	// ObjectKind provides the GroupVersionKind used for the ApplySet ID.
+	schema.ObjectKind
+
+	GetVID() map[string]string
+	SetObservedGeneration(v int64)
+
+	// GetResourceRef returns the referenced Resource. An empty namespace defaults to the deployer's namespace.
+	GetResourceRef() ObjectKey
+	// GetServiceAccountName returns the service account named by the object, or empty if it names none.
+	GetServiceAccountName() string
+	// GetDeletionPolicy returns how the deployed objects are removed, or empty for the API server's default.
+	GetDeletionPolicy() DeletionPolicy
+	IsSuspended() bool
+	GetDeployerStatus() *DeployerStatus
 }

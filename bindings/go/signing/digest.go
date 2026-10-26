@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/fips140"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"ocm.software/open-component-model/bindings/go/descriptor/normalisation"
+	jsonv1 "ocm.software/open-component-model/bindings/go/descriptor/normalisation/json/v1"
 	"ocm.software/open-component-model/bindings/go/descriptor/normalisation/json/v4alpha1"
 	descruntime "ocm.software/open-component-model/bindings/go/descriptor/runtime"
 )
@@ -23,6 +26,43 @@ const (
 	// It is used to prevent meaningless digest claims.
 	AccessTypeNone = "None"
 )
+
+// ErrUnsupportedDigestHash is returned when a resource or component reference
+// digest uses a hash algorithm other than SHA-256 or SHA-512.
+var ErrUnsupportedDigestHash = errors.New("unsupported digest hash algorithm")
+
+// ErrSigningUnsupported is returned by EnsureSignable for a normalisation
+// algorithm this library supports for verification only. jsonNormalisation/v1
+// is the legacy gardener/cc-utils format: OCM v2 verifies existing signatures
+// that use it but must never mint new ones. Digest computation (GenerateDigest)
+// and verification are unrestricted — only the signing boundary calls
+// EnsureSignable.
+//
+// The reason is blast radius. Verify-only means OCM v2 never puts a v1 artifact
+// into the wild, so nothing is bound to the exact bytes we emit: if our v1
+// normalisation ever carries a regression or a latent incompatibility, we can
+// simply patch it. Allowing signing would instead create a third class of
+// persisted artifact (cc-utils-signed, plus OCM-v2-signed-correct and
+// -buggy variants) that could not be fixed without invalidating signatures
+// already out there. The known fidelity gap in the stored form (the store read
+// collapses an integral float 1.0 to 1 before normalisation) is one such
+// incompatibility signing would bake in, not the whole rationale. New
+// signatures must use the current algorithm (v4alpha1).
+var ErrSigningUnsupported = errors.New("normalisation algorithm is supported for verification only, not signing")
+
+// fipsEnforced reports whether the Go Cryptographic Module enforces FIPS 140-3
+// mode (GODEBUG=fips140=only). It is a variable so tests can exercise both modes.
+var fipsEnforced = fips140.Enforced
+
+// DigestHashAlgorithmsEnforced reports whether reference and resource digests
+// must use SHA-256 or SHA-512 (see ValidateDigestHashAlgorithms). This is the
+// case with GODEBUG=fips140=only, where a signature must not rest on a
+// non-approved hash. In the default fips140=on mode and outside FIPS mode,
+// callers should log the violation instead, so existing component versions
+// with MD5 or SHA-1 digests keep working.
+func DigestHashAlgorithmsEnforced() bool {
+	return fipsEnforced()
+}
 
 // VerifyDigestMatchesDescriptor ensures that a descriptor matches a digest
 // provided by a signature. This validates descriptor integrity against the
@@ -48,7 +88,7 @@ func VerifyDigestMatchesDescriptor(
 		return fmt.Errorf("normalising component version failed: %w", err)
 	}
 
-	hash, err := getSupportedHash(signature.Digest.HashAlgorithm)
+	hash, err := GetSupportedHash(signature.Digest.HashAlgorithm)
 	if err != nil {
 		return err
 	}
@@ -66,6 +106,20 @@ func VerifyDigestMatchesDescriptor(
 
 	if !bytes.Equal(freshDigest, digestFromSignature) {
 		return fmt.Errorf("digest mismatch: descriptor %x vs signature %x", freshDigest, digestFromSignature)
+	}
+	return nil
+}
+
+// EnsureSignable is the signing boundary for the verify-only policy: it reports
+// whether a fresh signature may be minted with the given normalisation
+// algorithm. jsonNormalisation/v1 is rejected (see ErrSigningUnsupported);
+// everything else is allowed. Digest computation and verification do not call
+// this, so verifying existing v1 signatures, pins and reference digests keeps
+// working. Any signing entry point must call it before producing a signature.
+func EnsureSignable(normalisationAlgorithm string) error {
+	//nolint:staticcheck // intentionally references the deprecated verify-only v1 algorithm in order to reject it for signing
+	if normalisationAlgorithm == jsonv1.Algorithm {
+		return fmt.Errorf("%w: %q", ErrSigningUnsupported, normalisationAlgorithm)
 	}
 	return nil
 }
@@ -100,7 +154,7 @@ func GenerateDigest(
 		return nil, fmt.Errorf("normalising component version failed: %w", err)
 	}
 
-	hash, err := getSupportedHash(hashAlgorithm)
+	hash, err := GetSupportedHash(hashAlgorithm)
 	if err != nil {
 		return nil, err
 	}
@@ -127,9 +181,21 @@ func GenerateDigest(
 //     it must also have a complete digest.
 //   - Resources without access: they must not carry a digest (enforced to prevent
 //     meaningless digest claims).
+//   - Digest algorithms (GODEBUG=fips140=only, see DigestHashAlgorithmsEnforced):
+//     reference and resource digests must use SHA-256 or SHA-512. The signature
+//     covers resources and references only through these digests, so a weak
+//     hash such as MD5 or SHA-1 would let content be swapped under a valid
+//     signature. Resources explicitly excluded from the signature
+//     (NO-DIGEST / EXCLUDE-FROM-SIGNATURE) are exempt.
 //
 // Returns nil if all rules are satisfied, otherwise returns the first violation.
 func IsSafelyDigestible(cd *descruntime.Component) error {
+	if DigestHashAlgorithmsEnforced() {
+		if err := ValidateDigestHashAlgorithms(cd); err != nil {
+			return err
+		}
+	}
+
 	for _, reference := range cd.References {
 		if reference.Digest.HashAlgorithm == "" ||
 			reference.Digest.NormalisationAlgorithm == "" ||
@@ -151,6 +217,53 @@ func IsSafelyDigestible(cd *descruntime.Component) error {
 		}
 	}
 	return nil
+}
+
+// ValidateDigestHashAlgorithms checks that every set resource and component
+// reference digest uses SHA-256 or SHA-512, and returns an error wrapping
+// ErrUnsupportedDigestHash for the first one that does not. It checks
+// regardless of FIPS mode; use DigestHashAlgorithmsEnforced to decide whether a
+// violation is fatal or only logged. Empty digests and resources excluded from
+// the signature are not its concern; IsSafelyDigestible covers completeness.
+func ValidateDigestHashAlgorithms(cd *descruntime.Component) error {
+	for _, reference := range cd.References {
+		if alg := reference.Digest.HashAlgorithm; alg != "" && !isApprovedDigestHash(alg) {
+			return fmt.Errorf("%w %q in componentReference for %s:%s (use SHA-256 or SHA-512)",
+				ErrUnsupportedDigestHash, alg, reference.Name, reference.Version)
+		}
+	}
+	for _, res := range cd.Resources {
+		if res.Digest == nil || res.Digest.HashAlgorithm == "" || isExcludedFromSignature(res.Digest) {
+			continue
+		}
+		if !isApprovedDigestHash(res.Digest.HashAlgorithm) {
+			return fmt.Errorf("%w %q in resource for %s:%s (use SHA-256 or SHA-512)",
+				ErrUnsupportedDigestHash, res.Digest.HashAlgorithm, res.Name, res.Version)
+		}
+	}
+	return nil
+}
+
+// isApprovedDigestHash reports whether a reference or resource digest uses
+// SHA-256 or SHA-512. OCM writes "SHA-256"/"SHA-512"; the legacy names
+// "sha256"/"sha512" appear in older signed descriptors, which OCM v1
+// reproduces when verifying them (LegacyHashAlgorithm). They must keep
+// verifying, so the comparison ignores case and dashes.
+func isApprovedDigestHash(name string) bool {
+	switch strings.ToUpper(strings.ReplaceAll(name, "-", "")) {
+	case "SHA256", "SHA512":
+		return true
+	default:
+		return false
+	}
+}
+
+// isExcludedFromSignature reports whether a resource digest is the explicit
+// marker that keeps the resource content out of the signature. It matches the
+// marker the same way the repository's download verification does.
+func isExcludedFromSignature(d *descruntime.Digest) bool {
+	return strings.EqualFold(d.HashAlgorithm, descruntime.NoDigest) ||
+		strings.EqualFold(d.NormalisationAlgorithm, descruntime.ExcludeFromSignature)
 }
 
 // hasUsableAccess checks if a resource has an access type other than "None".
@@ -180,9 +293,9 @@ var supportedHashes = map[string]crypto.Hash{
 	crypto.SHA512.String(): crypto.SHA512,
 }
 
-// getSupportedHash looks up a crypto.Hash from its string identifier.
+// GetSupportedHash looks up a crypto.Hash from its string identifier.
 // Returns an error if the identifier is not in supportedHashes.
-func getSupportedHash(name string) (crypto.Hash, error) {
+func GetSupportedHash(name string) (crypto.Hash, error) {
 	n := strings.ToUpper(name)
 	h, ok := supportedHashes[n]
 	if !ok {

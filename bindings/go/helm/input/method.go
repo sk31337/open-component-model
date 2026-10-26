@@ -10,6 +10,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/constructor"
 	constructorruntime "ocm.software/open-component-model/bindings/go/constructor/runtime"
 	helminternal "ocm.software/open-component-model/bindings/go/helm/internal"
+	helmcreds "ocm.software/open-component-model/bindings/go/helm/spec/credentials"
 	credsv1 "ocm.software/open-component-model/bindings/go/helm/spec/credentials/v1"
 	"ocm.software/open-component-model/bindings/go/helm/spec/input"
 	"ocm.software/open-component-model/bindings/go/helm/spec/input/v1"
@@ -37,6 +38,9 @@ var _ interface {
 type InputMethod struct {
 	TempFolder string
 	HTTPConfig *httpv1alpha1.Config
+	// WorkingDirectory is the base directory used to resolve a relative local chart path.
+	// If empty, the path is resolved against the current working directory of the process.
+	WorkingDirectory string
 }
 
 // LegacyHelmChartConsumerType is the type of the identity for remote helm repositories.
@@ -103,6 +107,9 @@ func (i *InputMethod) ProcessResource(ctx context.Context, resource *constructor
 	if i.HTTPConfig != nil {
 		credOpts = append(credOpts, WithHTTPConfig(i.HTTPConfig))
 	}
+	if i.WorkingDirectory != "" {
+		credOpts = append(credOpts, WithWorkingDirectory(i.WorkingDirectory))
+	}
 
 	helmBlob, chart, err := GetV1HelmBlob(ctx, helm, i.TempFolder, credOpts...)
 	if err != nil {
@@ -157,4 +164,8 @@ func (i *InputMethod) createRemoteResourceAccess(resource *constructorruntime.Re
 	resource.Type = HelmRepositoryType
 
 	return resource, nil
+}
+
+func (i *InputMethod) GetCredentialTypeScheme() *runtime.Scheme {
+	return helmcreds.Scheme
 }

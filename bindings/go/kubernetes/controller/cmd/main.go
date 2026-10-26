@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/fips140"
 	"crypto/tls"
 	"flag"
 	"log/slog"
@@ -32,6 +33,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/controller/deployer"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/controller/deployer/cache"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/controller/deployer/dynamic"
+	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/controller/discovery"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/controller/replication"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/controller/repository"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/controller/resource"
@@ -71,6 +73,7 @@ func main() {
 		metricsAddr               string
 		enableLeaderElection      bool
 		probeAddr                 string
+		pprofAddr                 string
 		secureMetrics             bool
 		enableHTTP2               bool
 		deployerDownloadCacheSize int
@@ -81,11 +84,15 @@ func main() {
 		resolverWorkerQueueLength int
 		resolverSubscriberBuffer  int
 		resolverCacheTTL          int
+		enableDeployer            bool
+		enableNamespacedDeployer  bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metric endpoint binds to. "+
 		"Use the port :8080. If not set, it will be 0 in order to disable the metrics server")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&pprofAddr, "pprof-bind-address", ":6060",
+		"The address the pprof endpoint binds to (only used in builds with the pprof tag).")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -110,6 +117,11 @@ func main() {
 			"Tune upward if the resolver_event_channel_drops_total metric is non-zero.")
 	flag.IntVar(&resolverCacheTTL, "resolver-cache-ttl", 30, //nolint:mnd // no magic number
 		"The time-to-live (TTL) for the resolver cache entries in minutes. Setting TTL to less than 30 minutes is discouraged in productive use as it can lead to unintended performance issues.")
+
+	flag.BoolVar(&enableDeployer, "enable-deployer", true,
+		"Run the controller for the cluster-scoped Deployer.")
+	flag.BoolVar(&enableNamespacedDeployer, "enable-namespaced-deployer", true,
+		"Run the controller for the NamespacedDeployer.")
 
 	opts := zap.Options{
 		Development: true,
@@ -148,6 +160,7 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	setupLog.Info("FIPS 140-3 mode", "enabled", fips140.Enabled(), "module", fips140.Version())
 
 	ctx := context.Background()
 
@@ -198,6 +211,11 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
+	}
+
+	if pprofEnabled {
+		setupLog.Info("starting pprof server", "address", pprofAddr)
+		startPprof(pprofAddr)
 	}
 
 	ocirepository.MustAddLegacyToScheme(ocirepository.Scheme)
@@ -287,21 +305,48 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&deployer.Reconciler{
+	if err = (&discovery.Reconciler{
 		BaseReconciler: &ocm.BaseReconciler{
 			Client:           mgr.GetClient(),
 			Scheme:           mgr.GetScheme(),
 			EventRecorder:    eventsRecorder,
 			NewPluginManager: newPluginManager,
 		},
-		DownloadCache: cache.NewMemoryDigestObjectCache[string, []*unstructured.Unstructured]("deployer_download_cache", deployerDownloadCacheSize, func(k string, v []*unstructured.Unstructured) {
-			setupLog.Info("evicting deployment objects from cache", "key", k, "count", len(v))
-		}),
-		Resolver:             resolver,
-		MaxResourceSizeBytes: maxResourceSizeBytes,
 	}).SetupWithManager(ctx, mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Deployer")
+		setupLog.Error(err, "unable to create controller", "controller", "Discovery")
 		os.Exit(1)
+	}
+
+	downloadCache := cache.NewMemoryDigestObjectCache[string, []*unstructured.Unstructured]("deployer_download_cache", deployerDownloadCacheSize, func(k string, v []*unstructured.Unstructured) {
+		setupLog.Info("evicting deployment objects from cache", "key", k, "count", len(v))
+	})
+	for _, d := range []struct {
+		kind       string
+		enabled    bool
+		namespaced bool
+	}{
+		{kind: v1alpha1.KindDeployer, enabled: enableDeployer},
+		{kind: v1alpha1.KindNamespacedDeployer, enabled: enableNamespacedDeployer, namespaced: true},
+	} {
+		if !d.enabled {
+			setupLog.Info("controller disabled", "controller", d.kind)
+			continue
+		}
+		if err = (&deployer.Reconciler{
+			BaseReconciler: &ocm.BaseReconciler{
+				Client:           mgr.GetClient(),
+				Scheme:           mgr.GetScheme(),
+				EventRecorder:    eventsRecorder,
+				NewPluginManager: newPluginManager,
+			},
+			Namespaced:           d.namespaced,
+			DownloadCache:        downloadCache,
+			Resolver:             resolver,
+			MaxResourceSizeBytes: maxResourceSizeBytes,
+		}).SetupWithManager(ctx, mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", d.kind)
+			os.Exit(1)
+		}
 	}
 	if err = (&v1alpha1.Component{}).SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "Component")
@@ -309,6 +354,10 @@ func main() {
 	}
 	if err = (&v1alpha1.Deployer{}).SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "Deployer")
+		os.Exit(1)
+	}
+	if err = (&v1alpha1.NamespacedDeployer{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "NamespacedDeployer")
 		os.Exit(1)
 	}
 	if err = (&v1alpha1.Repository{}).SetupWebhookWithManager(mgr); err != nil {
