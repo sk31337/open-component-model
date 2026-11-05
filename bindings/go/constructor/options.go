@@ -7,6 +7,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/credentials"
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
 	ocmruntime "ocm.software/open-component-model/bindings/go/runtime"
+	"ocm.software/open-component-model/bindings/go/runtime/versioning"
 )
 
 // Options are the options for construction based on a *constructor.Constructor.
@@ -86,6 +87,11 @@ type Options struct {
 	// While constructing a component version, the constructor library will use the given callbacks to notify about
 	// the construction process. This can be used to implement custom logging or other actions such as progress trackers.
 	ComponentConstructionCallbacks
+
+	// VersioningRegistry defines the versioning schemes used to validate the
+	// component, resource, source, and reference versions of every constructed
+	// component. When nil, the loose-semver default is used.
+	VersioningRegistry *versioning.Registry
 }
 
 type ComponentConstructionCallbacks struct {
@@ -120,12 +126,11 @@ type ComponentConstructionCallbacks struct {
 type ComponentVersionConflictPolicy int
 
 const (
-	// ComponentVersionConflictAbortAndFail will abort the construction process if a component version already exists in the target repository.
-	// This is the default policy.
-	ComponentVersionConflictAbortAndFail ComponentVersionConflictPolicy = iota
 	// ComponentVersionConflictReplace will replace the existing component version in the target repository with the new one.
-	// This will overwrite the existing component version.
-	ComponentVersionConflictReplace
+	// This will overwrite the existing component version. This is the default policy.
+	ComponentVersionConflictReplace ComponentVersionConflictPolicy = iota
+	// ComponentVersionConflictAbortAndFail will abort the construction process if a component version already exists in the target repository.
+	ComponentVersionConflictAbortAndFail
 	// ComponentVersionConflictSkip will skip the construction of the component version if it already exists in the target repository.
 	ComponentVersionConflictSkip
 )

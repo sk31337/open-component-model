@@ -30,6 +30,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/componentversionrepository"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/credentialplugin"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/credentialrepository"
+	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/credentialtyperepository"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/digestprocessor"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/input"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/resource"
@@ -37,6 +38,7 @@ import (
 	mtypes "ocm.software/open-component-model/bindings/go/plugin/manager/types"
 	pluginruntime "ocm.software/open-component-model/bindings/go/plugin/manager/types/runtime"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/types/spec"
+	"ocm.software/open-component-model/bindings/go/repository/integrity"
 	"ocm.software/open-component-model/bindings/go/runtime"
 )
 
@@ -56,6 +58,7 @@ type PluginManager struct {
 	ResourcePluginRegistry             *resource.ResourceRegistry
 	BlobTransformerRegistry            *blobtransformer.Registry
 	SigningRegistry                    *signinghandler.SigningRegistry
+	CredentialTypeRegistry             *credentialtyperepository.CredentialTypeRegistry
 
 	mu sync.Mutex
 
@@ -66,10 +69,23 @@ type PluginManager struct {
 	baseCtx context.Context
 }
 
+// Option configures a PluginManager.
+type Option func(*PluginManager)
+
+// WithArtifactVerifier sets the verifier for OCI artifacts (OCI layouts, artifact sets) that
+// external plugins deliver as archives. Without it, plugin content recorded with an OCI
+// artifact digest cannot be verified and is refused.
+func WithArtifactVerifier(v integrity.ArtifactVerifier) Option {
+	return func(pm *PluginManager) {
+		pm.ComponentVersionRepositoryRegistry.SetArtifactVerifier(v)
+		pm.ResourcePluginRegistry.SetArtifactVerifier(v)
+	}
+}
+
 // NewPluginManager initializes the PluginManager
 // the passed ctx is used for all plugins.
-func NewPluginManager(ctx context.Context) *PluginManager {
-	return &PluginManager{
+func NewPluginManager(ctx context.Context, opts ...Option) *PluginManager {
+	pm := &PluginManager{
 		ComponentVersionRepositoryRegistry: componentversionrepository.NewComponentVersionRepositoryRegistry(ctx),
 		ComponentListerRegistry:            componentlister.NewComponentListerRegistry(ctx),
 		CredentialPluginRegistry:           credentialplugin.NewRegistry(ctx),
@@ -79,8 +95,13 @@ func NewPluginManager(ctx context.Context) *PluginManager {
 		ResourcePluginRegistry:             resource.NewResourceRegistry(ctx),
 		BlobTransformerRegistry:            blobtransformer.NewBlobTransformerRegistry(ctx),
 		SigningRegistry:                    signinghandler.NewSigningRegistry(ctx),
+		CredentialTypeRegistry:             credentialtyperepository.NewCredentialTypeRegistry(ctx),
 		baseCtx:                            ctx,
 	}
+	for _, opt := range opts {
+		opt(pm)
+	}
+	return pm
 }
 
 type RegistrationOptions struct {
@@ -314,6 +335,11 @@ func (pm *PluginManager) addPlugin(ctx context.Context, ocmConfig *genericv1.Con
 			if err := pm.CredentialRepositoryRegistry.AddPlugin(plugin, capability); err != nil {
 				return fmt.Errorf("failed to register plugin %s: %w", plugin.ID, err)
 			}
+			// The credential type registry is a type sink: it takes the credential types the
+			// plugin declares, the repository registry runs the plugin.
+			if err := pm.CredentialTypeRegistry.RegisterCustomTypes(plugin, capability.CustomCredentialTypes); err != nil {
+				return fmt.Errorf("failed to register credential types of plugin %s: %w", plugin.ID, err)
+			}
 		case *componentlisterv1.CapabilitySpec:
 			slog.DebugContext(ctx, "adding component lister plugin", "id", plugin.ID)
 			if err := pm.ComponentListerRegistry.AddPlugin(plugin, capability); err != nil {
@@ -343,6 +369,9 @@ func (pm *PluginManager) addPlugin(ctx context.Context, ocmConfig *genericv1.Con
 			slog.DebugContext(ctx, "adding credential plugin", "id", plugin.ID)
 			if err := pm.CredentialPluginRegistry.AddPlugin(plugin, capability); err != nil {
 				return fmt.Errorf("failed to register plugin %s: %w", plugin.ID, err)
+			}
+			if err := pm.CredentialTypeRegistry.RegisterCustomTypes(plugin, capability.CustomCredentialTypes); err != nil {
+				return fmt.Errorf("failed to register credential types of plugin %s: %w", plugin.ID, err)
 			}
 		default:
 			return fmt.Errorf("unknown capability type %T for plugin %s", capability, plugin.ID)

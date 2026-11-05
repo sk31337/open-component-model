@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 
-	"github.com/opencontainers/go-digest"
 	"golang.org/x/sync/errgroup"
 
 	"ocm.software/open-component-model/bindings/go/blob"
@@ -18,12 +18,12 @@ import (
 	"ocm.software/open-component-model/bindings/go/credentials"
 	"ocm.software/open-component-model/bindings/go/dag"
 	syncdag "ocm.software/open-component-model/bindings/go/dag/sync"
-	"ocm.software/open-component-model/bindings/go/descriptor/normalisation"
-	"ocm.software/open-component-model/bindings/go/descriptor/normalisation/json/v4alpha1"
+	"ocm.software/open-component-model/bindings/go/descriptor/normalisation/algorithms"
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
 	v2 "ocm.software/open-component-model/bindings/go/descriptor/v2"
 	"ocm.software/open-component-model/bindings/go/repository"
 	ocmruntime "ocm.software/open-component-model/bindings/go/runtime"
+	"ocm.software/open-component-model/bindings/go/runtime/versioning"
 )
 
 // ErrShouldSkipConstruction is an error that indicates that the construction of a component should be skipped,
@@ -32,6 +32,11 @@ var ErrShouldSkipConstruction = errors.New("should skip construction")
 
 // ErrDigestMismatch is returned when a provided digest does not match the calculated digest.
 var ErrDigestMismatch = errors.New("digest mismatch")
+
+// ErrVerifyOnlyReferenceDigest is returned when a reference pins its digest with a
+// verify-only normalisation algorithm, which must not be recorded in a new
+// component version.
+var ErrVerifyOnlyReferenceDigest = errors.New("reference digest uses a verify-only normalisation algorithm")
 
 const AttributeDescriptor string = "constructor/descriptor"
 
@@ -222,6 +227,15 @@ func (c *DefaultConstructor) constructComponent(ctx context.Context, component *
 		return nil, err
 	}
 
+	// Validate the component version before processing so an invalid version
+	// fails fast, before processDescriptor uploads any resource or source
+	// content to the target repository. Resource, source, and reference
+	// versions are defaulted during processing, so their validation must run
+	// afterwards in validateVersions.
+	if err := c.validateComponentVersion(component.Name, component.Version); err != nil {
+		return nil, fmt.Errorf("component %q failed version validation: %w", component.Name, err)
+	}
+
 	if err := c.processDescriptor(ctx, repo, component, desc, referencedComponents); err != nil {
 		return nil, err
 	}
@@ -230,11 +244,61 @@ func (c *DefaultConstructor) constructComponent(ctx context.Context, component *
 		return nil, fmt.Errorf("component %q failed validation: %w", component.Name, err)
 	}
 
+	if err := c.validateVersions(desc); err != nil {
+		return nil, fmt.Errorf("component %q failed version validation: %w", component.Name, err)
+	}
+
 	if err := repo.AddComponentVersion(ctx, desc); err != nil {
 		return nil, fmt.Errorf("error adding component version to target: %w", err)
 	}
 
 	return desc, nil
+}
+
+// versioningRegistry returns the configured versioning registry, falling back to
+// the loose-semver default when none is configured.
+func (c *DefaultConstructor) versioningRegistry() *versioning.Registry {
+	if c.opts.VersioningRegistry != nil {
+		return c.opts.VersioningRegistry
+	}
+	return versioning.Default()
+}
+
+// validateComponentVersion checks the component version against the configured
+// versioning registry (loose semver by default). It is called before
+// processDescriptor so an invalid version fails before any content is uploaded.
+func (c *DefaultConstructor) validateComponentVersion(name, version string) error {
+	if !c.versioningRegistry().Valid(version) {
+		return fmt.Errorf("component %q has an invalid version %q for the configured versioning schemes", name, version)
+	}
+	return nil
+}
+
+// validateVersions checks every resource, source, and reference version against
+// the configured versioning registry (loose semver by default). The component
+// version is validated earlier by validateComponentVersion. It returns a joined
+// error naming each offending element.
+func (c *DefaultConstructor) validateVersions(desc *descriptor.Descriptor) error {
+	registry := c.versioningRegistry()
+
+	var errs []error
+	check := func(kind, name, version string) {
+		if !registry.Valid(version) {
+			errs = append(errs, fmt.Errorf("%s %q has an invalid version %q for the configured versioning schemes", kind, name, version))
+		}
+	}
+
+	for _, r := range desc.Component.Resources {
+		check("resource", r.Name, r.Version)
+	}
+	for _, s := range desc.Component.Sources {
+		check("source", s.Name, s.Version)
+	}
+	for _, ref := range desc.Component.References {
+		check("reference", ref.Name, ref.Version)
+	}
+
+	return errors.Join(errs...)
 }
 
 // ProcessConflictStrategy checks for existing component versions in the target repository
@@ -259,7 +323,7 @@ func ProcessConflictStrategy(ctx context.Context, repo TargetRepository, compone
 			logger.DebugContext(ctx, "no existing component version found in target repository, continuing with construction", "component", component.Name, "version", component.Version)
 		}
 	case ComponentVersionConflictReplace:
-		logger.WarnContext(ctx, "REPLACING component version in target repository, old component version will no longer be available if it was present before.")
+		logger.DebugContext(ctx, "REPLACING component version in target repository, old component version will no longer be available if it was present before.")
 	}
 	return nil, nil
 }
@@ -402,7 +466,7 @@ func (c *DefaultConstructor) processResource(ctx context.Context, targetRepo Tar
 
 	if c.opts.ComponentVersionConflictPolicy == ComponentVersionConflictReplace &&
 		resource.Options.OwnershipPolicy != constructor.OwnershipPolicyAlways {
-		logger.WarnContext(ctx, "replace requested with ownership policy other than Always; any pre-existing ownership referrer attached to this resource by a prior add will remain",
+		logger.DebugContext(ctx, "replace requested with ownership policy other than Always; any pre-existing ownership referrer attached to this resource by a prior add will remain",
 			"ownership_policy", resource.Options.OwnershipPolicy)
 	}
 
@@ -513,6 +577,12 @@ func (c *DefaultConstructor) processSource(ctx context.Context, targetRepo Targe
 		res, err = c.processSourceWithInput(ctx, targetRepo, src, component, version)
 	} else {
 		logger.Debug("processing source with existing access")
+		// Sources with existing access may omit their version; default it to the
+		// component version so validateVersions does not reject an otherwise
+		// schema-valid source for an empty version. Explicit versions are kept.
+		if src.Version == "" {
+			src.Version = version
+		}
 		res = constructor.ConvertToDescriptorSource(src)
 	}
 
@@ -627,34 +697,43 @@ func (c *DefaultConstructor) processReference(ctx context.Context, reference *co
 	)
 	logger.Debug("processing reference")
 
+	ref := constructor.ConvertToDescriptorReference(reference)
+
+	// A reference that already carries a digest is verified under its own
+	// recorded normalisation and hash algorithms and kept, so a pinned v4alpha1
+	// (or legacy v3, or SHA-512) reference is not rewritten to the default. Only
+	// its spelling is canonicalised, so verifiers that compare exact hash names
+	// or hex case accept it too. A reference without a digest is minted with
+	// the current default (algorithms.Default).
+	if reference.Digest != nil {
+		pinned := ref.Digest
+		if pinned.HashAlgorithm == "" || pinned.NormalisationAlgorithm == "" || pinned.Value == "" {
+			return nil, fmt.Errorf("reference %q has an incomplete digest: all of hashAlgorithm, normalisationAlgorithm, and value must be set", reference.ToIdentity())
+		}
+		if algorithms.VerifyOnly(pinned.NormalisationAlgorithm) {
+			return nil, fmt.Errorf("%w: reference %q pins its digest with %s: remove the digest to compute one with %s",
+				ErrVerifyOnlyReferenceDigest, reference.ToIdentity(), pinned.NormalisationAlgorithm, algorithms.Default)
+		}
+		hash, err := algorithms.Hash(pinned.HashAlgorithm)
+		if err != nil {
+			return nil, fmt.Errorf("reference %q has an invalid digest: %w", reference.ToIdentity(), err)
+		}
+		if err := algorithms.Verify(referencedComponent, pinned); err != nil {
+			if errors.Is(err, algorithms.ErrDigestMismatch) {
+				return nil, fmt.Errorf("%w: reference %q has digest (hashAlgorithm=%s, normalisationAlgorithm=%s, value=%s) that does not match the referenced component: %w",
+					ErrDigestMismatch, reference.ToIdentity(), pinned.HashAlgorithm, pinned.NormalisationAlgorithm, pinned.Value, err)
+			}
+			return nil, fmt.Errorf("error verifying digest of referenced component %q: %w", reference.ToIdentity(), err)
+		}
+		ref.Digest.HashAlgorithm = hash.String()
+		ref.Digest.Value = strings.ToLower(pinned.Value)
+		logger.Debug("digest verification successful", "expected", ref.Digest.Value)
+		return ref, nil
+	}
+
 	referencedComponentDigest, err := c.getComponentDigest(ctx, reference.ToComponentIdentity().String(), referencedComponent)
 	if err != nil {
 		return nil, fmt.Errorf("error getting digest for referenced component %q: %w", reference.ToIdentity(), err)
-	}
-
-	ref := constructor.ConvertToDescriptorReference(reference)
-
-	// If digest is specified in the constructor reference, verify it matches the calculated digest
-	if reference.Digest != nil {
-		if reference.Digest.HashAlgorithm == "" || reference.Digest.NormalisationAlgorithm == "" || reference.Digest.Value == "" {
-			return nil, fmt.Errorf("reference %q has an incomplete digest: all of hashAlgorithm, normalisationAlgorithm, and value must be set", reference.ToIdentity())
-		}
-		if reference.Digest.HashAlgorithm != referencedComponentDigest.HashAlgorithm ||
-			reference.Digest.NormalisationAlgorithm != referencedComponentDigest.NormalisationAlgorithm ||
-			reference.Digest.Value != referencedComponentDigest.Value {
-			return nil, fmt.Errorf("%w: reference %q has digest (hashAlgorithm=%s, normalisationAlgorithm=%s, value=%s) but calculated digest is (hashAlgorithm=%s, normalisationAlgorithm=%s, value=%s)",
-				ErrDigestMismatch,
-				reference.ToIdentity(),
-				reference.Digest.HashAlgorithm,
-				reference.Digest.NormalisationAlgorithm,
-				reference.Digest.Value,
-				referencedComponentDigest.HashAlgorithm,
-				referencedComponentDigest.NormalisationAlgorithm,
-				referencedComponentDigest.Value)
-		}
-		logger.Debug("digest verification successful",
-			"expected", reference.Digest.Value,
-			"calculated", referencedComponentDigest.Value)
 	}
 
 	ref.Digest = *referencedComponentDigest
@@ -688,16 +767,11 @@ func (c *DefaultConstructor) getComponentDigest(ctx context.Context, componentId
 }
 
 func calculateDigest(component *descriptor.Descriptor) (*descriptor.Digest, error) {
-	normalisedData, err := normalisation.Normalisations.Normalise(component, v4alpha1.Algorithm)
+	componentDigest, err := algorithms.Digest(component, algorithms.Default, crypto.SHA256.String())
 	if err != nil {
-		return nil, fmt.Errorf("error normalising descriptor %s: %w", component.Component.ToIdentity().String(), err)
+		return nil, fmt.Errorf("error calculating digest of descriptor %s: %w", component.Component.ToIdentity().String(), err)
 	}
-
-	return &descriptor.Digest{
-		HashAlgorithm:          crypto.SHA256.String(),
-		NormalisationAlgorithm: v4alpha1.Algorithm,
-		Value:                  digest.SHA256.FromBytes(normalisedData).Encoded(),
-	}, nil
+	return componentDigest, nil
 }
 
 // addColocatedResourceLocalBlob adds a local blob to the component version repository and defaults fields relevant

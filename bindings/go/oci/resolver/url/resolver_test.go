@@ -15,6 +15,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/oci/cache"
 	"ocm.software/open-component-model/bindings/go/oci/internal/remotestore"
 	"ocm.software/open-component-model/bindings/go/oci/resolver/url"
+	"ocm.software/open-component-model/bindings/go/oci/spec"
 )
 
 // Custom transport to verify the custom client is being used
@@ -33,27 +34,28 @@ func (c *customRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 func TestNewURLPathResolver(t *testing.T) {
 	baseURL := "http://example.com"
 	resolver, err := url.New(url.WithBaseURL(baseURL))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, resolver)
 }
 
 func TestURLPathResolver_SetClient(t *testing.T) {
 	resolver, err := url.New(url.WithBaseURL("http://example.com"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	repo, err := remote.NewRepository("example.com/test")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Set the client
 	resolver.SetClient(repo.Client)
 
 	// Verify the client was set by using it
 	store, err := resolver.StoreForReference(context.Background(), "example.com/test")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, store)
 }
+
 func TestURLPathResolver_ComponentVersionReference(t *testing.T) {
 	resolver, err := url.New(url.WithBaseURL("http://example.com"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	component := "ocm.software/test-component"
 	version := "v1.0.0"
 	expected := "http://example.com/component-descriptors/ocm.software/test-component:v1.0.0"
@@ -103,7 +105,7 @@ func TestURLPathResolver_ComponentVersionReferenceWithSubPath(t *testing.T) {
 				opts = append(opts, url.WithSubPath(tt.subPath))
 			}
 			resolver, err := url.New(opts...)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			result := resolver.ComponentVersionReference(t.Context(), tt.component, tt.version)
 			assert.Equal(t, tt.expected, result)
 		})
@@ -144,7 +146,7 @@ func TestURLPathResolver_BasePath(t *testing.T) {
 				opts = append(opts, url.WithSubPath(tt.subPath))
 			}
 			resolver, err := url.New(opts...)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			result := resolver.BasePath()
 			assert.Equal(t, tt.expected, result)
 		})
@@ -172,16 +174,16 @@ func TestURLPathResolver_StoreForReference(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resolver, err := url.New(url.WithBaseURL("http://example.com"))
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			store, err := resolver.StoreForReference(context.Background(), tt.reference)
 
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Nil(t, store)
 				return
 			}
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.NotNil(t, store)
 		})
 	}
@@ -192,7 +194,7 @@ func TestURLPathResolver_Ping(t *testing.T) {
 
 	t.Run("ping with invalid URL fails", func(t *testing.T) {
 		resolver, err := url.New(url.WithBaseURL("http://invalid.nonexistent.domain"))
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		err = resolver.Ping(ctx)
 		require.Error(t, err)
@@ -202,7 +204,7 @@ func TestURLPathResolver_Ping(t *testing.T) {
 
 	t.Run("ping with malformed URL fails", func(t *testing.T) {
 		resolver, err := url.New(url.WithBaseURL("not-a-valid-url"))
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		err = resolver.Ping(ctx)
 		require.Error(t, err)
@@ -392,7 +394,7 @@ func TestURLPathResolver_Ping(t *testing.T) {
 			// Verify basic auth credentials
 			if auth[:6] == "Basic " {
 				decoded, err := base64.StdEncoding.DecodeString(auth[6:])
-				require.NoError(t, err)
+				assert.NoError(t, err)
 				assert.Equal(t, expectedUsername+":"+expectedPassword, string(decoded))
 				authCalled = true
 			}
@@ -418,7 +420,7 @@ func TestURLPathResolver_Ping(t *testing.T) {
 		resolver.SetClient(authClient)
 
 		err = resolver.Ping(ctx)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, authCalled, "Expected authentication to be used")
 	})
 
@@ -474,7 +476,7 @@ func TestURLPathResolver_Ping(t *testing.T) {
 		resolver.SetClient(authClient)
 
 		err = resolver.Ping(ctx)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, tokenFetched, "Expected token to be fetched from auth server")
 		assert.True(t, authUsed, "Expected bearer token to be used in request")
 	})
@@ -487,19 +489,24 @@ func TestURLPathResolver_DynamicCacheSwapping(t *testing.T) {
 
 	ref := "example.com/test-component:v1.0.0"
 
-	// 1. Initially, no caches are set. StoreForReference should return the base *remotestore.RemoteStore.
+	// 1. Initially, no caches are set. StoreForReference should return the
+	// base *remotestore.RemoteStore (Wrap's passthrough path).
 	store, err := resolver.StoreForReference(ctx, ref)
 	require.NoError(t, err)
 	assert.IsType(t, &remotestore.RemoteStore{}, store)
 
-	// 2. Set blob cache. StoreForReference for the same ref should return a wrapped *cache.Repository.
+	// Enabling blob caching must preserve chunked and streaming pushes.
 	dummyBlobCache := &cache.BlobCache{}
 	resolver.SetBlobCache(dummyBlobCache)
 
 	store, err = resolver.StoreForReference(ctx, ref)
 	require.NoError(t, err)
-	require.IsType(t, &cache.Repository{}, store)
-	wrapped := store.(*cache.Repository)
+	assert.Implements(t, (*spec.Store)(nil), store)
+	assert.Implements(t, (*remotestore.StreamingPusher)(nil), store)
+	_, isPlain := store.(*remotestore.RemoteStore)
+	assert.False(t, isPlain, "configured blob cache must wrap the backing store")
+	wrapped, ok := store.(*cache.CachedStore)
+	require.True(t, ok)
 	assert.Equal(t, dummyBlobCache, wrapped.BlobCache)
 	assert.Nil(t, wrapped.ReferenceCache)
 
@@ -509,12 +516,15 @@ func TestURLPathResolver_DynamicCacheSwapping(t *testing.T) {
 
 	store, err = resolver.StoreForReference(ctx, ref)
 	require.NoError(t, err)
-	require.IsType(t, &cache.Repository{}, store)
-	wrapped = store.(*cache.Repository)
+	assert.Implements(t, (*spec.Store)(nil), store)
+	assert.Implements(t, (*remotestore.StreamingPusher)(nil), store)
+	wrapped, ok = store.(*cache.CachedStore)
+	require.True(t, ok)
 	assert.Equal(t, dummyBlobCache, wrapped.BlobCache)
 	assert.Equal(t, dummyRefCache, wrapped.ReferenceCache)
 
-	// 4. Set both back to nil. StoreForReference should return the base *remotestore.RemoteStore again.
+	// 4. Set both back to nil. StoreForReference should return the base
+	// *remotestore.RemoteStore again.
 	resolver.SetBlobCache(nil)
 	resolver.SetReferenceCache(nil)
 

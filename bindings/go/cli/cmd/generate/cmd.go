@@ -11,6 +11,7 @@ func New() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "generate {docs}",
 		Short: "Generate documentation for the OCM CLI",
+
 		Long: `A longer description that spans multiple lines and likely contains examples
 and usage of using your command. For example:
 

@@ -906,19 +906,6 @@ All controllers use `GenerationChangedPredicate` to only reconcile on spec chang
 For(&v1alpha1.Component{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 ```
 
-### Field Indexing and Cross-Resource Watches
-
-Field indexes are registered at controller setup for efficient cross-resource lookups. Watch handlers use `handler.EnqueueRequestsFromMapFunc` with `client.MatchingFields{}` to find related objects:
-
-```go
-Watches(&v1alpha1.Repository{},
-    handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-        list := &v1alpha1.ComponentList{}
-        r.List(ctx, list, client.MatchingFields{fieldName: obj.GetName()})
-        // build and return requests...
-    }))
-```
-
 ### Finalizers
 
 Deletion is guarded by finalizers. `reconcileDelete` checks for dependent resources before removing the finalizer. Adding a finalizer triggers an immediate requeue. Multiple finalizers may be used in sequence to enforce cleanup ordering.
@@ -927,9 +914,9 @@ Deletion is guarded by finalizers. `reconcileDelete` checks for dependent resour
 
 The deployer uses SSA (`client.Apply` with `client.ForceOwnership`) and ApplySet (KEP-3659) for resource lifecycle management. The workflow is: Project (compute scope) → Apply (SSA all resources) → Prune (delete orphans matching the ApplySet label).
 
-### Worker Pool with Cache
+### Download Cache
 
-Async resolution uses a worker pool with an expirable LRU cache. The `Load(key, fallbackFunc)` pattern checks cache first, then dispatches work. Multiple requesters can subscribe to the same in-progress resolution:
+The deployer keeps downloaded objects in an LRU cache. The `Load(key, fallbackFunc)` pattern checks the cache first and only runs the fallback on a miss:
 
 ```go
 result, err := cache.Load(key, func() (V, error) {

@@ -3,25 +3,30 @@ package ctf
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	ociImageSpecV1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"oras.land/oras-go/v2/errdef"
+
+	"ocm.software/open-component-model/bindings/go/blob"
+	"ocm.software/open-component-model/bindings/go/blob/direct"
 	"ocm.software/open-component-model/bindings/go/blob/filesystem"
 	"ocm.software/open-component-model/bindings/go/blob/inmemory"
+	"ocm.software/open-component-model/bindings/go/blob/verified"
 	"ocm.software/open-component-model/bindings/go/ctf"
 	v1 "ocm.software/open-component-model/bindings/go/ctf/index/v1"
 	"ocm.software/open-component-model/bindings/go/oci"
+	"ocm.software/open-component-model/bindings/go/oci/internal/remotestore"
 	"ocm.software/open-component-model/bindings/go/oci/spec/repository/path"
 )
 
@@ -32,43 +37,6 @@ func setupTestCTF(t *testing.T) ctf.CTF {
 	fs, err := filesystem.NewFS(tmpDir, os.O_RDWR|os.O_CREATE)
 	require.NoError(t, err)
 	return ctf.NewFileSystemCTF(fs)
-}
-
-var logHandler *mockLogHandler
-
-// mockLogHandler is a mock slog.Handler for testing
-type mockLogHandler struct {
-	mock.Mock
-	mu sync.Mutex
-}
-
-func (m *mockLogHandler) Enabled(_ context.Context, _ slog.Level) bool {
-	return true
-}
-
-func (m *mockLogHandler) Handle(_ context.Context, record slog.Record) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Called(record.Level, record.Message)
-	return nil
-}
-
-func (m *mockLogHandler) WithAttrs(_ []slog.Attr) slog.Handler {
-	return m
-}
-
-func (m *mockLogHandler) WithGroup(_ string) slog.Handler {
-	return m
-}
-
-func TestMain(m *testing.M) {
-	logHandler = &mockLogHandler{}
-	slog.SetDefault(slog.New(logHandler))
-	logHandler.On("Handle", mock.AnythingOfType("slog.Level"), mock.AnythingOfType("string")).Return(nil)
-
-	exitCode := m.Run()
-
-	os.Exit(exitCode)
 }
 
 func TestNewCTFComponentVersionStore(t *testing.T) {
@@ -82,7 +50,7 @@ func TestStoreForReference(t *testing.T) {
 	ctf := setupTestCTF(t)
 	s := NewFromCTF(ctf)
 	result, err := s.StoreForReference(t.Context(), "test:reference")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "test", result.(*repository).repo)
 }
 
@@ -112,11 +80,11 @@ func TestFetch(t *testing.T) {
 
 	t.Run("successful fetch", func(t *testing.T) {
 		reader, err := store.Fetch(ctx, desc)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.NotNil(t, reader)
 
 		readContent, err := io.ReadAll(reader)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Equal(t, content, string(readContent))
 	})
 
@@ -125,27 +93,9 @@ func TestFetch(t *testing.T) {
 			Digest: digest.FromString("testabc"),
 		}
 		reader, err := store.Fetch(ctx, nonExistentDesc)
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.Nil(t, reader)
 		assert.Contains(t, err.Error(), "not found")
-	})
-
-	t.Run("close called multiple times is safe and logs error", func(t *testing.T) {
-		reader, err := store.Fetch(ctx, desc)
-		require.NoError(t, err)
-		require.NotNil(t, reader)
-
-		// Call Close multiple times - all should succeed without panic
-		// The sync.OnceValue ensures RUnlock and rc.Close() are only called once
-		err = reader.Close()
-		assert.NoError(t, err, "first close should succeed")
-
-		// Second call logs warning but not fail
-		err = reader.Close()
-		assert.NoError(t, err, "second close should be safe (logs warning)")
-
-		// Verify the warning was logged exactly once
-		logHandler.AssertCalled(t, "Handle", slog.LevelError, "Close called multiple times on locked reader.")
 	})
 }
 
@@ -168,7 +118,7 @@ func TestExists(t *testing.T) {
 
 	t.Run("blob exists", func(t *testing.T) {
 		exists, err := store.Exists(ctx, desc)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, exists)
 	})
 
@@ -177,7 +127,7 @@ func TestExists(t *testing.T) {
 			Digest: digest.Digest("sha256:1234"),
 		}
 		exists, err := store.Exists(ctx, nonExistentDesc)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.False(t, exists)
 	})
 }
@@ -197,13 +147,271 @@ func TestPush(t *testing.T) {
 
 	t.Run("successful push", func(t *testing.T) {
 		err := store.Push(ctx, desc, strings.NewReader(content))
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Verify the blob was saved
 		exists, err := store.Exists(ctx, desc)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, exists)
 	})
+}
+
+// Content that already verifies itself is not hashed again, so Push must still reject
+// content its verifying reader rejects, and content verified against another digest.
+func TestPushVerifiedContent(t *testing.T) {
+	ctx := t.Context()
+	const mediaType = "application/octet-stream"
+	content := []byte("verified layer")
+	tampered := []byte("tampered layer")
+	want := ociImageSpecV1.Descriptor{MediaType: mediaType, Digest: digest.FromBytes(content), Size: int64(len(content))}
+
+	verifying := func(data []byte, dig digest.Digest) func(*testing.T) io.Reader {
+		return func(t *testing.T) io.Reader {
+			t.Helper()
+			rc, err := verified.New(direct.NewFromBytes(data), verified.Metadata{Digest: dig, Size: int64(len(data))}).ReadCloser()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = rc.Close() })
+			// As pack.Blob hands it to Push.
+			return verified.NopCloser(rc)
+		}
+	}
+
+	tests := []struct {
+		name    string
+		desc    ociImageSpecV1.Descriptor
+		reader  func(*testing.T) io.Reader
+		wantErr string
+	}{
+		{name: "reader verifying the descriptor", desc: want, reader: verifying(content, want.Digest)},
+		{name: "reader rejecting its content", desc: want, reader: verifying(tampered, want.Digest), wantErr: "digest mismatch"},
+		{name: "reader verifying another digest", desc: want, reader: verifying(tampered, digest.FromBytes(tampered)), wantErr: "does not match expected digest"},
+		{
+			name:    "descriptor without digest",
+			desc:    ociImageSpecV1.Descriptor{MediaType: mediaType, Size: want.Size},
+			reader:  func(*testing.T) io.Reader { return bytes.NewReader(content) },
+			wantErr: "descriptor has no digest",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := require.New(t)
+			archive := setupTestCTF(t)
+			store, err := NewFromCTF(archive).StoreForReference(ctx, "test-repo:test-tag")
+			r.NoError(err)
+
+			err = store.Push(ctx, tc.desc, tc.reader(t))
+			blobs, listErr := archive.ListBlobs(ctx)
+			if tc.wantErr != "" {
+				r.ErrorContains(err, tc.wantErr)
+				r.Empty(blobs, "rejected content must not be stored")
+				return
+			}
+			r.NoError(err)
+			r.NoError(listErr)
+			r.Equal([]string{want.Digest.String()}, blobs)
+
+			rc, err := store.Fetch(ctx, want)
+			r.NoError(err)
+			t.Cleanup(func() { _ = rc.Close() })
+			data, err := io.ReadAll(rc)
+			r.NoError(err)
+			r.Equal(content, data)
+		})
+	}
+}
+
+func TestPushStreaming(t *testing.T) {
+	ctx := t.Context()
+	const mediaType = "application/octet-stream"
+	content := []byte("streamed layer")
+	want := digest.FromBytes(content)
+	wantSHA512 := digest.SHA512.FromBytes(content)
+
+	tests := []struct {
+		name        string
+		preexisting bool
+		partial     ociImageSpecV1.Descriptor
+		wantDigest  digest.Digest
+		wantErr     string
+	}{
+		{name: "unknown digest and size", wantDigest: want},
+		{name: "expected digest matches", partial: ociImageSpecV1.Descriptor{Digest: want}, wantDigest: want},
+		{name: "expected digest and size match", partial: ociImageSpecV1.Descriptor{Digest: want, Size: int64(len(content))}, wantDigest: want},
+		{name: "sha512 expected digest", partial: ociImageSpecV1.Descriptor{Digest: wantSHA512}, wantDigest: wantSHA512},
+		{name: "expected digest mismatches", partial: ociImageSpecV1.Descriptor{Digest: digest.FromString("other")}, wantErr: "does not match expected digest"},
+		{name: "expected size too large", partial: ociImageSpecV1.Descriptor{Size: int64(len(content) + 1)}, wantErr: "does not match expected size"},
+		{name: "expected size too small", partial: ociImageSpecV1.Descriptor{Size: int64(len(content) - 1)}, wantErr: "does not match expected size"},
+		{name: "already stored, unknown digest", preexisting: true, wantDigest: want},
+		{name: "already stored, expected digest", preexisting: true, partial: ociImageSpecV1.Descriptor{Digest: want}, wantDigest: want},
+		{name: "already stored, expected size mismatches", preexisting: true, partial: ociImageSpecV1.Descriptor{Digest: want, Size: int64(len(content) + 1)}, wantErr: "does not match expected size"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := require.New(t)
+			archive := setupTestCTF(t)
+			store, err := NewFromCTF(archive).StoreForReference(ctx, "test-repo:test-tag")
+			r.NoError(err)
+			if tc.preexisting {
+				r.NoError(archive.SaveBlob(ctx, inmemory.New(bytes.NewReader(content))))
+			}
+
+			tc.partial.MediaType = mediaType
+			desc, err := store.(*repository).PushStreaming(ctx, tc.partial, bytes.NewReader(content))
+
+			var wantBlobs []string
+			if tc.preexisting {
+				wantBlobs = []string{want.String()}
+			}
+			if tc.wantErr != "" {
+				r.ErrorContains(err, tc.wantErr)
+			} else {
+				r.NoError(err)
+				r.Equal(ociImageSpecV1.Descriptor{MediaType: mediaType, Digest: tc.wantDigest, Size: int64(len(content))}, desc)
+				wantBlobs = []string{tc.wantDigest.String()}
+			}
+			blobs, err := archive.ListBlobs(ctx)
+			if wantBlobs == nil {
+				// The blobs directory may not even exist when nothing was stored.
+				r.Empty(blobs)
+				return
+			}
+			r.NoError(err)
+			r.Equal(wantBlobs, blobs, "only the content-addressed blob may remain, no staged file")
+
+			if tc.wantErr != "" {
+				return
+			}
+			rc, err := store.Fetch(ctx, desc)
+			r.NoError(err)
+			t.Cleanup(func() { _ = rc.Close() })
+			data, err := io.ReadAll(rc)
+			r.NoError(err)
+			r.Equal(content, data)
+		})
+	}
+
+	t.Run("manifest is not streamed", func(t *testing.T) {
+		r := require.New(t)
+		store, err := NewFromCTF(setupTestCTF(t)).StoreForReference(ctx, "test-repo:test-tag")
+		r.NoError(err)
+
+		data := bytes.NewReader(content)
+		_, err = store.(*repository).PushStreaming(ctx, ociImageSpecV1.Descriptor{MediaType: ociImageSpecV1.MediaTypeImageManifest}, data)
+		r.ErrorIs(err, remotestore.ErrStreamingUnavailable)
+		r.Equal(len(content), data.Len(), "content must not be consumed")
+	})
+}
+
+// gatedReader yields its content only after gate is closed, like a remote source the
+// server streams while the client is busy elsewhere. reading is closed once the first
+// Read starts, i.e. once the write reads its source.
+type gatedReader struct {
+	gate    <-chan struct{}
+	reading chan struct{}
+	once    sync.Once
+	r       io.Reader
+}
+
+func (g *gatedReader) Read(p []byte) (int, error) {
+	g.once.Do(func() { close(g.reading) })
+	<-g.gate
+	return g.r.Read(p)
+}
+
+// TestPush_StalledSourceDoesNotBlockOtherWriters pins that a blob write never holds the
+// archive lock while it reads its source: otherwise every other writer's source stays
+// unread until it finishes, and a server streaming one may reset it (HTTP/2 RST_STREAM).
+// Here the first write only finishes after all others did, which deadlocks under such a lock.
+func TestPush_StalledSourceDoesNotBlockOtherWriters(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+	archive := setupTestCTF(t)
+	store, err := NewFromCTF(archive).StoreForReference(ctx, "test-repo:test-tag")
+	r.NoError(err)
+	repo := store.(*repository)
+
+	stalled := []byte("stalled layer")
+	stalledDesc := ociImageSpecV1.Descriptor{MediaType: "application/octet-stream", Digest: digest.FromBytes(stalled), Size: int64(len(stalled))}
+	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+
+	stalledDone := make(chan error, 1)
+	source := &gatedReader{gate: gate, reading: make(chan struct{}), r: bytes.NewReader(stalled)}
+	go func() {
+		stalledDone <- repo.Push(ctx, stalledDesc, source)
+	}()
+	// The other writes start only once the stalled one reads its source, so under a lock
+	// held while reading they always wait for it.
+	select {
+	case <-source.reading:
+	case err := <-stalledDone:
+		t.Fatalf("stalled write returned before reading its source: %v", err)
+	}
+
+	layer := []byte("other layer")
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}`)
+	othersDone := make(chan error, 1)
+	go func() {
+		othersDone <- errors.Join(
+			repo.Push(ctx, ociImageSpecV1.Descriptor{MediaType: "application/octet-stream", Digest: digest.FromBytes(layer), Size: int64(len(layer))}, bytes.NewReader(layer)),
+			func() error {
+				_, err := repo.PushStreaming(ctx, ociImageSpecV1.Descriptor{MediaType: "application/octet-stream"}, strings.NewReader("streamed layer"))
+				return err
+			}(),
+			repo.Push(ctx, ociImageSpecV1.Descriptor{MediaType: ociImageSpecV1.MediaTypeImageManifest, Digest: digest.FromBytes(manifest), Size: int64(len(manifest))}, bytes.NewReader(manifest)),
+		)
+	}()
+
+	select {
+	case err := <-othersDone:
+		r.NoError(err)
+	case <-time.After(10 * time.Second):
+		release()
+		t.Fatal("writes blocked behind a blob write whose source was not yet readable")
+	}
+	release()
+	r.NoError(<-stalledDone)
+
+	blobs, err := archive.ListBlobs(ctx)
+	r.NoError(err)
+	r.ElementsMatch([]string{
+		stalledDesc.Digest.String(),
+		digest.FromBytes(layer).String(),
+		digest.FromString("streamed layer").String(),
+		digest.FromBytes(manifest).String(),
+	}, blobs)
+}
+
+// savingOnlyCTF hides StageBlob, like a CTF implementation that cannot stage blobs.
+type savingOnlyCTF struct {
+	ctf.CTF
+	saves int
+}
+
+func (c *savingOnlyCTF) SaveBlob(ctx context.Context, b blob.ReadOnlyBlob) error {
+	c.saves++
+	return c.CTF.SaveBlob(ctx, b)
+}
+
+// An archive that cannot stage blobs is written with SaveBlob.
+func TestPush_ArchiveWithoutStaging(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+	archive := &savingOnlyCTF{CTF: setupTestCTF(t)}
+	_, staging := ctf.CTF(archive).(ctf.BlobStager)
+	r.False(staging)
+	store, err := NewFromCTF(archive).StoreForReference(ctx, "test-repo:test-tag")
+	r.NoError(err)
+
+	layer := []byte("layer")
+	desc := ociImageSpecV1.Descriptor{MediaType: "application/octet-stream", Digest: digest.FromBytes(layer), Size: int64(len(layer))}
+	r.NoError(store.Push(ctx, desc, bytes.NewReader(layer)))
+	r.Equal(1, archive.saves)
+	exists, err := store.Exists(ctx, desc)
+	r.NoError(err)
+	r.True(exists)
 }
 
 func TestResolve(t *testing.T) {
@@ -227,10 +435,18 @@ func TestResolve(t *testing.T) {
 		Digest:     digestStr,
 		MediaType:  ociImageSpecV1.MediaTypeImageManifest,
 	})
+	index.AddArtifact(v1.ArtifactMetadata{
+		Repository: "test-repo",
+		Tag:        "1.0.0-T0",
+		Digest:     digestStr,
+		MediaType:  ociImageSpecV1.MediaTypeImageManifest,
+	})
 	require.NoError(t, ctf.SetIndex(ctx, index))
 
 	expectedOkResolves := []string{
 		"v1.0.0",
+		"1.0.0-T0",
+		"test-repo:1.0.0-T0",
 		"test-repo:v1.0.0",
 		digestStr,
 		"test-repo@" + digestStr,
@@ -242,7 +458,7 @@ func TestResolve(t *testing.T) {
 	for _, tc := range expectedOkResolves {
 		t.Run(tc, func(t *testing.T) {
 			desc, err := store.Resolve(ctx, tc)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, ociImageSpecV1.MediaTypeImageManifest, desc.MediaType)
 			assert.Equal(t, digest.Digest(digestStr), desc.Digest)
 		})
@@ -250,13 +466,19 @@ func TestResolve(t *testing.T) {
 
 	t.Run("invalid reference", func(t *testing.T) {
 		desc, err := store.Resolve(ctx, "invalid")
-		assert.Error(t, err)
+		require.Error(t, err)
+		assert.Empty(t, desc)
+	})
+
+	t.Run("unparseable reference that is not a tag", func(t *testing.T) {
+		desc, err := store.Resolve(ctx, "localhost:5000/Test-Repo:v1.0.0")
+		require.ErrorIs(t, err, errdef.ErrInvalidReference)
 		assert.Empty(t, desc)
 	})
 
 	t.Run("reference not found", func(t *testing.T) {
 		desc, err := store.Resolve(ctx, "other-repo:other-tag")
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.Empty(t, desc)
 	})
 }
@@ -287,6 +509,10 @@ func TestTag(t *testing.T) {
 			reference: "test-tag",
 		},
 		{
+			name:      "tag with upper-case letters",
+			reference: "1.0.0-T0",
+		},
+		{
 			name:      "tag as digest",
 			reference: desc.Digest.String(),
 		},
@@ -295,11 +521,11 @@ func TestTag(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := store.Tag(ctx, desc, tt.reference)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			// Verify the tag was created by resolving it
 			resolvedDesc, err := store.Resolve(ctx, tt.reference)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, desc.Digest, resolvedDesc.Digest)
 		})
 	}
@@ -330,19 +556,19 @@ func TestFetchReference(t *testing.T) {
 
 	t.Run("successful fetch reference", func(t *testing.T) {
 		desc, reader, err := store.(*repository).FetchReference(ctx, "test-tag")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.NotNil(t, reader)
 		assert.Equal(t, ociImageSpecV1.MediaTypeImageManifest, desc.MediaType)
 		assert.Equal(t, digest.Digest(digestStr), desc.Digest)
 
 		readContent, err := io.ReadAll(reader)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Equal(t, content, string(readContent))
 	})
 
 	t.Run("fetch reference not found", func(t *testing.T) {
 		desc, reader, err := store.(*repository).FetchReference(ctx, "nonexistent-tag")
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.Nil(t, reader)
 		assert.Empty(t, desc)
 	})
@@ -389,7 +615,7 @@ func TestTags(t *testing.T) {
 			tags = t
 			return nil
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		// Like OCI Image Layout, multiple tags can point to the same digest
 		assert.ElementsMatch(t, []string{"tag1", "tag2"}, tags, "multiple tags for same digest should coexist")
 	})
@@ -411,16 +637,16 @@ func TestPushWithManifest(t *testing.T) {
 
 	t.Run("push manifest and verify tag", func(t *testing.T) {
 		err := store.Push(ctx, desc, strings.NewReader(content))
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Verify the blob was saved
 		exists, err := store.Exists(ctx, desc)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.True(t, exists)
 
 		// Verify the digest is resolvable
 		resolvedDesc, err := store.Resolve(ctx, desc.Digest.String())
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Equal(t, desc.Digest, resolvedDesc.Digest)
 	})
 }
@@ -450,7 +676,7 @@ func TestResolveWithRegistry(t *testing.T) {
 
 	t.Run("resolve with registry prefix", func(t *testing.T) {
 		desc, err := store.Resolve(ctx, "test-tag")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Equal(t, ociImageSpecV1.MediaTypeImageManifest, desc.MediaType)
 		assert.Equal(t, digest.Digest(digestStr), desc.Digest)
 	})
@@ -481,7 +707,7 @@ func TestResolveWithEmptyMediaType(t *testing.T) {
 
 	t.Run("resolve with empty media type defaults to image manifest", func(t *testing.T) {
 		desc, err := store.Resolve(ctx, "test-tag")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Equal(t, ociImageSpecV1.MediaTypeImageManifest, desc.MediaType)
 		assert.Equal(t, digest.Digest(digestStr), desc.Digest)
 	})
@@ -540,6 +766,7 @@ func TestCompatibility(t *testing.T) {
 
 // TestConcurrentBlobOperations tests thread safety of blob operations
 func TestConcurrentBlobOperations(t *testing.T) {
+	t.Parallel()
 	ctf := setupTestCTF(t)
 	provider := NewFromCTF(ctf)
 	store, err := provider.StoreForReference(t.Context(), "test-repo:test-tag")
@@ -571,22 +798,22 @@ func TestConcurrentBlobOperations(t *testing.T) {
 
 				// Push operation
 				err := store.Push(ctx, desc, bytes.NewReader([]byte(content)))
-				require.NoError(t, err, "goroutine %d: push should succeed", id)
+				assert.NoError(t, err, "goroutine %d: push should succeed", id)
 
 				// Fetch operation
 				reader, err := store.Fetch(ctx, desc)
-				require.NoError(t, err, "goroutine %d: fetch should succeed", id)
-				require.NotNil(t, reader, "goroutine %d: reader should not be nil", id)
+				assert.NoError(t, err, "goroutine %d: fetch should succeed", id)
+				assert.NotNil(t, reader, "goroutine %d: reader should not be nil", id)
 
 				data, err := io.ReadAll(reader)
 				reader.Close()
-				require.NoError(t, err, "goroutine %d: read should succeed", id)
-				require.Equal(t, content, string(data), "goroutine %d: content should match", id)
+				assert.NoError(t, err, "goroutine %d: read should succeed", id)
+				assert.Equal(t, content, string(data), "goroutine %d: content should match", id)
 
 				// Exists operation
 				exists, err := store.Exists(ctx, desc)
-				require.NoError(t, err, "goroutine %d: exists check should succeed", id)
-				require.True(t, exists, "goroutine %d: blob should exist", id)
+				assert.NoError(t, err, "goroutine %d: exists check should succeed", id)
+				assert.True(t, exists, "goroutine %d: blob should exist", id)
 			}(i)
 		}
 
@@ -595,6 +822,7 @@ func TestConcurrentBlobOperations(t *testing.T) {
 
 	// Test concurrent operations on different blobs
 	t.Run("concurrent different blobs", func(t *testing.T) {
+		t.Parallel()
 		var wg sync.WaitGroup
 
 		for i := 0; i < numGoroutines; i++ {
@@ -613,22 +841,22 @@ func TestConcurrentBlobOperations(t *testing.T) {
 
 					// Push
 					err := store.Push(ctx, desc, bytes.NewReader([]byte(content)))
-					require.NoError(t, err, "goroutine %d blob %d: push should succeed", goroutineID, j)
+					assert.NoError(t, err, "goroutine %d blob %d: push should succeed", goroutineID, j)
 
 					// Fetch
 					reader, err := store.Fetch(ctx, desc)
-					require.NoError(t, err, "goroutine %d blob %d: fetch should succeed", goroutineID, j)
-					require.NotNil(t, reader, "goroutine %d blob %d: reader should not be nil", goroutineID, j)
+					assert.NoError(t, err, "goroutine %d blob %d: fetch should succeed", goroutineID, j)
+					assert.NotNil(t, reader, "goroutine %d blob %d: reader should not be nil", goroutineID, j)
 
 					data, err := io.ReadAll(reader)
 					reader.Close()
-					require.NoError(t, err, "goroutine %d blob %d: read should succeed", goroutineID, j)
-					require.Equal(t, content, string(data), "goroutine %d blob %d: content should match", goroutineID, j)
+					assert.NoError(t, err, "goroutine %d blob %d: read should succeed", goroutineID, j)
+					assert.Equal(t, content, string(data), "goroutine %d blob %d: content should match", goroutineID, j)
 
 					// Exists
 					exists, err := store.Exists(ctx, desc)
-					require.NoError(t, err, "goroutine %d blob %d: exists check should succeed", goroutineID, j)
-					require.True(t, exists, "goroutine %d blob %d: blob should exist", goroutineID, j)
+					assert.NoError(t, err, "goroutine %d blob %d: exists check should succeed", goroutineID, j)
+					assert.True(t, exists, "goroutine %d blob %d: blob should exist", goroutineID, j)
 				}
 			}(i)
 		}
@@ -664,7 +892,7 @@ func TestUntag(t *testing.T) {
 	assert.ElementsMatch(t, []string{"v1.0.0"}, tags, "only the semver tag should remain")
 
 	_, err = store.Resolve(ctx, "latest")
-	assert.Error(t, err, "removed tag must not resolve")
+	require.Error(t, err, "removed tag must not resolve")
 
 	// Untag only removes the tag pointer — the blob itself must remain.
 	blobs, err := archive.ListBlobs(ctx)
@@ -707,10 +935,9 @@ func TestUntag_LastTag_KeepsBlob(t *testing.T) {
 	require.NoError(t, store.(*repository).Untag(ctx, "latest"))
 
 	_, err = store.Resolve(ctx, "latest")
-	assert.Error(t, err, "removed tag must not resolve")
+	require.Error(t, err, "removed tag must not resolve")
 
 	blobs, err := archive.ListBlobs(ctx)
 	require.NoError(t, err)
 	assert.Contains(t, blobs, manifestDigest.String(), "blob must not be deleted by untagging")
 }
-

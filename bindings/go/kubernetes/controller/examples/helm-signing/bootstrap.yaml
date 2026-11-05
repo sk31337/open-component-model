@@ -1,11 +1,3 @@
-apiVersion: v1
-kind: Secret
-metadata:
-  name: helm-signing-secret
-data:
-  # Base64 encoded value of the public key ocm.software.pub
-  ocm.software: "LS0tLS1CRUdJTiBSU0EgUFVCTElDIEtFWS0tLS0tCk1JSUJDZ0tDQVFFQTE0UUhEdHlaVFJXbThCZDdoZjVkVnp1L3VhQ3JVSmU4UFhXc2M0U0ZEWjJuRWZWWmZ2Rm8KQXV4aFF6UzFjN2dEOVlmRDBTSnpKU0ZnbmNlY29EQTI5TTBPTFltd2ptQWZoajlBNm1YNm1JbXlienVPYU9vago0RkpabkpkM3JGek5Cb0t3cW9ld0lIUkIvb1R6ZDZIWDZmQUM1M2RyYW8vaDFoTWpFODFEcld5a1hSQmd2ekJpClZ6ZGd1N0ZleUxMVzZEVzE1VmZMdmlpL1RTVk9RT3FlTHdpc3hUR2JpNjdMYy8vVFRnQlZCRUg5NjU0MnB2bjAKUTVuRzVKa3hGVWY2ajBxM3lkM0lPVW9nUHZJbzNkcDllR1Q0b1VRTTNTSTdKcC9NRG5NNHEySkpjbERNL1pZTQpwWE5ub2VXWlQ3NEZ3QzdBcTdBWmxKSG9hRHVqVGdGSTR3SURBUUFCCi0tLS0tRU5EIFJTQSBQVUJMSUMgS0VZLS0tLS0K"
----
 apiVersion: delivery.ocm.software/v1alpha1
 kind: Repository
 metadata:
@@ -23,10 +15,10 @@ metadata:
   name: helm-signing-component
 spec:
   component: ocm.software/ocm-k8s-toolkit/examples/helm-signing
-  verify:
-    - signature: ocm.software
-      secretRef:
-        name: helm-signing-secret
+  ocmConfig:
+    - apiVersion: v1
+      kind: Secret
+      name: helm-signing-ocmconfig
   repositoryRef:
     name: helm-signing-repository
   semver: 1.0.0
@@ -44,11 +36,90 @@ spec:
       resource:
         name: kro-rgd
 ---
+# The NamespacedDeployer applies the cluster-scoped ResourceGraphDefinition with the permissions of this
+# service account, so it needs a ClusterRole for ResourceGraphDefinitions.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helm-signing-deployer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: helm-signing-deployer
+rules:
+  - apiGroups: ["kro.run"]
+    resources: ["resourcegraphdefinitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: helm-signing-deployer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: helm-signing-deployer
+subjects:
+  - kind: ServiceAccount
+    name: helm-signing-deployer
+    namespace: default
+---
 apiVersion: delivery.ocm.software/v1alpha1
-kind: Deployer
+kind: NamespacedDeployer
 metadata:
   name: helm-signing-deployer
 spec:
   resourceRef:
     name: helm-signing-resource-rgd
+  serviceAccountName: helm-signing-deployer
+---
+apiVersion: delivery.ocm.software/v1alpha1
+kind: Resource
+metadata:
+  name: helm-signing-crossplane-resource-xrd
+spec:
+  componentRef:
+    name: helm-signing-component
+  resource:
+    byReference:
+      resource:
+        name: crossplane-xrd
+---
+# The NamespacedDeployer applies the cluster-scoped Crossplane XRD and Composition with the
+# permissions of this service account, so it needs a ClusterRole for apiextensions.crossplane.io.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helm-signing-crossplane-deployer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: helm-signing-crossplane-deployer
+rules:
+  - apiGroups: ["apiextensions.crossplane.io"]
+    resources: ["compositeresourcedefinitions", "compositions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: helm-signing-crossplane-deployer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: helm-signing-crossplane-deployer
+subjects:
+  - kind: ServiceAccount
+    name: helm-signing-crossplane-deployer
     namespace: default
+---
+apiVersion: delivery.ocm.software/v1alpha1
+kind: NamespacedDeployer
+metadata:
+  name: helm-signing-crossplane-deployer
+spec:
+  resourceRef:
+    name: helm-signing-crossplane-resource-xrd
+  serviceAccountName: helm-signing-crossplane-deployer

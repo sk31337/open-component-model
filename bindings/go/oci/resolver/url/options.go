@@ -49,10 +49,8 @@ func WithSubPath(subPath string) Option {
 	})
 }
 
-// WithBlobCache wires a manifest blob cache into the resolver. Stores
-// returned by [CachingResolver.StoreForReference] are wrapped with
-// [cache.Repository] so their Fetch consults the cache; layer blobs
-// and other non-manifest media types pass through unchanged.
+// WithBlobCache enables manifest Fetch caching for stores returned by
+// [CachingResolver.StoreForReference], leaving other media types uncached.
 //
 // Pass nil to disable blob caching (the default).
 func WithBlobCache(blob *cache.BlobCache) Option {
@@ -61,14 +59,28 @@ func WithBlobCache(blob *cache.BlobCache) Option {
 	})
 }
 
-// WithReferenceCache wires a reference cache into the resolver.
-// Stores returned by [CachingResolver.StoreForReference] are wrapped
-// with [cache.Repository] so their Resolve consults the reference
-// cache before performing a remote round-trip.
+// WithReferenceCache configures reference caching for stores returned by
+// [CachingResolver.StoreForReference].
 //
 // Pass nil to disable reference caching (the default).
 func WithReferenceCache(refs *cache.ReferenceCache) Option {
 	return OptionFunc(func(resolver *CachingResolver) {
 		resolver.SetReferenceCache(refs)
+	})
+}
+
+// WithChunkedPush enables chunked blob upload for remote repositories handed
+// out by this resolver. chunkSize is the target PATCH chunk size in bytes;
+// threshold is the minimum blob size for chunking to engage (blobs below it and
+// all manifests use monolithic upload). A chunkSize <= 0 disables chunking; a
+// threshold <= 0 uses remotestore.DefaultChunkThreshold.
+//
+// Chunked upload also enables streaming pushes (see remotestore.StreamingPusher)
+// so blobs of unknown size or digest can be uploaded without buffering.
+// Chunked and streaming pushes remain available with either cache enabled.
+func WithChunkedPush(chunkSize, threshold int64) Option {
+	return OptionFunc(func(resolver *CachingResolver) {
+		resolver.chunkSize = chunkSize
+		resolver.chunkThreshold = threshold
 	})
 }

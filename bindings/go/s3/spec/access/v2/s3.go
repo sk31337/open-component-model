@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -25,7 +26,8 @@ type S3 struct {
 	Type runtime.Type `json:"type"`
 
 	// Region is the region of the bucket. Optional; when empty it is resolved from
-	// the environment or defaulted, and is typically ignored for custom endpoints.
+	// AWS_REGION or the shared AWS config, falling back to us-east-1, and is typically
+	// ignored for custom endpoints.
 	Region string `json:"region,omitempty"`
 
 	// BucketName is the name of the bucket that holds the object.
@@ -34,7 +36,8 @@ type S3 struct {
 	// ObjectKey is the key (path) of the object within the bucket.
 	ObjectKey string `json:"objectKey"`
 
-	// MediaType is the media type of the referenced object.
+	// MediaType is the media type of the referenced object. If empty, the Content-Type
+	// of the object is used, falling back to application/octet-stream.
 	MediaType string `json:"mediaType,omitempty"`
 
 	// Version pins a specific S3 object version (versionId). When empty the latest
@@ -42,12 +45,50 @@ type S3 struct {
 	Version string `json:"version,omitempty"`
 
 	// Endpoint is the base endpoint of an S3-compatible store (e.g. MinIO, Ceph,
-	// R2). When empty, AWS S3 is targeted.
+	// R2), such as https://minio.internal:9000. When empty, AWS S3 is targeted.
 	Endpoint string `json:"endpoint,omitempty"`
 
-	// UsePathStyle enables path-style addressing (bucket in the path instead of the
-	// host). Required by most self-hosted S3-compatible stores.
+	// UsePathStyle enables path-style addressing (<endpoint>/<bucket>/<key>, bucket in
+	// the path instead of the host). Required by most self-hosted S3-compatible stores.
+	// Defaults to false.
 	UsePathStyle bool `json:"usePathStyle,omitempty"`
+}
+
+// UnmarshalJSON accepts legacy field names for compatibility with older S3 records.
+// Marshaling and the schema retain only the v2 field names.
+func (t *S3) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	var legacy, modern bool
+	for field := range fields {
+		switch strings.ToLower(field) {
+		case "bucket", "key":
+			legacy = true
+		case "bucketname", "objectkey":
+			modern = true
+		}
+	}
+	if legacy && modern {
+		return errors.New("ambiguous S3 access spec: cannot mix bucket/key with bucketName/objectKey")
+	}
+
+	type plain S3
+	decoded := struct {
+		plain
+		Bucket string `json:"bucket"`
+		Key    string `json:"key"`
+	}{plain: plain(*t), Bucket: t.BucketName, Key: t.ObjectKey}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if legacy {
+		decoded.BucketName = decoded.Bucket
+		decoded.ObjectKey = decoded.Key
+	}
+	*t = S3(decoded.plain)
+	return nil
 }
 
 // Validate verifies that the required fields of the S3 access are set.

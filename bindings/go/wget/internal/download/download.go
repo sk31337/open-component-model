@@ -1,25 +1,37 @@
 // Package download contains the shared HTTP download logic for the wget bindings.
 // Callers convert their own specification into a [Request] and invoke [Download],
 // so the transport, credential handling and size limiting live in exactly one place.
+//
+// The returned [Blob] streams the HTTP response: nothing is buffered in memory or
+// written to disk. Checks over the content (size limit, digests, [Verifier]) run
+// in the blob's reader and surface from its Read and Close.
 package download
 
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 
-	"ocm.software/open-component-model/bindings/go/runtime"
-	credv1 "ocm.software/open-component-model/bindings/go/wget/spec/credentials/v1"
+	ocmhttp "ocm.software/open-component-model/bindings/go/http"
+	"ocm.software/open-component-model/bindings/go/wget/httpauth"
 )
 
-const tempFilePattern = "ocm-wget-download-*"
+// Computed holds the digests a reader computed over a response, keyed by
+// [DigestAlgorithm.Name] with lowercase hex values.
+type Computed struct {
+	// Content covers the bytes the reader returned.
+	Content map[string]string
+	// Pinned is the digest set with [Blob.SetPrecalculatedDigest], or empty. The
+	// content has to match it.
+	Pinned string
+}
+
+// Verifier checks a response body that a reader consumed in full. header is the
+// header of the response the body came from.
+type Verifier func(header http.Header, computed Computed) error
 
 // Request describes a single HTTP download and carries the primitive parameters
 // of the request.
@@ -39,28 +51,56 @@ type Request struct {
 	NoRedirect bool
 }
 
-// Download performs the HTTP request described by req and returns the response body
-// as a blob backed by a file on disk. Bodies are streamed rather than buffered, so
-// memory use stays flat regardless of response size; the file is created under the
-// directory given by [WithTempDir] and outlives this call.
+// Download prepares the HTTP request described by req and returns a blob
+// streaming the response body. No request is sent here: every reader of the
+// blob sends it, and the blob's metadata is learned as described on [Blob].
 //
-// The returned [Blob] owns that file: callers should [Blob.Close] it once they are
-// done, and an unclosed blob has its file removed when it becomes unreachable.
+// Before a reader hands out the body, the status code, an announced
+// Content-Length above the maximum download size and the [HeaderCheck] are
+// checked; a failure is returned from the reader's first Read. A body that
+// exceeds the limit while streaming, a body of another size than announced and a
+// failing [Verifier] fail the reader at the end of the body.
 //
 // The HTTP client, credentials and maximum download size are supplied via options;
 // see [WithClient], [WithCredentials] and [WithMaxDownloadSize].
-func Download(ctx context.Context, req Request, opts ...Option) (_ *Blob, err error) {
+func Download(ctx context.Context, req Request, opts ...Option) (*Blob, error) {
 	o := &option{}
 	for _, opt := range opts {
 		opt(o)
 	}
 
+	// A nil option means "use the default"; a zero or negative value disables the limit.
+	maxDownloadSize := DefaultMaxDownloadSize
+	if o.MaxDownloadSize != nil {
+		maxDownloadSize = *o.MaxDownloadSize
+	}
+
+	f, err := newFetcher(ctx, req, o, maxDownloadSize)
+	if err != nil {
+		return nil, err
+	}
+	return newBlob(f, req.MediaType, o), nil
+}
+
+// fetcher sends the request of a download.
+type fetcher struct {
+	client *http.Client
+	// request is the authenticated request; every request sends a clone of it.
+	request *http.Request
+	// safeURL is the request URL without userinfo, query and fragment, for use
+	// in errors and logs.
+	safeURL string
+	maxSize int64 // <=0 means unlimited
+}
+
+// newFetcher builds the authenticated request and the client to send it with.
+func newFetcher(ctx context.Context, req Request, o *option, maxSize int64) (*fetcher, error) {
 	if req.URL == "" {
 		return nil, fmt.Errorf("url is required")
 	}
 	client := o.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = ocmhttp.New()
 	}
 
 	parsedURL, err := url.Parse(req.URL)
@@ -83,6 +123,7 @@ func Download(ctx context.Context, req Request, opts ...Option) (_ *Blob, err er
 		method = req.Verb
 	}
 
+	// A bytes.Reader body lets the request set GetBody, so it can be sent again.
 	var body io.Reader
 	if len(req.Body) > 0 {
 		body = bytes.NewReader(req.Body)
@@ -98,177 +139,73 @@ func Download(ctx context.Context, req Request, opts ...Option) (_ *Blob, err er
 			httpReq.Header.Add(k, v)
 		}
 	}
-
+	// A client with compression enabled (e.g. a plain *http.Client injected via
+	// WithClient) adds Accept-Encoding: gzip and transparently decodes the body,
+	// so the blob would no longer be the served bytes that sizes, advertised
+	// checksums and pinned digests describe. An explicit header disables that.
+	if httpReq.Header.Get("Accept-Encoding") == "" {
+		httpReq.Header.Set("Accept-Encoding", "identity")
+	}
 	if req.NoRedirect {
-		client = cloneClientWithNoRedirect(client)
+		client = CloneClientWithNoRedirect(client)
 	}
 
-	if err := applyCredentials(ctx, httpReq, &client, o.Credentials); err != nil {
+	if err := httpauth.Apply(ctx, httpReq, &client, o.Credentials); err != nil {
 		return nil, fmt.Errorf("error applying credentials: %w", err)
 	}
+	return &fetcher{
+		client:  client,
+		request: httpReq,
+		safeURL: safeURL.String(),
+		maxSize: maxSize,
+	}, nil
+}
 
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("error performing HTTP request to %s: %w", safeURL.String(), err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			slog.WarnContext(ctx, "failed to close HTTP response body", "error", err)
+// repeatable reports whether the request may be sent more than once: methods
+// other than GET and HEAD may have side effects.
+func (f *fetcher) repeatable() bool {
+	return f.request.Method == http.MethodGet || f.request.Method == http.MethodHead
+}
+
+// clone returns a copy of the request that can be sent again.
+func (f *fetcher) clone() (*http.Request, error) {
+	r := f.request.Clone(f.request.Context())
+	if f.request.GetBody != nil {
+		body, err := f.request.GetBody()
+		if err != nil {
+			return nil, fmt.Errorf("error recreating request body for %s: %w", f.safeURL, err)
 		}
-	}()
+		r.Body = body
+	}
+	return r, nil
+}
 
+// send performs r, checks the response status and checks the content size
+// against the maximum. On success the caller owns the response body.
+func (f *fetcher) send(r *http.Request) (representation, error) {
+	resp, err := f.client.Do(r)
+	if err != nil {
+		return representation{}, fmt.Errorf("error performing HTTP request to %s: %w", f.safeURL, err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP request to %s returned status %d", safeURL.String(), resp.StatusCode)
+		_ = resp.Body.Close()
+		return representation{}, fmt.Errorf("HTTP request to %s returned status %d", f.safeURL, resp.StatusCode)
 	}
-
-	// A nil option means "use the default"; a zero or negative value disables the limit.
-	maxDownloadSize := DefaultMaxDownloadSize
-	if o.MaxDownloadSize != nil {
-		maxDownloadSize = *o.MaxDownloadSize
+	rep := representation{resp: resp, size: bodySize(resp)}
+	// When the content size is known up front, oversized content is rejected
+	// before any of it is transferred.
+	if f.maxSize > 0 && rep.size > f.maxSize {
+		_ = resp.Body.Close()
+		return representation{}, f.tooLarge()
 	}
-
-	// When the server announces the size up front, an oversized body is rejected
-	// before any of it is transferred. ContentLength is negative when unknown.
-	if maxDownloadSize > 0 && resp.ContentLength > maxDownloadSize {
-		return nil, fmt.Errorf("response body from %s exceeds maximum allowed size of %d bytes", safeURL.String(), maxDownloadSize)
-	}
-
-	respBody := io.Reader(resp.Body)
-	if maxDownloadSize > 0 {
-		respBody = io.LimitReader(resp.Body, maxDownloadSize+1)
-	}
-
-	file, err := os.CreateTemp(o.TempDir, tempFilePattern)
-	if err != nil {
-		return nil, fmt.Errorf("error creating temporary file for %s: %w", safeURL.String(), err)
-	}
-	path := file.Name()
-
-	defer func() {
-		if err != nil {
-			_ = os.Remove(path)
-		}
-	}()
-
-	written, err := io.Copy(file, respBody)
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return nil, fmt.Errorf("error writing response body from %s to %s: %w", safeURL.String(), path, err)
-	}
-
-	if maxDownloadSize > 0 && written > maxDownloadSize {
-		return nil, fmt.Errorf("response body from %s exceeds maximum allowed size of %d bytes", safeURL.String(), maxDownloadSize)
-	}
-
-	mediaType := req.MediaType
-	if mediaType == "" {
-		mediaType = resp.Header.Get("Content-Type")
-	}
-	if mediaType == "" {
-		mediaType = "application/octet-stream"
-	}
-
-	b, err := newBlob(path)
-	if err != nil {
-		return nil, fmt.Errorf("error creating blob for %s from %s: %w", safeURL.String(), path, err)
-	}
-	b.SetMediaType(mediaType)
-
-	return b, nil
+	return rep, nil
 }
 
-// applyCredentials applies OCM credentials to the HTTP request or client.
-// Supported credential types:
-//   - certificate + privateKey (+ optional certificateAuthority): mTLS client
-//     certificate, applied to the transport independently of the header auth below
-//   - identityToken: Bearer token in the Authorization header
-//   - username + password: HTTP Basic Authentication
-//
-// The mTLS client certificate composes with the header-based auth. Bearer and
-// Basic both use the Authorization header and are mutually exclusive; the bearer
-// token takes precedence when both are set.
-//
-// Both WgetCredentials/v1 and legacy DirectCredentials/v1 are accepted.
-func applyCredentials(ctx context.Context, req *http.Request, client **http.Client, credentials runtime.Typed) error {
-	if credentials == nil {
-		return nil
-	}
-
-	creds, err := credv1.ConvertToWgetCredentials(credentials)
-	if err != nil {
-		return fmt.Errorf("error converting credentials: %w", err)
-	}
-
-	// The mTLS client certificate is a transport-layer credential and is applied
-	// independently of the header-based authentication below, so it can be
-	// combined with a bearer token or basic auth.
-	if creds.Certificate != "" {
-		// A client certificate only takes effect during a TLS handshake. Over
-		// plain HTTP it is silently unused, so warn the user it has no effect.
-		if req.URL.Scheme != "https" {
-			slog.WarnContext(ctx, "client certificate credentials provided for a non-HTTPS URL", "scheme", req.URL.Scheme)
-		}
-
-		cert, err := tls.X509KeyPair([]byte(creds.Certificate), []byte(creds.PrivateKey))
-		if err != nil {
-			return fmt.Errorf("invalid certificate/privateKey for mTLS: %w", err)
-		}
-
-		tlsCfg := &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{cert},
-		}
-
-		if creds.CertificateAuthority != "" {
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM([]byte(creds.CertificateAuthority)) {
-				return fmt.Errorf("failed to parse certificateAuthority PEM")
-			}
-			tlsCfg.RootCAs = pool
-		}
-
-		// Clone the client and install an mTLS transport, preserving the
-		// original transport's settings (proxy, timeouts, connection pooling).
-		existing := *client
-		var baseTransport *http.Transport
-		if t, ok := existing.Transport.(*http.Transport); ok && t != nil {
-			baseTransport = t.Clone()
-		} else {
-			if t, ok = http.DefaultTransport.(*http.Transport); ok && t != nil {
-				baseTransport = t.Clone()
-			} else {
-				baseTransport = &http.Transport{}
-			}
-		}
-		baseTransport.TLSClientConfig = tlsCfg
-		cloned := &http.Client{
-			Timeout:       existing.Timeout,
-			Jar:           existing.Jar,
-			CheckRedirect: existing.CheckRedirect,
-			Transport:     baseTransport,
-		}
-		*client = cloned
-	}
-
-	// IdentityToken (Bearer) and Username/Password (Basic) both set the
-	// Authorization header, so at most one applies. IdentityToken takes
-	// precedence when both are set.
-	if creds.IdentityToken != "" && creds.Username != "" {
-		slog.WarnContext(ctx, "both bearer token and basic auth credentials provided; using the bearer token and ignoring basic auth")
-	}
-	switch {
-	case creds.IdentityToken != "":
-		req.Header.Set("Authorization", "Bearer "+creds.IdentityToken)
-	case creds.Username != "":
-		req.SetBasicAuth(creds.Username, creds.Password)
-	}
-
-	return nil
+func (f *fetcher) tooLarge() error {
+	return fmt.Errorf("response body from %s exceeds maximum allowed size of %d bytes", f.safeURL, f.maxSize)
 }
 
-func cloneClientWithNoRedirect(original *http.Client) *http.Client {
+func CloneClientWithNoRedirect(original *http.Client) *http.Client {
 	c := *original
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse

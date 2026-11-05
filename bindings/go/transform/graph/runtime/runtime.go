@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
+	"time"
 
-	"github.com/google/cel-go/cel"
+	"cel.dev/cel-go/cel"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	stv6jsonschema "ocm.software/open-component-model/bindings/go/cel/jsonschema/santhosh-tekuri/v6"
@@ -54,6 +57,8 @@ type ProgressEvent struct {
 	Err            error
 }
 
+// Runtime evaluates every transformation in the graph. It is safe for concurrent
+// use: EvaluatedExpressionCache and EvaluatedTransformations are guarded by mu.
 type Runtime struct {
 	Environment              *cel.Env
 	EvaluatedExpressionCache map[string]any
@@ -61,6 +66,82 @@ type Runtime struct {
 
 	Transformers map[runtime.Type]Transformer
 	Events       chan<- ProgressEvent
+
+	// Retry re-runs a transformer whose Transform failed with a retryable
+	// error. Nil disables retries.
+	Retry *RetryPolicy
+
+	mu sync.RWMutex
+}
+
+// RetryPolicy re-runs a failed Transform call. Transformers must be safe to
+// re-run with the same input for the policy to be used, which holds for
+// transformers that only read from or write content-addressed data to their
+// targets (e.g. OCM transfer nodes).
+type RetryPolicy struct {
+	// MaxAttempts bounds the total number of Transform calls per node,
+	// including the first. Values below 2 disable retries.
+	MaxAttempts int
+	// Backoff is the wait before the second attempt; it doubles per attempt.
+	Backoff time.Duration
+	// Retryable reports whether an error is worth another attempt.
+	Retryable func(error) bool
+}
+
+// PermanentError is implemented by errors that must never be retried,
+// whatever RetryPolicy.Retryable says: failures where a re-run could repeat a
+// side effect, such as a non-idempotent request the server may already have
+// processed. It is matched anywhere in the error chain, so transformers can
+// declare their own error types without importing this package.
+type PermanentError interface {
+	error
+	Permanent() bool
+}
+
+// Permanent wraps err in a PermanentError.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentError{err: err}
+}
+
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string   { return e.err.Error() }
+func (e *permanentError) Unwrap() error   { return e.err }
+func (e *permanentError) Permanent() bool { return true }
+
+func isPermanent(err error) bool {
+	var p PermanentError
+	return errors.As(err, &p) && p.Permanent()
+}
+
+// transform runs transformer, retrying per b.Retry. Cancellation of ctx
+// always ends the loop with the last error.
+func (b *Runtime) transform(ctx context.Context, transformer Transformer, transformation graph.Transformation) (runtime.Typed, error) {
+	backoff := time.Duration(0)
+	if b.Retry != nil {
+		backoff = b.Retry.Backoff
+	}
+	for attempt := 1; ; attempt++ {
+		transformed, err := transformer.Transform(ctx, transformation.AsRaw())
+		if err == nil || b.Retry == nil || b.Retry.Retryable == nil ||
+			attempt >= b.Retry.MaxAttempts || ctx.Err() != nil ||
+			isPermanent(err) || !b.Retry.Retryable(err) {
+			return transformed, err
+		}
+		slog.WarnContext(ctx, "retrying transformation after transient error",
+			"transformation", transformation.DisplayName(), "attempt", attempt, "maxAttempts", b.Retry.MaxAttempts, "error", err)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, err
+		case <-timer.C:
+		}
+		backoff *= 2
+	}
 }
 
 func (b *Runtime) ProcessValue(ctx context.Context, transformation graph.Transformation) error {
@@ -82,31 +163,45 @@ func (b *Runtime) ProcessValue(ctx context.Context, transformation graph.Transfo
 }
 
 func (b *Runtime) processTransformation(ctx context.Context, transformation graph.Transformation) error {
+	// expressionData carries only the values of the expressions this
+	// transformation references, so the resolver gets a small node-local map
+	// instead of a clone of the whole shared expression cache.
+	expressionData := make(map[string]any)
 	for _, fieldDescriptor := range transformation.FieldDescriptors {
 		for _, expression := range fieldDescriptor.Expressions {
-			if _, found := b.EvaluatedExpressionCache[expression.String()]; found {
-				continue
+			key := expression.String()
+			b.mu.RLock()
+			val, found := b.EvaluatedExpressionCache[key]
+			b.mu.RUnlock()
+			if !found {
+				program, err := b.Environment.Program(expression.AST)
+				if err != nil {
+					return fmt.Errorf("failed to create program for expression %q: %w", key, err)
+				}
+				// The activation reads predecessor results, which are final by the
+				// time this node runs. The read lock only guards against concurrent
+				// writes from sibling nodes storing their own results.
+				b.mu.RLock()
+				result, _, err := program.Eval(b.EvaluatedTransformations)
+				b.mu.RUnlock()
+				if err != nil {
+					return fmt.Errorf("failed to evaluate expression %q: %w", key, err)
+				}
+				val, err = GoNativeValue(result)
+				if err != nil {
+					return fmt.Errorf("failed to convert result of expression %q to go native type: %w", key, err)
+				}
+				b.mu.Lock()
+				b.EvaluatedExpressionCache[key] = val
+				b.mu.Unlock()
 			}
-			program, err := b.Environment.Program(expression.AST)
-			if err != nil {
-				return fmt.Errorf("failed to create program for expression %q: %w", expression.String(), err)
-			}
-			result, _, err := program.Eval(b.EvaluatedTransformations)
-			if err != nil {
-				return fmt.Errorf("failed to evaluate expression %q: %w", expression.String(), err)
-			}
-
-			val, err := GoNativeValue(result)
-			if err != nil {
-				return fmt.Errorf("failed to convert result of expression %q to go native type: %w", expression.String(), err)
-			}
-			b.EvaluatedExpressionCache[expression.String()] = val
+			expressionData[key] = val
 		}
 	}
-	res := resolver.NewResolver(transformation.Spec.Data, b.EvaluatedExpressionCache, specSubSchema(transformation.Schema))
+	res := resolver.NewResolver(transformation.Spec.Data, expressionData, specSubSchema(transformation.Schema))
 	summary := res.Resolve(transformation.FieldDescriptors)
 	if len(summary.Errors) > 0 {
-		return fmt.Errorf("failed to resolve transformation %q: %w", transformation.ID, errors.Join(summary.Errors...))
+		return fmt.Errorf("failed to resolve transformation %q: %w", transformation.DisplayName(), errors.Join(summary.Errors...))
 	}
 
 	unstructuredTransformationData := transformation.GenericTransformation.AsUnstructured().Data
@@ -115,10 +210,10 @@ func (b *Runtime) processTransformation(ctx context.Context, transformation grap
 		transformation.Schema,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to parse resolved transformation %q: %w", transformation.ID, err)
+		return fmt.Errorf("failed to parse resolved transformation %q: %w", transformation.DisplayName(), err)
 	}
 	if len(fieldDescriptors) > 0 {
-		return fmt.Errorf("transformation %q has unresolved fields after resolution", transformation.ID)
+		return fmt.Errorf("transformation %q has unresolved fields after resolution", transformation.DisplayName())
 	}
 
 	runtimeType := transformation.GetType()
@@ -131,13 +226,13 @@ func (b *Runtime) processTransformation(ctx context.Context, transformation grap
 		return fmt.Errorf("no transformer runtime registered for type %s", runtimeType)
 	}
 
-	transformed, err := transformer.Transform(ctx, transformation.AsRaw())
+	transformed, err := b.transform(ctx, transformer, transformation)
 	if err != nil {
-		return fmt.Errorf("failed to transform transformation %q: %w", transformation.ID, err)
+		return fmt.Errorf("failed to transform transformation %q: %w", transformation.DisplayName(), err)
 	}
 	updated, err := v1alpha1.GenericTransformationFromTyped(transformed)
 	if err != nil {
-		return fmt.Errorf("failed to convert updated transformation %q to generic transformation: %w", transformation.ID, err)
+		return fmt.Errorf("failed to convert updated transformation %q to generic transformation: %w", transformation.DisplayName(), err)
 	}
 	evaluatedTransformation := updated.AsUnstructured().Data
 
@@ -146,13 +241,15 @@ func (b *Runtime) processTransformation(ctx context.Context, transformation grap
 		transformation.Schema,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to parse evaluated transformation %q: %w", transformation.ID, err)
+		return fmt.Errorf("failed to parse evaluated transformation %q: %w", transformation.DisplayName(), err)
 	}
 	if len(fieldDescriptors) > 0 {
-		return fmt.Errorf("transformation %q has unresolved fields after evaluation", transformation.ID)
+		return fmt.Errorf("transformation %q has unresolved fields after evaluation", transformation.DisplayName())
 	}
 
+	b.mu.Lock()
 	b.EvaluatedTransformations[transformation.ID] = evaluatedTransformation
+	b.mu.Unlock()
 	return nil
 }
 

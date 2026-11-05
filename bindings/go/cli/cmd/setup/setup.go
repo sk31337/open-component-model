@@ -16,15 +16,17 @@ import (
 	ocmctx "ocm.software/open-component-model/bindings/go/cli/internal/context"
 	"ocm.software/open-component-model/bindings/go/cli/internal/plugin/builtin"
 	"ocm.software/open-component-model/bindings/go/cli/internal/plugin/spec/config/v2alpha1"
+	checksumhttpv1alpha1 "ocm.software/open-component-model/bindings/go/configuration/checksum/http/v1alpha1/spec"
 	genericv1 "ocm.software/open-component-model/bindings/go/configuration/generic/v1/spec"
 	"ocm.software/open-component-model/bindings/go/credentials"
 	credentialsRuntime "ocm.software/open-component-model/bindings/go/credentials/spec/config/runtime"
 	httpv1alpha1 "ocm.software/open-component-model/bindings/go/http/spec/config/v1alpha1"
+	ocitar "ocm.software/open-component-model/bindings/go/oci/tar"
 	"ocm.software/open-component-model/bindings/go/plugin/manager"
 )
 
 func OCMConfig(cmd *cobra.Command) error {
-	cfg, err := configuration.GetFlattenedOCMConfigForCommand(cmd)
+	cfg, err := configuration.GetOCMConfigForCommand(cmd)
 	if err != nil {
 		if flag := cmd.Flag(configuration.OCMConfigCommandArgument); flag != nil && flag.Changed {
 			return fmt.Errorf("could not load configuration: %w", err)
@@ -32,14 +34,13 @@ func OCMConfig(cmd *cobra.Command) error {
 		slog.DebugContext(cmd.Context(), "could not get configuration", slog.String("error", err.Error()))
 		cfg = &genericv1.Config{}
 	}
-
 	ctx := ocmctx.WithConfiguration(cmd.Context(), cfg)
 	cmd.SetContext(ctx)
 	return nil
 }
 
 func PluginManager(cmd *cobra.Command) error {
-	pluginManager := manager.NewPluginManager(cmd.Context())
+	pluginManager := manager.NewPluginManager(cmd.Context(), manager.WithArtifactVerifier(ocitar.LayoutVerifier{}))
 
 	if cfg := ocmctx.FromContext(cmd.Context()).Configuration(); cfg == nil {
 		slog.WarnContext(cmd.Context(), "could not get configuration to initialize plugin manager")
@@ -90,7 +91,11 @@ func PluginManager(cmd *cobra.Command) error {
 		slog.String("tlsHandshakeTimeout", timeoutString(httpConfig.TLSHandshakeTimeout)),
 		slog.Any("hosts", httpConfig.Hosts),
 	)
-	if err := builtin.Register(pluginManager, filesystemConfig, httpConfig, slog.Default()); err != nil {
+	checksumHTTPConfig, err := checksumhttpv1alpha1.LookupConfig(ocmContext.Configuration())
+	if err != nil {
+		return fmt.Errorf("could not get checksum-http configuration: %w", err)
+	}
+	if err := builtin.Register(pluginManager, filesystemConfig, httpConfig, checksumHTTPConfig, slog.Default()); err != nil {
 		return fmt.Errorf("could not register builtin plugins: %w", err)
 	}
 
@@ -121,7 +126,8 @@ func CredentialGraph(cmd *cobra.Command) error {
 		RepositoryPluginProvider:       pluginManager.CredentialRepositoryRegistry,
 		CredentialPluginProvider:       pluginManager.CredentialPluginRegistry,
 		CredentialRepositoryTypeScheme: pluginManager.CredentialRepositoryRegistry.RepositoryScheme(),
-		CredentialTypeSchemeProvider:   pluginManager.CredentialRepositoryRegistry,
+		CredentialTypeSchemeProvider:   pluginManager.CredentialTypeRegistry,
+		ConsumerIdentityTypeScheme:     pluginManager.CredentialTypeRegistry.GetConsumerIdentityTypeScheme(),
 	}
 
 	var credCfg *credentialsRuntime.Config

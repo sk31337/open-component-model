@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	genericv1 "ocm.software/open-component-model/bindings/go/configuration/generic/v1/spec"
 	"ocm.software/open-component-model/bindings/go/plugin/internal/dummytype"
 	dummyv1 "ocm.software/open-component-model/bindings/go/plugin/internal/dummytype/v1"
+	credentialpluginv1 "ocm.software/open-component-model/bindings/go/plugin/manager/contracts/credentialplugin/v1"
 	ocmrepositoryv1 "ocm.software/open-component-model/bindings/go/plugin/manager/contracts/ocmrepository/v1"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/types"
 	pluginruntime "ocm.software/open-component-model/bindings/go/plugin/manager/types/runtime"
@@ -102,7 +104,7 @@ func TestConfigurationPassedToPlugin(t *testing.T) {
 			},
 		},
 	}
-	writer := bytes.NewBuffer(nil)
+	writer := &syncBuffer{}
 	slog.SetDefault(slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -279,7 +281,7 @@ func TestPluginManagerShutdownWithoutWait(t *testing.T) {
 			},
 		},
 	}
-	writer := bytes.NewBuffer(nil)
+	writer := &syncBuffer{}
 	slog.SetDefault(slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -320,11 +322,7 @@ func TestPluginManagerShutdownWithoutWait(t *testing.T) {
 
 	// we need some time for the logs to be streamed back
 	require.Eventually(t, func() bool {
-		content, err := io.ReadAll(writer)
-		if err != nil {
-			return false
-		}
-		return strings.Contains(string(content), "gracefully shutting down plugin")
+		return strings.Contains(writer.String(), "gracefully shutting down plugin")
 	}, 1*time.Second, 100*time.Millisecond)
 }
 
@@ -384,7 +382,7 @@ func TestPluginManagerMultiplePluginsForSameType(t *testing.T) {
 
 func TestPluginManagerWithNoPlugins(t *testing.T) {
 	pm := NewPluginManager(context.Background())
-	require.ErrorContains(t, pm.RegisterPlugins(context.Background(), filepath.Join(".")), "no plugins found")
+	require.ErrorContains(t, pm.RegisterPlugins(context.Background(), "."), "no plugins found")
 }
 
 func TestCredentialTypeRegistryPopulatedFromPlugin(t *testing.T) {
@@ -409,6 +407,61 @@ func TestCredentialTypeRegistryPopulatedFromPlugin(t *testing.T) {
 		}
 	})
 
-	scheme := pm.CredentialRepositoryRegistry.GetCredentialTypeScheme()
+	scheme := pm.CredentialTypeRegistry.GetCredentialTypeScheme()
 	require.True(t, scheme.IsRegistered(runtime.NewVersionedType("DummyToken", "v1")))
+}
+
+// TestCredentialTypeRegistryPopulatedFromCredentialPluginCapability covers the credential plugin
+// capability: the types it declares reach the credential type registry, while the credential
+// plugin registry owns the plugin itself.
+func TestCredentialTypeRegistryPopulatedFromCredentialPluginCapability(t *testing.T) {
+	ctx := t.Context()
+	pm := NewPluginManager(context.Background())
+
+	credType := runtime.NewVersionedType("VaultToken", "v1")
+	capabilitySpec := credentialpluginv1.CapabilitySpec{
+		Type: runtime.NewUnversionedType(string(credentialpluginv1.CredentialPluginType)),
+		SupportedCredentialPluginTypes: []types.Type{
+			{Type: runtime.NewVersionedType("HashiCorpVault", "v1")},
+		},
+		CustomCredentialTypes: []types.Type{{Type: credType}},
+	}
+	pluginSpec := pluginruntime.PluginSpec{CapabilitySpecs: []runtime.Typed{&capabilitySpec}}
+	rawPluginSpec, err := pluginruntime.ConvertToSpec(&pluginSpec)
+	require.NoError(t, err)
+	serialized, err := json.Marshal(rawPluginSpec)
+	require.NoError(t, err)
+
+	testPlugin := types.Plugin{
+		ID:   "vault-plugin",
+		Path: "/tmp/test-credential-plugin.socket",
+		Config: types.Config{
+			ID:         "vault-plugin",
+			Type:       "unix",
+			PluginType: credentialpluginv1.CredentialPluginType,
+		},
+	}
+	config := &genericv1.Config{Type: runtime.Type{Name: "custom.config", Version: "v1"}}
+
+	require.NoError(t, pm.addPlugin(ctx, config, testPlugin, bytes.NewBuffer(serialized)))
+	require.True(t, pm.CredentialTypeRegistry.GetCredentialTypeScheme().IsRegistered(credType))
+}
+
+// syncBuffer is safe for concurrent use: plugin log streamers write to the
+// default slog logger from their own goroutines while tests poll the output.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

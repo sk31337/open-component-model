@@ -13,25 +13,19 @@ import (
 
 func TestConfig_ParseYAML(t *testing.T) {
 	tests := []struct {
-		name           string
-		yaml           string
-		wantRecursive  spec.Recursive
-		wantCopyMode   spec.CopyMode
-		wantUploadType spec.UploadType
+		name          string
+		yaml          string
+		wantRecursive spec.Recursive
 	}{
 		{
-			name: "all fields",
+			name: "recursive field",
 			yaml: `
 type: generic.config.ocm.software/v1
 configurations:
   - type: transfer.config.ocm.software/v1alpha1
     recursive: -1
-    copyMode: allResources
-    uploadType: ociArtifact
 `,
-			wantRecursive:  spec.RecursiveInfinite,
-			wantCopyMode:   spec.CopyModeAllResources,
-			wantUploadType: spec.UploadAsOciArtifact,
+			wantRecursive: spec.RecursiveInfinite,
 		},
 		{
 			name: "fields omitted stay empty",
@@ -40,9 +34,7 @@ type: generic.config.ocm.software/v1
 configurations:
   - type: transfer.config.ocm.software/v1alpha1
 `,
-			wantRecursive:  spec.RecursiveNone,
-			wantCopyMode:   "",
-			wantUploadType: "",
+			wantRecursive: spec.RecursiveNone,
 		},
 		{
 			name: "unversioned type alias",
@@ -50,9 +42,7 @@ configurations:
 type: generic.config.ocm.software/v1
 configurations:
   - type: transfer.config.ocm.software
-    copyMode: localBlob
 `,
-			wantCopyMode: spec.CopyModeLocalBlobResources,
 		},
 	}
 
@@ -68,8 +58,6 @@ configurations:
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.wantRecursive, cfg.Recursive)
-			assert.Equal(t, tt.wantCopyMode, cfg.CopyMode)
-			assert.Equal(t, tt.wantUploadType, cfg.UploadType)
 		})
 	}
 }
@@ -81,14 +69,14 @@ func TestConfig_Validate(t *testing.T) {
 		wantErr string
 	}{
 		{"valid empty", spec.Config{}, ""},
-		{"valid all fields", spec.Config{Recursive: spec.RecursiveInfinite, CopyMode: spec.CopyModeAllResources, UploadType: spec.UploadAsOciArtifact}, ""},
+		{"valid recursive infinite", spec.Config{Recursive: spec.RecursiveInfinite}, ""},
 		{"valid recursive none", spec.Config{Recursive: spec.RecursiveNone}, ""},
-		{"valid copyMode localBlob", spec.Config{CopyMode: spec.CopyModeLocalBlobResources}, ""},
-		{"valid uploadType localBlob", spec.Config{UploadType: spec.UploadAsLocalBlob}, ""},
-		{"invalid copyMode", spec.Config{CopyMode: "garbage"}, "invalid copyMode"},
-		{"invalid uploadType", spec.Config{UploadType: "garbage"}, "invalid uploadType"},
 		{"recursive depth not implemented", spec.Config{Recursive: 3}, "not implemented"},
 		{"invalid recursive below -1", spec.Config{Recursive: -5}, "invalid recursive"},
+		{"valid policy Ignore", spec.Config{UnmatchedResourcePolicy: spec.UnmatchedResourcePolicyIgnore}, ""},
+		{"valid policy Warn", spec.Config{UnmatchedResourcePolicy: spec.UnmatchedResourcePolicyWarn}, ""},
+		{"valid policy Fail", spec.Config{UnmatchedResourcePolicy: spec.UnmatchedResourcePolicyFail}, ""},
+		{"unknown policy", spec.Config{UnmatchedResourcePolicy: "Strict"}, "invalid unmatchedResourcePolicy"},
 	}
 
 	for _, tc := range tests {
@@ -109,22 +97,38 @@ func TestMerge(t *testing.T) {
 	})
 
 	t.Run("later non-empty fields win", func(t *testing.T) {
-		a := &spec.Config{Recursive: spec.RecursiveInfinite, CopyMode: spec.CopyModeLocalBlobResources, UploadType: spec.UploadAsLocalBlob}
-		b := &spec.Config{CopyMode: spec.CopyModeAllResources}
+		a := &spec.Config{Recursive: spec.RecursiveInfinite}
+		b := &spec.Config{Recursive: spec.RecursiveNone}
 
 		merged := spec.Merge(a, b)
 
 		assert.Equal(t, spec.RecursiveInfinite, merged.Recursive)
-		assert.Equal(t, spec.CopyModeAllResources, merged.CopyMode)
-		assert.Equal(t, spec.UploadAsLocalBlob, merged.UploadType)
 	})
 
 	t.Run("nil element is skipped", func(t *testing.T) {
-		a := &spec.Config{CopyMode: spec.CopyModeAllResources}
+		a := &spec.Config{Recursive: spec.RecursiveInfinite}
 
 		merged := spec.Merge(nil, a, nil)
 
-		assert.Equal(t, spec.CopyModeAllResources, merged.CopyMode)
+		assert.Equal(t, spec.RecursiveInfinite, merged.Recursive)
+	})
+
+	t.Run("empty policy keeps earlier policy", func(t *testing.T) {
+		merged := spec.Merge(
+			&spec.Config{UnmatchedResourcePolicy: spec.UnmatchedResourcePolicyFail},
+			&spec.Config{},
+		)
+
+		assert.Equal(t, spec.UnmatchedResourcePolicyFail, merged.UnmatchedResourcePolicy)
+	})
+
+	t.Run("later policy wins", func(t *testing.T) {
+		merged := spec.Merge(
+			&spec.Config{UnmatchedResourcePolicy: spec.UnmatchedResourcePolicyFail},
+			&spec.Config{UnmatchedResourcePolicy: spec.UnmatchedResourcePolicyIgnore},
+		)
+
+		assert.Equal(t, spec.UnmatchedResourcePolicyIgnore, merged.UnmatchedResourcePolicy)
 	})
 }
 
@@ -153,14 +157,11 @@ type: generic.config.ocm.software/v1
 configurations:
   - type: transfer.config.ocm.software/v1alpha1
     recursive: -1
-    copyMode: allResources
 `)
 		cfg, err := spec.LookupConfig(generic)
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
 		assert.Equal(t, spec.RecursiveInfinite, cfg.Recursive)
-		assert.Equal(t, spec.CopyModeAllResources, cfg.CopyMode)
-		assert.Empty(t, cfg.UploadType)
 	})
 
 	t.Run("later entry wins, unset fields fall through", func(t *testing.T) {
@@ -169,28 +170,23 @@ type: generic.config.ocm.software/v1
 configurations:
   - type: transfer.config.ocm.software/v1alpha1
     recursive: -1
-    copyMode: localBlob
-    uploadType: localBlob
   - type: transfer.config.ocm.software/v1alpha1
-    copyMode: allResources
 `)
 		cfg, err := spec.LookupConfig(generic)
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
 		assert.Equal(t, spec.RecursiveInfinite, cfg.Recursive)
-		assert.Equal(t, spec.CopyModeAllResources, cfg.CopyMode)
-		assert.Equal(t, spec.UploadAsLocalBlob, cfg.UploadType)
 	})
 
-	t.Run("invalid entry is rejected", func(t *testing.T) {
+	t.Run("stale copyMode is rejected", func(t *testing.T) {
 		generic := decode(t, `
 type: generic.config.ocm.software/v1
 configurations:
   - type: transfer.config.ocm.software/v1alpha1
-    copyMode: garbage
+    copyMode: allResources
 `)
 		_, err := spec.LookupConfig(generic)
-		require.ErrorContains(t, err, "invalid copyMode")
+		require.ErrorContains(t, err, `unknown field "copyMode"`)
 	})
 
 	t.Run("recursive depth is rejected", func(t *testing.T) {
@@ -202,5 +198,40 @@ configurations:
 `)
 		_, err := spec.LookupConfig(generic)
 		require.ErrorContains(t, err, "not implemented")
+	})
+
+	t.Run("stale uploadType is rejected", func(t *testing.T) {
+		generic := decode(t, `
+type: generic.config.ocm.software/v1
+configurations:
+  - type: transfer.config.ocm.software/v1alpha1
+    uploadType: ociArtifact
+`)
+		_, err := spec.LookupConfig(generic)
+		require.ErrorContains(t, err, `unknown field "uploadType"`)
+	})
+
+	t.Run("unmatchedResourcePolicy is decoded", func(t *testing.T) {
+		generic := decode(t, `
+type: generic.config.ocm.software/v1
+configurations:
+  - type: transfer.config.ocm.software/v1alpha1
+    unmatchedResourcePolicy: Fail
+`)
+		cfg, err := spec.LookupConfig(generic)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, spec.UnmatchedResourcePolicyFail, cfg.UnmatchedResourcePolicy)
+	})
+
+	t.Run("unknown unmatchedResourcePolicy is rejected", func(t *testing.T) {
+		generic := decode(t, `
+type: generic.config.ocm.software/v1
+configurations:
+  - type: transfer.config.ocm.software/v1alpha1
+    unmatchedResourcePolicy: strict
+`)
+		_, err := spec.LookupConfig(generic)
+		require.ErrorContains(t, err, "invalid unmatchedResourcePolicy")
 	})
 }

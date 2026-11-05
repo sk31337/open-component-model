@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	genericv1 "ocm.software/open-component-model/bindings/go/configuration/generic/v1/spec"
-	httpv1alpha1 "ocm.software/open-component-model/bindings/go/http/spec/config/v1alpha1"
 	ocmhttp "ocm.software/open-component-model/bindings/go/http"
+	httpv1alpha1 "ocm.software/open-component-model/bindings/go/http/spec/config/v1alpha1"
 )
 
 var defaultTransport = nethttp.DefaultTransport.(*nethttp.Transport)
@@ -44,6 +44,7 @@ func TestNewTransport(t *testing.T) {
 		assert.Equal(t, defaultTransport.ExpectContinueTimeout, tr.ExpectContinueTimeout)
 		assert.Equal(t, defaultTransport.MaxIdleConns, tr.MaxIdleConns)
 		assert.Equal(t, defaultTransport.ForceAttemptHTTP2, tr.ForceAttemptHTTP2)
+		assert.True(t, tr.DisableCompression)
 	})
 
 	t.Run("empty cfg preserves DefaultTransport values", func(t *testing.T) {
@@ -203,7 +204,7 @@ configurations:
     idleConnTimeout: 90s
 `)
 		c := ocmhttp.NewClient(cfg)
-		tr, ok := c.Transport.(*nethttp.Transport)
+		tr, ok := ocmhttp.UnwrapReplayable(c.Transport).(*nethttp.Transport)
 		require.True(t, ok, "expected *http.Transport, got %T", c.Transport)
 		assert.Equal(t, 7*time.Second, tr.TLSHandshakeTimeout)
 		assert.Equal(t, 90*time.Second, tr.IdleConnTimeout)

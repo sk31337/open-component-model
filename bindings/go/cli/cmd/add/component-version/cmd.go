@@ -24,6 +24,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/cli/internal/render/graph/tree"
 	"ocm.software/open-component-model/bindings/go/cli/internal/repository/ocm"
 	"ocm.software/open-component-model/bindings/go/cli/internal/subsystem"
+	versioningspec "ocm.software/open-component-model/bindings/go/configuration/versioning/v1alpha1/spec"
 	"ocm.software/open-component-model/bindings/go/constructor"
 	constructorruntime "ocm.software/open-component-model/bindings/go/constructor/runtime"
 	constructorv1 "ocm.software/open-component-model/bindings/go/constructor/spec/v1"
@@ -57,12 +58,19 @@ const (
 	LegacyDefaultArchiveName            = "transport-archive"
 )
 
+// ComponentVersionConflictPolicy is the value of the deprecated
+// --component-version-conflict-policy flag.
+//
+// Deprecated: checking first whether the version exists gives no guarantee,
+// because another client can write it between the check and our write.
+// The flag still parses, so old scripts keep running;
+// it will be removed in a later release.
 type ComponentVersionConflictPolicy string
 
 const (
+	ComponentVersionConflictPolicyReplace      ComponentVersionConflictPolicy = "replace"
 	ComponentVersionConflictPolicyAbortAndFail ComponentVersionConflictPolicy = "abort-and-fail"
 	ComponentVersionConflictPolicySkip         ComponentVersionConflictPolicy = "skip"
-	ComponentVersionConflictPolicyReplace      ComponentVersionConflictPolicy = "replace"
 )
 
 type ExternalComponentVersionCopyPolicy string
@@ -92,20 +100,20 @@ func ExternalComponentVersionCopyPolicies() []string {
 
 func (p ComponentVersionConflictPolicy) ToConstructorConflictPolicy() constructor.ComponentVersionConflictPolicy {
 	switch p {
-	case ComponentVersionConflictPolicyReplace:
-		return constructor.ComponentVersionConflictReplace
+	case ComponentVersionConflictPolicyAbortAndFail:
+		return constructor.ComponentVersionConflictAbortAndFail
 	case ComponentVersionConflictPolicySkip:
 		return constructor.ComponentVersionConflictSkip
 	default:
-		return constructor.ComponentVersionConflictAbortAndFail
+		return constructor.ComponentVersionConflictReplace
 	}
 }
 
 func ComponentVersionConflictPolicies() []string {
 	return []string{
+		string(ComponentVersionConflictPolicyReplace),
 		string(ComponentVersionConflictPolicyAbortAndFail),
 		string(ComponentVersionConflictPolicySkip),
-		string(ComponentVersionConflictPolicyReplace),
 	}
 }
 
@@ -223,8 +231,13 @@ add component-version --%[1]s ./archive --%[2]s %[3]s.yaml
 	file.VarP(cmd.Flags(), FlagComponentConstructorPath, string(FlagComponentConstructorPath[0]), DefaultComponentConstructorBaseName+".yaml", "path to the component constructor file")
 	cmd.Flags().String(FlagBlobCacheDirectory, filepath.Join(".ocm", "cache"), "path to the blob cache directory")
 	enum.Var(cmd.Flags(), FlagComponentVersionConflictPolicy, ComponentVersionConflictPolicies(), "policy to apply when a component version already exists in the repository")
+	// MarkDeprecated prints a notice when a script still passes the flag, but it
+	// also hides the flag. Unhide it so --help and the generated reference keep
+	// listing it with a DEPRECATED note until it is removed.
+	_ = cmd.Flags().MarkDeprecated(FlagComponentVersionConflictPolicy, "existing versions are replaced by default; protect them with registry tag immutability. The flag will be removed")
+	cmd.Flags().Lookup(FlagComponentVersionConflictPolicy).Hidden = false
 	enum.Var(cmd.Flags(), FlagExternalComponentVersionCopyPolicy, ExternalComponentVersionCopyPolicies(), "policy to apply when a component reference to a component version outside of the constructor or target repository is encountered")
-	cmd.Flags().Bool(FlagSkipReferenceDigestProcessing, false, "skip digest processing for resources and sources. Any resource referenced via access type will not have their digest updated.")
+	cmd.Flags().Bool(FlagSkipReferenceDigestProcessing, false, "skip digest processing for resources. Any resource referenced via access type will not have their digest updated.")
 	enum.VarP(cmd.Flags(), FlagOutput, "o", []string{render.OutputFormatTable.String(), render.OutputFormatYAML.String(), render.OutputFormatJSON.String(), render.OutputFormatNDJSON.String(), render.OutputFormatTree.String()}, "output format of the component descriptors")
 	enum.VarP(cmd.Flags(), FlagDisplayMode, "", []string{render.StaticRenderMode, render.LiveRenderMode}, `static: print the output once the complete component graph is discovered
   live (experimental): continuously updates the output to represent the current construction state of the component graph`)
@@ -315,6 +328,11 @@ func AddComponentVersion(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("getting component constructor failed: %w", err)
 	}
+	deprecationWarnings := findDeprecatedTypes(
+		pluginManager.ResourcePluginRegistry.ResourceScheme(),
+		pluginManager.InputRegistry.InputRepositoryScheme(),
+		constructorSpec,
+	)
 
 	output, err := enum.Get(cmd.Flags(), FlagOutput)
 	if err != nil {
@@ -354,6 +372,11 @@ func AddComponentVersion(cmd *cobra.Command, _ []string) error {
 		graph:              credentialGraph,
 	}
 
+	registry, err := versioningspec.RegistryFromConfig(config)
+	if err != nil {
+		return fmt.Errorf("could not build versioning registry: %w", err)
+	}
+
 	opts := constructor.Options{
 		TargetRepositoryProvider:            instance,
 		ResourceRepositoryProvider:          instance,
@@ -366,13 +389,18 @@ func AddComponentVersion(cmd *cobra.Command, _ []string) error {
 		ConcurrencyLimit:                    concurrencyLimit,
 		ComponentVersionConflictPolicy:      ComponentVersionConflictPolicy(cvConflictPolicy).ToConstructorConflictPolicy(),
 		ExternalComponentVersionCopyPolicy:  ExternalComponentVersionCopyPolicy(evCopyPolicy).ToConstructorPolicy(),
+		VersioningRegistry:                  registry,
 	}
 	if !skipReferenceDigestProcessing {
 		opts.ResourceDigestProcessorProvider = instance
 	}
 
 	constr := constructor.NewDefaultConstructor(constructorSpec, opts)
-	if err := renderComponents(cmd, constr, output, displayMode); err != nil {
+	err = renderComponents(cmd, constr, output, displayMode)
+	// Print the notice even when the build fails, so authors still see what to migrate.
+	renderDeprecatedTypeNotice(cmd.ErrOrStderr(), deprecationWarnings)
+	renderSourcesWarning(cmd.ErrOrStderr(), componentsWithSources(constructorSpec))
+	if err != nil {
 		return fmt.Errorf("failed to render components recursively: %w", err)
 	}
 	return nil
@@ -626,12 +654,12 @@ func serializeVertexToDescriptorTree(vertex *dag.Vertex[string]) (tree.Row, erro
 		return tree.Row{}, fmt.Errorf("converting descriptor to v2 failed: %w", err)
 	}
 	identity := descriptorV2.Component.ToIdentity()
-	return tree.Row{
-		Component: descriptorV2.Component.Name,
-		Version:   descriptorV2.Component.Version,
-		Provider:  descriptorV2.Component.Provider,
-		Identity:  identity.String(),
-	}, nil
+	return tree.Row{Cells: []string{
+		descriptorV2.Component.Name,
+		descriptorV2.Component.Version,
+		descriptorV2.Component.Provider,
+		identity.String(),
+	}}, nil
 }
 
 func serializeVertexToDescriptor(vertex *dag.Vertex[string]) (any, error) {

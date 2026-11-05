@@ -31,12 +31,14 @@ import (
 	"ocm.software/open-component-model/bindings/go/oci"
 	"ocm.software/open-component-model/bindings/go/oci/compref"
 	ocictf "ocm.software/open-component-model/bindings/go/oci/ctf"
+	accessv1 "ocm.software/open-component-model/bindings/go/oci/spec/access/v1"
 	ctfv1 "ocm.software/open-component-model/bindings/go/oci/spec/repository/v1/ctf"
 	"ocm.software/open-component-model/bindings/go/runtime"
 )
 
 // setupTestRepositoryWithDescriptorLibrary creates a test repository with the given component versions
 func setupTestRepositoryWithDescriptorLibrary(t *testing.T, versions ...*descriptor.Descriptor) (string, error) {
+	t.Helper()
 	r := require.New(t)
 	archivePath := t.TempDir()
 	fs, err := filesystem.NewFS(archivePath, os.O_RDWR)
@@ -73,6 +75,22 @@ func createTestDescriptor(name, version string) *descriptor.Descriptor {
 	}
 }
 
+// trimTreeOutput normalizes a rendered tree for comparison in order to make
+// expected values in tests easier to read as the column alignment fits
+func trimTreeOutput(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t\r")
+	}
+	for len(lines) > 0 && lines[0] == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // Test_Get_Component_Version_Formats tests the different output formats for the get cv command
 func Test_Get_Component_Version_Formats(t *testing.T) {
 	// Setup test repository with a single component version
@@ -96,13 +114,10 @@ func Test_Get_Component_Version_Formats(t *testing.T) {
 		expectedError  bool
 	}{
 		{
-			name: "Default Options (Table)",
+			name: "Default Options (Tree)",
 			args: []string{"get", "cv", path},
-			expectedOutput: `
-COMPONENT                   │ VERSION │ PROVIDER     
-─────────────────────────────┼─────────┼──────────────
- ocm.software/test-component │ 0.0.1   │ ocm.software
-`,
+			expectedOutput: `NESTING  COMPONENT                    VERSION  PROVIDER      IDENTITY                                       
+ └─       ocm.software/test-component  0.0.1    ocm.software  name=ocm.software/test-component,version=0.0.1`,
 			expectedError: false,
 		},
 		{
@@ -135,10 +150,13 @@ COMPONENT                   │ VERSION │ PROVIDER
 			expectedError:  false,
 		},
 		{
-			name: "tree output",
-			args: []string{"get", "cv", path, "--output=tree"},
-			expectedOutput: `NESTING  COMPONENT                    VERSION  PROVIDER      IDENTITY                                       
- └─       ocm.software/test-component  0.0.1    ocm.software  name=ocm.software/test-component,version=0.0.1`,
+			name: "table output",
+			args: []string{"get", "cv", path, "--output=table"},
+			expectedOutput: `
+COMPONENT                   │ VERSION │ PROVIDER     
+─────────────────────────────┼─────────┼──────────────
+ ocm.software/test-component │ 0.0.1   │ ocm.software
+`,
 			expectedError: false,
 		},
 		{
@@ -202,7 +220,122 @@ COMPONENT                   │ VERSION │ PROVIDER
 			r.NoError(err, "failed to list log entries")
 			r.NotEmpty(logEntries, "expected log entries to be present")
 
-			r.EqualValues(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected output")
+			r.Equal(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected output")
+		})
+	}
+}
+
+// Test_Get_Component_Version_WideTree tests the `-o widetree` output format,
+func Test_Get_Component_Version_WideTree(t *testing.T) {
+	leaf := createTestDescriptor("ocm.software/leaf", "0.0.1")
+	// Two resources sharing a name, distinguished only by their extra identity.
+	leaf.Component.Resources = []descriptor.Resource{
+		{
+			ElementMeta: descriptor.ElementMeta{
+				ObjectMeta:    descriptor.ObjectMeta{Name: "umc-server", Version: "3.0"},
+				ExtraIdentity: runtime.Identity{"variant": "legacy"},
+			},
+			Type:     "ociImage",
+			Relation: descriptor.ExternalRelation,
+			Access:   &accessv1.OCIImage{ImageReference: "ghcr.io/example/umc-server:3.0"},
+		},
+		{
+			ElementMeta: descriptor.ElementMeta{
+				ObjectMeta:    descriptor.ObjectMeta{Name: "umc-server", Version: "0.47.1"},
+				ExtraIdentity: runtime.Identity{"variant": "current"},
+			},
+			Type:     "ociImage",
+			Relation: descriptor.ExternalRelation,
+			Access:   &accessv1.OCIImage{ImageReference: "ghcr.io/example/umc-server:0.47.1"},
+		},
+	}
+
+	root := createTestDescriptor("ocm.software/root", "0.0.1")
+	root.Component.Resources = []descriptor.Resource{
+		{
+			ElementMeta: descriptor.ElementMeta{
+				ObjectMeta: descriptor.ObjectMeta{Name: "blueprint", Version: "0.0.1"},
+			},
+			Type:     "blueprint",
+			Relation: descriptor.LocalRelation,
+			Access:   &accessv1.OCIImage{ImageReference: "ghcr.io/example/blueprint:0.0.1"},
+		},
+		{
+			ElementMeta: descriptor.ElementMeta{
+				ObjectMeta: descriptor.ObjectMeta{Name: "chart", Version: "1.2.3"},
+			},
+			Type:     "helmChart",
+			Relation: descriptor.ExternalRelation,
+			Access:   &accessv1.OCIImage{ImageReference: "ghcr.io/example/chart:1.2.3"},
+		},
+	}
+	root.Component.References = []descriptor.Reference{
+		{
+			ElementMeta: descriptor.ElementMeta{
+				ObjectMeta: descriptor.ObjectMeta{Name: "leaf", Version: leaf.Component.Version},
+			},
+			Component: leaf.Component.Name,
+		},
+	}
+
+	archivePath, err := setupTestRepositoryWithDescriptorLibrary(t, root, leaf)
+	require.NoError(t, err)
+
+	ref := compref.Ref{
+		Repository: &ctfv1.Repository{FilePath: archivePath},
+		Component:  root.Component.Name,
+		Version:    root.Component.Version,
+	}
+	path := ref.String()
+
+	tests := []struct {
+		name           string
+		args           []string
+		expectedOutput string
+	}{
+		{
+			name: "widetree output",
+			args: []string{"get", "cv", path, "--output=widetree"},
+			expectedOutput: `
+ NESTING  COMPONENT          NAME       VERSION  PROVIDER      TYPE       RELATION  IDENTITY
+ └─ ●     ocm.software/root             0.0.1    ocm.software                       version=0.0.1
+    ├─                       blueprint  0.0.1                  blueprint  local     version=0.0.1
+    └─                       chart      1.2.3                  helmChart  external  version=1.2.3
+`,
+		},
+		{
+			name: "widetree output recursive",
+			args: []string{"get", "cv", path, "--output=widetree", "--recursive=-1"},
+			expectedOutput: `
+ NESTING   COMPONENT          NAME        VERSION  PROVIDER      TYPE       RELATION  IDENTITY
+ └─ ●      ocm.software/root              0.0.1    ocm.software                       version=0.0.1
+    ├─                        blueprint   0.0.1                  blueprint  local     version=0.0.1
+    ├─                        chart       1.2.3                  helmChart  external  version=1.2.3
+    └─ ●   ocm.software/leaf              0.0.1    ocm.software                       version=0.0.1
+       ├─                     umc-server  3.0                    ociImage   external  variant=legacy,version=3.0
+       └─                     umc-server  0.47.1                 ociImage   external  variant=current,version=0.47.1
+`,
+		},
+		{
+			name: "tree output does not render resources",
+			args: []string{"get", "cv", path, "--output=tree", "--recursive=-1"},
+			expectedOutput: `
+ NESTING  COMPONENT          VERSION  PROVIDER      IDENTITY
+ └─ ●     ocm.software/root  0.0.1    ocm.software  name=ocm.software/root,version=0.0.1
+    └─    ocm.software/leaf  0.0.1    ocm.software  name=ocm.software/leaf,version=0.0.1
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := require.New(t)
+			logs := test.NewJSONLogReader()
+			result := new(bytes.Buffer)
+			_, err := test.OCM(t, test.WithArgs(tt.args...), test.WithOutput(result), test.WithErrorOutput(logs))
+			r.NoError(err, "failed to run command")
+
+			r.Equal(trimTreeOutput(tt.expectedOutput), trimTreeOutput(result.String()), "expected output")
 		})
 	}
 }
@@ -224,7 +357,7 @@ func Test_Get_Component_Version_Invalid_Semver(t *testing.T) {
 
 	logs := test.NewJSONLogReader()
 	result := new(bytes.Buffer)
-	_, err = test.OCM(t, test.WithArgs("get", "cv", path, "--semver-constraint", "invalid-constraint"), test.WithOutput(result), test.WithErrorOutput(logs))
+	_, err = test.OCM(t, test.WithArgs("get", "cv", path, "--constraint", "invalid-constraint"), test.WithOutput(result), test.WithErrorOutput(logs))
 
 	require.ErrorContains(t, err, "invalid-constraint")
 	require.Error(t, err, "expected error but got none")
@@ -276,15 +409,12 @@ func Test_Get_Component_Version_Formats_Recursive(t *testing.T) {
 		expectedError  bool
 	}{
 		{
-			name: "Default Options (Table)",
+			name: "Default Options (Tree)",
 			args: []string{"get", "cv", path, "--recursive=-1"},
-			expectedOutput: `
-COMPONENT           │ VERSION │ PROVIDER     
-─────────────────────┼─────────┼──────────────
- ocm.software/root   │ 0.0.1   │ ocm.software 
- ocm.software/leaf-a │ 0.0.1   │              
- ocm.software/leaf-b │ 0.0.1   │
-`,
+			expectedOutput: `NESTING  COMPONENT            VERSION  PROVIDER      IDENTITY                               
+ └─ ●     ocm.software/root    0.0.1    ocm.software  name=ocm.software/root,version=0.0.1   
+    ├─    ocm.software/leaf-a  0.0.1    ocm.software  name=ocm.software/leaf-a,version=0.0.1 
+    └─    ocm.software/leaf-b  0.0.1    ocm.software  name=ocm.software/leaf-b,version=0.0.1`,
 			expectedError: false,
 		},
 		{
@@ -294,17 +424,9 @@ COMPONENT           │ VERSION │ PROVIDER
 - component:
     componentReferences:
     - componentName: ocm.software/leaf-a
-      digest:
-        hashAlgorithm: ""
-        normalisationAlgorithm: ""
-        value: ""
       name: leaf-a
       version: 0.0.1
     - componentName: ocm.software/leaf-b
-      digest:
-        hashAlgorithm: ""
-        normalisationAlgorithm: ""
-        value: ""
       name: leaf-b
       version: 0.0.1
     name: ocm.software/root
@@ -351,12 +473,15 @@ COMPONENT           │ VERSION │ PROVIDER
 			expectedError:  false,
 		},
 		{
-			name: "tree output",
-			args: []string{"get", "cv", path, "--output=tree", "--recursive=-1"},
-			expectedOutput: `NESTING  COMPONENT            VERSION  PROVIDER      IDENTITY                               
- └─ ●     ocm.software/root    0.0.1    ocm.software  name=ocm.software/root,version=0.0.1   
-    ├─    ocm.software/leaf-a  0.0.1    ocm.software  name=ocm.software/leaf-a,version=0.0.1 
-    └─    ocm.software/leaf-b  0.0.1    ocm.software  name=ocm.software/leaf-b,version=0.0.1`,
+			name: "table output",
+			args: []string{"get", "cv", path, "--output=table", "--recursive=-1"},
+			expectedOutput: `
+COMPONENT           │ VERSION │ PROVIDER     
+─────────────────────┼─────────┼──────────────
+ ocm.software/root   │ 0.0.1   │ ocm.software 
+ ocm.software/leaf-a │ 0.0.1   │              
+ ocm.software/leaf-b │ 0.0.1   │
+`,
 			expectedError: false,
 		},
 	}
@@ -383,21 +508,11 @@ COMPONENT           │ VERSION │ PROVIDER
 								"name":          "leaf-a",
 								"version":       "0.0.1",
 								"componentName": "ocm.software/leaf-a",
-								"digest": map[string]any{
-									"hashAlgorithm":          "",
-									"normalisationAlgorithm": "",
-									"value":                  "",
-								},
 							},
 							map[string]any{
 								"name":          "leaf-b",
 								"version":       "0.0.1",
 								"componentName": "ocm.software/leaf-b",
-								"digest": map[string]any{
-									"hashAlgorithm":          "",
-									"normalisationAlgorithm": "",
-									"value":                  "",
-								},
 							},
 						},
 						"name":               "ocm.software/root",
@@ -460,7 +575,7 @@ COMPONENT           │ VERSION │ PROVIDER
 			r.NoError(err, "failed to list log entries")
 			r.NotEmpty(logEntries, "expected log entries to be present")
 
-			r.EqualValues(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected output")
+			r.Equal(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected output")
 		})
 	}
 }
@@ -489,8 +604,16 @@ func Test_List_Component_Version_Variations(t *testing.T) {
 		expectedError  bool
 	}{
 		{
-			name: "Default Options (Table) - all versions",
+			name: "Default Options (Tree) - all versions",
 			args: []string{"get", "cv", path},
+			expectedOutput: `NESTING  COMPONENT                    VERSION  PROVIDER      IDENTITY                                       
+ ├─       ocm.software/test-component  0.0.2    ocm.software  name=ocm.software/test-component,version=0.0.2 
+ └─       ocm.software/test-component  0.0.1    ocm.software  name=ocm.software/test-component,version=0.0.1`,
+			expectedError: false,
+		},
+		{
+			name: "table output - all versions",
+			args: []string{"get", "cv", path, "--output=table"},
 			expectedOutput: `
 COMPONENT                   │ VERSION │ PROVIDER     
 ─────────────────────────────┼─────────┼──────────────
@@ -502,11 +625,8 @@ COMPONENT                   │ VERSION │ PROVIDER
 		{
 			name: "Latest version only",
 			args: []string{"get", "cv", path, "--latest"},
-			expectedOutput: `
-COMPONENT                   │ VERSION │ PROVIDER     
-─────────────────────────────┼─────────┼──────────────
- ocm.software/test-component │ 0.0.2   │ ocm.software
-`,
+			expectedOutput: `NESTING  COMPONENT                    VERSION  PROVIDER      IDENTITY                                       
+ └─       ocm.software/test-component  0.0.2    ocm.software  name=ocm.software/test-component,version=0.0.2`,
 			expectedError: false,
 		},
 		{
@@ -516,17 +636,14 @@ COMPONENT                   │ VERSION │ PROVIDER
 		},
 		{
 			name: "Semver constraint",
-			args: []string{"get", "cv", path, "--semver-constraint", "< 0.0.2"},
-			expectedOutput: `
-COMPONENT                   │ VERSION │ PROVIDER     
-─────────────────────────────┼─────────┼──────────────
- ocm.software/test-component │ 0.0.1   │ ocm.software
-`,
+			args: []string{"get", "cv", path, "--constraint", "< 0.0.2"},
+			expectedOutput: `NESTING  COMPONENT                    VERSION  PROVIDER      IDENTITY                                       
+ └─       ocm.software/test-component  0.0.1    ocm.software  name=ocm.software/test-component,version=0.0.1`,
 			expectedError: false,
 		},
 		{
 			name:           "Invalid semver constraint",
-			args:           []string{"get", "cv", path, "--semver-constraint", "invalid"},
+			args:           []string{"get", "cv", path, "--constraint", "invalid"},
 			expectedOutput: "",
 			expectedError:  true,
 		},
@@ -556,7 +673,7 @@ COMPONENT                   │ VERSION │ PROVIDER
 			r.NoError(err, "failed to list log entries")
 			r.NotEmpty(logEntries, "expected log entries to be present")
 
-			r.EqualValues(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected table output")
+			r.Equal(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected table output")
 		})
 	}
 }
@@ -619,8 +736,8 @@ func Test_List_Component_Version_Variations_Recursive(t *testing.T) {
 		expectedError  bool
 	}{
 		{
-			name: "Default Options (Table) - all versions",
-			args: []string{"get", "cv", path, "--recursive=-1"},
+			name: "table output - all versions",
+			args: []string{"get", "cv", path, "--output=table", "--recursive=-1"},
 			expectedOutput: `
 COMPONENT           │ VERSION │ PROVIDER     
 ─────────────────────┼─────────┼──────────────
@@ -633,8 +750,8 @@ COMPONENT           │ VERSION │ PROVIDER
 			expectedError: false,
 		},
 		{
-			name: "tree output - all versions",
-			args: []string{"get", "cv", path, "--output=tree", "--recursive=-1"},
+			name: "Default Options (Tree) - all versions",
+			args: []string{"get", "cv", path, "--recursive=-1"},
 			expectedOutput: `NESTING  COMPONENT            VERSION  PROVIDER      IDENTITY                               
  ├─ ●     ocm.software/root    0.0.2    ocm.software  name=ocm.software/root,version=0.0.2   
  │  └─    ocm.software/leaf-a  0.0.1    ocm.software  name=ocm.software/leaf-a,version=0.0.1 
@@ -646,24 +763,18 @@ COMPONENT           │ VERSION │ PROVIDER
 		{
 			name: "Latest version only",
 			args: []string{"get", "cv", path, "--latest", "--recursive=-1"},
-			expectedOutput: `
-COMPONENT           │ VERSION │ PROVIDER     
-─────────────────────┼─────────┼──────────────
- ocm.software/root   │ 0.0.2   │ ocm.software 
- ocm.software/leaf-a │ 0.0.1   │
-`,
+			expectedOutput: `NESTING  COMPONENT            VERSION  PROVIDER      IDENTITY                               
+ └─ ●     ocm.software/root    0.0.2    ocm.software  name=ocm.software/root,version=0.0.2   
+    └─    ocm.software/leaf-a  0.0.1    ocm.software  name=ocm.software/leaf-a,version=0.0.1`,
 			expectedError: false,
 		},
 		{
 			name: "Semver constraint",
-			args: []string{"get", "cv", path, "--semver-constraint", "< 0.0.2", "--recursive=-1"},
-			expectedOutput: `
-COMPONENT           │ VERSION │ PROVIDER     
-─────────────────────┼─────────┼──────────────
- ocm.software/root   │ 0.0.1   │ ocm.software 
- ocm.software/leaf-a │ 0.0.1   │              
- ocm.software/leaf-b │ 0.0.1   │
-`,
+			args: []string{"get", "cv", path, "--constraint", "< 0.0.2", "--recursive=-1"},
+			expectedOutput: `NESTING  COMPONENT            VERSION  PROVIDER      IDENTITY                               
+ └─ ●     ocm.software/root    0.0.1    ocm.software  name=ocm.software/root,version=0.0.1   
+    ├─    ocm.software/leaf-a  0.0.1    ocm.software  name=ocm.software/leaf-a,version=0.0.1 
+    └─    ocm.software/leaf-b  0.0.1    ocm.software  name=ocm.software/leaf-b,version=0.0.1`,
 			expectedError: false,
 		},
 	}
@@ -686,7 +797,7 @@ COMPONENT           │ VERSION │ PROVIDER
 			r.NoError(err, "failed to list log entries")
 			r.NotEmpty(logEntries, "expected log entries to be present")
 
-			r.EqualValues(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected table output")
+			r.Equal(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected table output")
 		})
 	}
 }
@@ -710,11 +821,9 @@ func Test_Get_Component_Version_CTF_Dir(t *testing.T) {
 		{
 			name: "get cv from CTF dir - default",
 			args: []string{"get", "cv", archivePath},
-			expectedOutput: `
-COMPONENT           │ VERSION │ PROVIDER     
-─────────────────────┼─────────┼──────────────
- ocm.software/root-b │ 0.0.2   │ ocm.software 
- ocm.software/root-a │ 0.0.1   │`,
+			expectedOutput: `NESTING  COMPONENT            VERSION  PROVIDER      IDENTITY                               
+ ├─       ocm.software/root-b  0.0.2    ocm.software  name=ocm.software/root-b,version=0.0.2 
+ └─       ocm.software/root-a  0.0.1    ocm.software  name=ocm.software/root-a,version=0.0.1`,
 			expectedError: false,
 		},
 		{
@@ -732,11 +841,9 @@ configurations:
       type: CommonTransportFormat/v1
       filePath: /does/not/exist
     componentNamePattern: ocm.software/*`,
-			expectedOutput: `
-COMPONENT           │ VERSION │ PROVIDER     
-─────────────────────┼─────────┼──────────────
- ocm.software/root-b │ 0.0.2   │ ocm.software 
- ocm.software/root-a │ 0.0.1   │`,
+			expectedOutput: `NESTING  COMPONENT            VERSION  PROVIDER      IDENTITY                               
+ ├─       ocm.software/root-b  0.0.2    ocm.software  name=ocm.software/root-b,version=0.0.2 
+ └─       ocm.software/root-a  0.0.1    ocm.software  name=ocm.software/root-a,version=0.0.1`,
 			expectedError: false,
 		},
 	}
@@ -768,7 +875,7 @@ COMPONENT           │ VERSION │ PROVIDER
 			r.NoError(err, "failed to list log entries")
 			r.NotEmpty(logEntries, "expected log entries to be present")
 
-			r.EqualValues(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected table output")
+			r.Equal(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected table output")
 		})
 	}
 }
@@ -835,7 +942,7 @@ resources:
 		r.NoError(blob.Copy(&buf, blb))
 		r.Equal("foobar", buf.String(), "expected resource content to match test file content")
 
-		t.Run("expect failure on existing component version", func(t *testing.T) {
+		t.Run("expect failure on invalid semver in constructor", func(t *testing.T) {
 			constructorYAML = fmt.Sprintf(`
 name: ocm.software/examples-01
 version: invalid_1.0.0
@@ -860,16 +967,17 @@ resources:
 			_, err := test.OCM(t, test.WithArgs("add", "cv",
 				"--constructor", constructorYAMLFilePath,
 				"--repository", archiveFilePath,
-				"--component-version-conflict-policy", string(componentversion.ComponentVersionConflictPolicyReplace),
 			), test.WithErrorOutput(logs), test.WithOutput(result))
 
 			r.Error(err, "expected error on invalid component version semver")
 		})
 
-		t.Run("expect failure on invalid semver in constructor", func(t *testing.T) {
+		// The abort policy is deprecated but still honoured until it is removed.
+		t.Run("expect failure on existing component version with abort-and-fail", func(t *testing.T) {
 			_, err := test.OCM(t, test.WithArgs("add", "cv",
 				"--constructor", constructorYAMLFilePath,
 				"--repository", archiveFilePath,
+				"--component-version-conflict-policy", string(componentversion.ComponentVersionConflictPolicyAbortAndFail),
 			), test.WithErrorOutput(logs))
 
 			r.Error(err, "expected error on adding existing component version")
@@ -880,7 +988,7 @@ resources:
 			r.NotEmpty(entries, "expected log entries to be present")
 		})
 
-		t.Run("expect success on replace strategy", func(t *testing.T) {
+		t.Run("expect existing component version to be replaced by default", func(t *testing.T) {
 			constructorYAML = fmt.Sprintf(`
 name: ocm.software/examples-01
 version: 1.0.0
@@ -905,10 +1013,9 @@ resources:
 			_, err := test.OCM(t, test.WithArgs("add", "cv",
 				"--constructor", constructorYAMLFilePath,
 				"--repository", archiveFilePath,
-				"--component-version-conflict-policy", string(componentversion.ComponentVersionConflictPolicyReplace),
 			), test.WithErrorOutput(logs), test.WithOutput(result))
 
-			r.NoError(err, "could not construct component version", "replace strategy should allow an existing component version to be replaced")
+			r.NoError(err, "could not construct component version", "an existing component version is replaced by default")
 
 			entries, err := logs.List()
 			r.NoError(err, "failed to list log entries")
@@ -968,7 +1075,6 @@ resources:
 				"--constructor", constructorYAMLFilePath,
 				"--repository", archiveFilePath,
 				"--working-directory", tmp,
-				"--component-version-conflict-policy", string(componentversion.ComponentVersionConflictPolicyReplace),
 			), test.WithErrorOutput(logs))
 
 			r.Equal(new(tmp), ocmctx.FromContext(cmd.Context()).FilesystemConfig().WorkingDirectory, "expected working directory to be set in ocm context automatically")
@@ -979,7 +1085,7 @@ resources:
 	t.Run("construction with references targeting fallback resolvers", func(t *testing.T) {
 		r := require.New(t)
 		tmp := t.TempDir()
-		externalConstructorYAML := fmt.Sprintf(`
+		externalConstructorYAML := `
 name: ocm.software/external
 version: 1.0.0
 provider:
@@ -990,7 +1096,7 @@ resources:
   input:
     type: utf8/v1
     text: "I come from external!"
-`)
+`
 		externalConstructorYAMLFilePath := filepath.Join(tmp, "component-constructor-external.yaml")
 		r.NoError(os.WriteFile(externalConstructorYAMLFilePath, []byte(externalConstructorYAML), 0o600))
 		externalArchiveFilePath := filepath.Join(tmp, "transport-archive-external")
@@ -1016,7 +1122,7 @@ configurations:
 		legacyResolverConfigYAMLFilePath := filepath.Join(tmp, "config-with-legacy-resolver.yaml")
 		r.NoError(os.WriteFile(legacyResolverConfigYAMLFilePath, []byte(legacyResolverConfigYAML), 0o600))
 
-		constructorYAML = fmt.Sprintf(`
+		constructorYAML = `
 components:
 - name: ocm.software/a
   version: 1.0.0
@@ -1045,7 +1151,7 @@ components:
       input:
         type: utf8/v1
         text: "I come from B"
-`)
+`
 
 		// Create a replacement test file to be added to the component version
 		constructorYAMLFilePath := filepath.Join(tmp, "component-constructor-external-reference.yaml")
@@ -1056,7 +1162,6 @@ components:
 			"--repository", archiveFilePath,
 			"--working-directory", tmp,
 			"--config", legacyResolverConfigYAMLFilePath,
-			"--component-version-conflict-policy", string(componentversion.ComponentVersionConflictPolicyReplace),
 			"--external-component-version-copy-policy", string(componentversion.ExternalComponentVersionCopyPolicyCopyOrFail),
 		), test.WithErrorOutput(logs))
 
@@ -1094,7 +1199,7 @@ components:
 	t.Run("construction with references targeting resolvers", func(t *testing.T) {
 		r := require.New(t)
 		tmp := t.TempDir()
-		externalConstructorYAML := fmt.Sprintf(`
+		externalConstructorYAML := `
 name: ocm.software/external
 version: 1.0.0
 provider:
@@ -1105,7 +1210,7 @@ resources:
   input:
     type: utf8/v1
     text: "I come from external!"
-`)
+`
 		externalConstructorYAMLFilePath := filepath.Join(tmp, "component-constructor-external.yaml")
 		r.NoError(os.WriteFile(externalConstructorYAMLFilePath, []byte(externalConstructorYAML), 0o600))
 		externalArchiveFilePath := filepath.Join(tmp, "transport-archive-external")
@@ -1132,7 +1237,7 @@ configurations:
 		resolverConfigYAMLFilePath := filepath.Join(tmp, "config-with-resolver.yaml")
 		r.NoError(os.WriteFile(resolverConfigYAMLFilePath, []byte(resolverConfigYAML), 0o600))
 
-		constructorYAML = fmt.Sprintf(`
+		constructorYAML = `
 components:
 - name: ocm.software/a
   version: 1.0.0
@@ -1161,7 +1266,7 @@ components:
       input:
         type: utf8/v1
         text: "I come from B"
-`)
+`
 
 		// Create a replacement test file to be added to the component version
 		constructorYAMLFilePath := filepath.Join(tmp, "component-constructor-external-reference.yaml")
@@ -1172,7 +1277,6 @@ components:
 			"--repository", archiveFilePath,
 			"--working-directory", tmp,
 			"--config", resolverConfigYAMLFilePath,
-			"--component-version-conflict-policy", string(componentversion.ComponentVersionConflictPolicyReplace),
 			"--external-component-version-copy-policy", string(componentversion.ExternalComponentVersionCopyPolicyCopyOrFail),
 		), test.WithErrorOutput(logs))
 
@@ -1472,32 +1576,38 @@ resources:
 			r.NoError(err, "failed to list log entries")
 			r.NotEmpty(logEntries, "expected log entries to be present")
 
-			r.EqualValues(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected output")
+			r.Equal(strings.TrimSpace(tt.expectedOutput), strings.TrimSpace(result.String()), "expected output")
 		})
 	}
 }
 
 func Test_Version(t *testing.T) {
-	r := require.New(t)
-	logs := test.NewJSONLogReader()
-	_, err := test.OCM(t, test.WithArgs("version"), test.WithOutput(logs))
-	r.NoError(err, "failed to run version command")
-
-	entries, err := logs.List()
-	r.NoError(err, "failed to list log entries")
-
-	r.NotEmpty(entries, "expected log entries for version command")
-
-	found := false
-	for _, entry := range entries {
-		ver, ok := entry.Extras["gitVersion"]
-		if ok {
-			found = true
-			r.Equal(ver, "(devel)")
-			break
-		}
+	// The default (text) output must be human-readable and identify this binary
+	// as the OCM v2 CLI. It is reachable both via the `version` subcommand and
+	// the `--version` / `-v` root flag, which must all produce the same output.
+	for _, args := range [][]string{{"version"}, {"--version"}, {"-v"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			r := require.New(t)
+			var out bytes.Buffer
+			_, err := test.OCM(t, test.WithArgs(args...), test.WithOutput(&out))
+			r.NoError(err, "failed to run version")
+			r.Contains(out.String(), "Open Component Model v2")
+			r.Contains(out.String(), "(devel)")
+		})
 	}
-	r.True(found, "expected to find gitVersion in log entries")
+
+	t.Run("legacyjson", func(t *testing.T) {
+		r := require.New(t)
+		var out bytes.Buffer
+		_, err := test.OCM(t, test.WithArgs("version", "--output", "legacyjson"), test.WithOutput(&out))
+		r.NoError(err, "failed to run version --format legacyjson")
+
+		var info struct {
+			GitVersion string `json:"gitVersion"`
+		}
+		r.NoError(json.Unmarshal(out.Bytes(), &info))
+		r.Equal("(devel)", info.GitVersion)
+	})
 }
 
 func Test_Download_Resource(t *testing.T) {
@@ -1705,13 +1815,52 @@ configurations:
 	)
 	r.NoError(err, "failed to sign component version")
 
+	// Signing without --normalisation must default to jsonNormalisation/v4alpha3:
+	// the printed signature pins its own normalisation algorithm.
+	r.Contains(logs.String(), "jsonNormalisation/v4alpha3",
+		"signing without --normalisation must default to v4alpha3")
+
+	// --normalisation only offers signable algorithms: the verify-only v1 and
+	// the legacy v3 alias are rejected while parsing the flag.
+	for _, algo := range []string{"jsonNormalisation/v1", "jsonNormalisation/v3"} {
+		_, err = test.OCM(t, test.WithArgs("sign", "component-version",
+			reference,
+			"--signature", signatureName,
+			"--normalisation", algo,
+			"--config", ocmConfigFilePath),
+		)
+		r.ErrorContains(err, "expected one of", "%s must not be signable", algo)
+	}
+
+	const olderAlgorithmWarning = "older normalisation algorithm"
+	verifyLogs := test.NewJSONLogReader()
 	_, err = test.OCM(t, test.WithArgs("verify", "component-version",
 		reference,
 		"--signature", signatureName,
 		"--config", ocmConfigFilePath),
-		test.WithOutput(logs),
+		test.WithErrorOutput(verifyLogs),
 	)
 	r.NoError(err, "failed to verify component version")
+	r.NotContains(verifyLogs.String(), olderAlgorithmWarning, "a default signature must not warn")
+
+	// Trusting a signature under an older algorithm warns, recommending an upgrade.
+	_, err = test.OCM(t, test.WithArgs("sign", "component-version",
+		reference,
+		"--signature", signatureName,
+		"--normalisation", "jsonNormalisation/v4alpha1",
+		"--force",
+		"--config", ocmConfigFilePath),
+	)
+	r.NoError(err, "failed to re-sign component version with v4alpha1")
+	verifyLogs = test.NewJSONLogReader()
+	_, err = test.OCM(t, test.WithArgs("verify", "component-version",
+		reference,
+		"--signature", signatureName,
+		"--config", ocmConfigFilePath),
+		test.WithErrorOutput(verifyLogs),
+	)
+	r.NoError(err, "failed to verify v4alpha1 signature")
+	r.Contains(verifyLogs.String(), olderAlgorithmWarning, "a v4alpha1 signature must warn")
 }
 
 func Test_Sign_With_Sigstore_Spec_Selects_Cosign_Handler(t *testing.T) {
@@ -2403,7 +2552,7 @@ resources:
 		r := require.New(t)
 		// We need to calculate the digest - the referenced component doesn't have it stored.
 		// Create a component referencing it and let it calculate the digest.
-		constructorYAML := fmt.Sprintf(`
+		constructorYAML := `
 name: ocm.software/referencing-no-digest
 version: 1.0.0
 provider:
@@ -2418,7 +2567,7 @@ resources:
   input:
     type: utf8/v1
     text: "I reference another component"
-`)
+`
 		constructorYAMLFilePath := filepath.Join(tmp, "referencing-no-digest-constructor.yaml")
 		r.NoError(os.WriteFile(constructorYAMLFilePath, []byte(constructorYAML), 0o600))
 
@@ -2554,7 +2703,7 @@ type: generic.config.ocm.software/v1
 		{
 			name: "filesystem config - merge multiple files",
 			args: []string{"get", "config"},
-			// Config file combination covers: a value that gets overriden, a value that is preserved, and a value that is added from the second file
+			// Config file combination covers: a value that gets overridden, a value that is preserved, and a value that is added from the second file
 			configsYAML: []string{`
 type: generic.config.ocm.software/v1
 configurations:
@@ -2663,8 +2812,6 @@ configurations:
     prefix: ocm.software/legacy
 - type: transfer.config.ocm.software/v1alpha1
   recursive: -1
-  copyMode: allResources
-  uploadType: ociArtifact
 - type: credentials.config.ocm.software
   consumers:
   - identity:
@@ -2695,10 +2842,8 @@ configurations:
       type: CommonTransportFormat/v1
     versionConstraint: '>=1.0.0'
   type: resolvers.config.ocm.software/v1alpha1
-- copyMode: allResources
-  recursive: -1
+- recursive: -1
   type: transfer.config.ocm.software/v1alpha1
-  uploadType: ociArtifact
 - rules:
   - filename: output.tar
     layerSelectors:
@@ -2798,5 +2943,30 @@ func TestGetOCMConfigForCommand(t *testing.T) {
 		r.NoError(err)
 		// .ocmconfig-1 has 5 configurations, .ocmconfig-2 has 1
 		r.Len(cfg.Configurations, 6)
+		types := make([]string, 0, len(cfg.Configurations))
+		for _, entry := range cfg.Configurations {
+			types = append(types, entry.GetType().String())
+		}
+		r.Equal([]string{
+			"credentials.config.ocm.software",
+			"attributes.config.ocm.software",
+			"credentials.config.ocm.software",
+			"credentials.config.ocm.software",
+			"uploader.ocm.config.ocm.software",
+			"credentials.config.ocm.software",
+		}, types, "configurations must be merged in file order, preserving order within files")
+	})
+
+	t.Run("config with nested generic configuration ignores the nested entries", func(t *testing.T) {
+		r := require.New(t)
+		cmd, err := test.OCM(t, test.WithArgs([]string{
+			"--" + configuration.OCMConfigCommandArgument, "configuration/testdata/.ocmconfig-nested",
+		}...))
+		r.NoError(err)
+		cfg, err := configuration.GetOCMConfigForCommand(cmd)
+		r.NoError(err)
+		// .ocmconfig-nested has 1 direct and 3 nested entries; the nested entries are ignored
+		r.Len(cfg.Configurations, 1)
+		r.Equal("credentials.config.ocm.software", cfg.Configurations[0].GetType().String())
 	})
 }

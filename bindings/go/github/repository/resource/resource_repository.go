@@ -6,16 +6,20 @@ import (
 	"log/slog"
 	"net/http"
 
+	godigest "github.com/opencontainers/go-digest"
+
 	"ocm.software/open-component-model/bindings/go/blob"
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
 	githubinternal "ocm.software/open-component-model/bindings/go/github/internal"
 	"ocm.software/open-component-model/bindings/go/github/internal/download"
 	githubaccess "ocm.software/open-component-model/bindings/go/github/spec/access"
 	v1 "ocm.software/open-component-model/bindings/go/github/spec/access/v1"
+	ghcreds "ocm.software/open-component-model/bindings/go/github/spec/credentials"
 	credsv1 "ocm.software/open-component-model/bindings/go/github/spec/credentials/v1"
 	ocmhttp "ocm.software/open-component-model/bindings/go/http"
 	httpv1alpha1 "ocm.software/open-component-model/bindings/go/http/spec/config/v1alpha1"
 	"ocm.software/open-component-model/bindings/go/repository"
+	"ocm.software/open-component-model/bindings/go/repository/integrity"
 	"ocm.software/open-component-model/bindings/go/runtime"
 )
 
@@ -99,6 +103,9 @@ func (r *ResourceRepository) GetResourceCredentialConsumerIdentity(_ context.Con
 //
 // The blob is buffered eagerly in memory and can be read any number of times;
 // it needs no cleanup and holds the whole archive until released.
+//
+// The archive is bound to the digest the resource declares, which is the generic
+// blob digest, so an archive that differs fails the download.
 func (r *ResourceRepository) DownloadResource(ctx context.Context, resource *descriptor.Resource, credentials runtime.Typed) (blob.ReadOnlyBlob, error) {
 	gitHub, err := githubinternal.AccessFrom(resource.Access)
 	if err != nil {
@@ -130,11 +137,40 @@ func (r *ResourceRepository) DownloadResource(ctx context.Context, resource *des
 		}
 	}
 
-	return download.Download(ctx, gitHub, gitHubCredentials, r.httpClient)
+	archive, err := r.DownloadArchive(ctx, gitHub, gitHubCredentials)
+	if err != nil {
+		return nil, err
+	}
+
+	// The in-memory archive is hashed while it is loaded, so its digest is reused.
+	var computed godigest.Digest
+	if aware, ok := archive.(blob.DigestAware); ok {
+		if raw, known := aware.Digest(); known {
+			if d, err := godigest.Parse(raw); err == nil {
+				computed = d
+			}
+		}
+	}
+	verified, err := integrity.VerifyPrecomputed(ctx, resource.Digest, computed, archive,
+		integrity.WithLogAttrs(slog.Any("resource", resource.ToIdentity())))
+	if err != nil {
+		return nil, fmt.Errorf("resource %q: %w", resource.Name, err)
+	}
+	return verified, nil
+}
+
+// DownloadArchive downloads the archive of the commit pinned in gitHub without verifying it
+// against a resource digest; the digest processor uses it to compute that digest.
+func (r *ResourceRepository) DownloadArchive(ctx context.Context, gitHub *v1.GitHub, credentials *credsv1.GitHubCredentials) (blob.ReadOnlyBlob, error) {
+	return download.Download(ctx, gitHub, credentials, r.httpClient)
 }
 
 // UploadResource is not supported: the GitHub access type is a read-only
 // reference; content reaches GitHub through git, not through OCM.
 func (r *ResourceRepository) UploadResource(_ context.Context, _ *descriptor.Resource, _ blob.ReadOnlyBlob, _ runtime.Typed) (*descriptor.Resource, error) {
 	return nil, fmt.Errorf("github repositories do not support upload operations")
+}
+
+func (r *ResourceRepository) GetCredentialTypeScheme() *runtime.Scheme {
+	return ghcreds.Scheme
 }
