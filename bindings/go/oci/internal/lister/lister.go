@@ -18,10 +18,10 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	ociImageSpecV1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/oras-project/oras-go/v3/content"
+	"github.com/oras-project/oras-go/v3/registry"
 	slogcontext "github.com/veqryn/slog-context"
 	"golang.org/x/sync/errgroup"
-	"oras.land/oras-go/v2/content"
-	"oras.land/oras-go/v2/registry"
 
 	indexv1 "ocm.software/open-component-model/bindings/go/oci/spec/index/component/v1"
 )
@@ -55,6 +55,12 @@ const (
 type Options struct {
 	LookupPolicy
 	SortPolicy
+
+	// Comparator, when set, orders discovered versions instead of the
+	// SortPolicy. It follows the cmp.Compare convention (negative if a < b).
+	// Unlike SortPolicyLooseSemverDescending it does not drop versions it
+	// cannot parse; ordering of such versions is delegated to the comparator.
+	Comparator func(a, b string) (int, error)
 
 	TagListerOptions
 	ReferrerListerOptions
@@ -155,8 +161,29 @@ func (lister *Lister) listUnsorted(ctx context.Context, opts Options) ([]string,
 	}
 }
 
-// sort applies the configured sort policy to the discovered versions.
+// sort orders the discovered versions. When opts.Comparator is set it is used
+// directly (without dropping unparseable versions); otherwise the SortPolicy
+// applies.
 func (lister *Lister) sort(_ context.Context, opts Options, candidates []string) ([]string, error) {
+	if opts.Comparator != nil {
+		out := slices.Clone(candidates)
+		var compareErr error
+		slices.SortStableFunc(out, func(a, b string) int {
+			if compareErr != nil {
+				return 0
+			}
+			c, err := opts.Comparator(b, a)
+			if err != nil {
+				compareErr = err
+				return 0
+			}
+			return c
+		})
+		if compareErr != nil {
+			return nil, fmt.Errorf("comparing discovered versions: %w", compareErr)
+		}
+		return slices.CompactFunc(out, func(a, b string) bool { return a == b }), nil
+	}
 	switch opts.SortPolicy {
 	case SortPolicyLooseSemverDescending:
 		vers := make([]*semver.Version, 0, len(candidates))

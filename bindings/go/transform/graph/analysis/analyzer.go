@@ -5,8 +5,9 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sync"
 
-	"github.com/google/cel-go/cel"
+	"cel.dev/cel-go/cel"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"ocm.software/open-component-model/bindings/go/cel/expression/fieldpath"
@@ -22,6 +23,8 @@ type StaticPluginAnalysisProcessor struct {
 	Scheme                  *runtime.Scheme
 	Builder                 *env.Builder
 	AnalyzedTransformations map[string]graph.Transformation
+
+	mu sync.Mutex
 }
 
 func (b *StaticPluginAnalysisProcessor) ProcessValue(_ context.Context, transformation graph.Transformation) error {
@@ -69,10 +72,7 @@ func (b *StaticPluginAnalysisProcessor) ProcessValue(_ context.Context, transfor
 	b.Builder.RegisterDeclTypes(declType)
 	b.Builder.RegisterEnvOption(cel.Variable(transformation.ID, declType.CelType()))
 
-	_, provider, err := b.Builder.CurrentEnv()
-	if err != nil {
-		return err
-	}
+	provider := b.Builder.Provider()
 
 	specDeclType := declType.DeclTypeFromProperty("spec")
 	specFieldDescriptors, err := stv6jsonschema.ParseResourceFromDeclType(transformation.Spec.Data, specDeclType)
@@ -104,7 +104,9 @@ func (b *StaticPluginAnalysisProcessor) ProcessValue(_ context.Context, transfor
 	}
 	transformation.FieldDescriptors = specFieldDescriptors
 
+	b.mu.Lock()
 	b.AnalyzedTransformations[transformation.ID] = transformation
+	b.mu.Unlock()
 
 	return nil
 }

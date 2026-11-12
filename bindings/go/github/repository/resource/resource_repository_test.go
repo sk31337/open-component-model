@@ -12,10 +12,12 @@ import (
 	"testing"
 	"time"
 
+	godigest "github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	blobpkg "ocm.software/open-component-model/bindings/go/blob"
+	typesv1 "ocm.software/open-component-model/bindings/go/configuration/types/v1"
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
 	v1 "ocm.software/open-component-model/bindings/go/github/spec/access/v1"
 	httpv1alpha1 "ocm.software/open-component-model/bindings/go/http/spec/config/v1alpha1"
@@ -185,7 +187,7 @@ func TestResourceRepository_DownloadResource(t *testing.T) {
 			},
 		}
 		_, err := NewResourceRepository().DownloadResource(t.Context(), res, nil)
-		assert.ErrorContains(t, err, "invalid GitHub access")
+		require.ErrorContains(t, err, "invalid GitHub access")
 		assert.Zero(t, requests, "an invalid access must be rejected before any request reaches the server")
 	})
 
@@ -208,13 +210,53 @@ func TestResourceRepository_DownloadResource(t *testing.T) {
 // direct readout of the retry policy the repository's HTTP client was built
 // with. Driving two different WithHTTPConfig values to two different request
 // counts fails if the option is dropped on the floor.
+func TestResourceRepository_DownloadResource_DigestVerification(t *testing.T) {
+	// digestOf is the generic blob digest the archive GitHub serves would carry.
+	digestOf := func(payload []byte) *descriptor.Digest {
+		return &descriptor.Digest{
+			HashAlgorithm:          "SHA-256",
+			NormalisationAlgorithm: "genericBlobDigest/v1",
+			Value:                  godigest.FromBytes(payload).Encoded(),
+		}
+	}
+
+	t.Run("accepts an archive matching the resource digest", func(t *testing.T) {
+		baseURL, payload := mockGitHub(t)
+		res := githubResource(baseURL+"/octocat/Hello-World", testCommit)
+		res.Digest = digestOf(payload)
+
+		downloaded, err := NewResourceRepository().DownloadResource(t.Context(), res, nil)
+		require.NoError(t, err)
+		assert.Equal(t, payload, readBlob(t, downloaded))
+	})
+
+	t.Run("rejects an archive that does not match the resource digest", func(t *testing.T) {
+		baseURL, _ := mockGitHub(t)
+		res := githubResource(baseURL+"/octocat/Hello-World", testCommit)
+		res.Digest = digestOf([]byte("an archive GitHub never served"))
+
+		_, err := NewResourceRepository().DownloadResource(t.Context(), res, nil)
+		require.ErrorContains(t, err, "digest mismatch")
+	})
+
+	t.Run("serves an archive unverified when the resource carries no digest", func(t *testing.T) {
+		baseURL, payload := mockGitHub(t)
+		res := githubResource(baseURL+"/octocat/Hello-World", testCommit)
+		res.Digest = nil
+
+		downloaded, err := NewResourceRepository().DownloadResource(t.Context(), res, nil)
+		require.NoError(t, err)
+		assert.Equal(t, payload, readBlob(t, downloaded))
+	})
+}
+
 func TestResourceRepository_WithHTTPConfig_IsAppliedToRequests(t *testing.T) {
 	maxRetries := func(n int) *httpv1alpha1.Config {
 		return &httpv1alpha1.Config{
 			Retry: &httpv1alpha1.RetryConfig{
 				MaxRetries: &n,
-				MinWait:    httpv1alpha1.NewTimeout(time.Millisecond),
-				MaxWait:    httpv1alpha1.NewTimeout(2 * time.Millisecond),
+				MinWait:    typesv1.NewDuration(time.Millisecond),
+				MaxWait:    typesv1.NewDuration(2 * time.Millisecond),
 			},
 		}
 	}

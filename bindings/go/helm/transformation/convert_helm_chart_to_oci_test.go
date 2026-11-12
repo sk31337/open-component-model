@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	ociImageSpecV1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -14,11 +13,12 @@ import (
 	"helm.sh/helm/v4/pkg/provenance"
 	"helm.sh/helm/v4/pkg/registry"
 
+	"ocm.software/open-component-model/bindings/go/blob/filesystem"
 	filesystemaccess "ocm.software/open-component-model/bindings/go/blob/filesystem/spec/access"
 	filev1alpha1 "ocm.software/open-component-model/bindings/go/blob/filesystem/spec/access/v1alpha1"
 	descv2 "ocm.software/open-component-model/bindings/go/descriptor/v2"
 	"ocm.software/open-component-model/bindings/go/helm/spec/access"
-	"ocm.software/open-component-model/bindings/go/helm/spec/access/v1"
+	v1 "ocm.software/open-component-model/bindings/go/helm/spec/access/v1"
 	"ocm.software/open-component-model/bindings/go/helm/transformation"
 	"ocm.software/open-component-model/bindings/go/helm/transformation/spec/v1alpha1"
 	ocitar "ocm.software/open-component-model/bindings/go/oci/tar"
@@ -41,6 +41,7 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 	testDataDir := filepath.Join("..", "testdata")
 
 	t.Run("converts packaged helm chart to OCI layout", func(t *testing.T) {
+		t.Parallel()
 		r := require.New(t)
 		ctx := t.Context()
 		outputDir := t.TempDir()
@@ -70,7 +71,7 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 			ID:   "test-convert-helm-to-oci",
 			Spec: &v1alpha1.ConvertHelmToOCISpec{
 				ChartFile: filev1alpha1.File{
-					URI: "file://" + chartPath,
+					URI: fileURI(t, chartPath),
 				},
 				Resource: &descv2.Resource{
 					ElementMeta: descv2.ElementMeta{
@@ -96,9 +97,11 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 		r.NotNil(output.Output.Resource)
 		r.NotNil(output.Output.Resource.Digest)
 		r.NotEmpty(output.Output.Resource.Digest.Value)
+		r.Equal("SHA-256", output.Output.Resource.Digest.HashAlgorithm)
+		r.Equal("ociArtifactDigest/v1", output.Output.Resource.Digest.NormalisationAlgorithm)
 
 		// Verify the output file was created
-		ociPath := strings.TrimPrefix(output.Output.File.URI, "file://")
+		ociPath := filePath(t, output.Output.File.URI)
 		assert.FileExists(t, ociPath)
 		t.Cleanup(func() {
 			_ = os.RemoveAll(ociPath)
@@ -113,6 +116,7 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 	})
 
 	t.Run("converts packaged helm chart with provenance to OCI layout", func(t *testing.T) {
+		t.Parallel()
 		r := require.New(t)
 		ctx := t.Context()
 		outputDir := t.TempDir()
@@ -137,10 +141,10 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 			ID:   "test-convert-helm-to-oci-prov",
 			Spec: &v1alpha1.ConvertHelmToOCISpec{
 				ChartFile: filev1alpha1.File{
-					URI: "file://" + chartPath,
+					URI: fileURI(t, chartPath),
 				},
 				ProvFile: &filev1alpha1.File{
-					URI: "file://" + provPath,
+					URI: fileURI(t, provPath),
 				},
 				Resource: &descv2.Resource{
 					ElementMeta: descv2.ElementMeta{
@@ -173,7 +177,7 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 		r.NotNil(output.Output.Resource.Digest)
 		r.NotEmpty(output.Output.Resource.Digest.Value)
 
-		ociPath := strings.TrimPrefix(output.Output.File.URI, "file://")
+		ociPath := filePath(t, output.Output.File.URI)
 		assert.FileExists(t, ociPath)
 		t.Cleanup(func() {
 			_ = os.RemoveAll(ociPath)
@@ -190,6 +194,7 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 	})
 
 	t.Run("creates output in temp dir when no output path specified", func(t *testing.T) {
+		t.Parallel()
 		r := require.New(t)
 		ctx := t.Context()
 
@@ -211,7 +216,7 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 			ID:   "test-convert-no-output-path",
 			Spec: &v1alpha1.ConvertHelmToOCISpec{
 				ChartFile: filev1alpha1.File{
-					URI: "file://" + chartPath,
+					URI: fileURI(t, chartPath),
 				},
 				Resource: &descv2.Resource{
 					ElementMeta: descv2.ElementMeta{
@@ -244,7 +249,7 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 		r.NotNil(output.Output.Resource.Digest)
 		r.NotEmpty(output.Output.Resource.Digest.Value)
 
-		ociPath := strings.TrimPrefix(output.Output.File.URI, "file://")
+		ociPath := filePath(t, output.Output.File.URI)
 		assert.FileExists(t, ociPath)
 		t.Cleanup(func() {
 			_ = os.RemoveAll(ociPath)
@@ -254,6 +259,7 @@ func TestConvertHelmChartToOCI_Transform(t *testing.T) {
 	})
 
 	t.Run("fails when spec is nil", func(t *testing.T) {
+		t.Parallel()
 		r := require.New(t)
 		ctx := t.Context()
 
@@ -391,4 +397,12 @@ func openFileAsBlob(path string) (*fileBlob, error) {
 
 func (f *fileBlob) ReadCloser() (io.ReadCloser, error) {
 	return os.Open(f.path)
+}
+
+// fileURI is the file:// URI of the absolute path p.
+func fileURI(t *testing.T, p string) string {
+	t.Helper()
+	uri, err := filesystem.URIFromFilePath(p)
+	require.NoError(t, err)
+	return uri
 }

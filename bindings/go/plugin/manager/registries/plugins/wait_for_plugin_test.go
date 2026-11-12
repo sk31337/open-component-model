@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"ocm.software/open-component-model/bindings/go/plugin/internal/osutil"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/types"
 )
 
@@ -56,6 +57,11 @@ func TestWaitForPlugin(t *testing.T) {
 	})
 
 	t.Run("successful connection to Unix socket plugin", func(t *testing.T) {
+		if osutil.ConnectionType(t.Context()) != types.Socket {
+			t.Skip("unix domain sockets are not supported on this system")
+		}
+		// Unix socket paths are limited to ~104 bytes, which t.TempDir can exceed on macOS.
+		//nolint:usetesting // see above: t.TempDir can produce too-long Unix socket paths
 		tempDir, err := os.MkdirTemp("", "test-unix-socket")
 		require.NoError(t, err)
 		defer os.RemoveAll(tempDir)
@@ -113,7 +119,7 @@ func TestWaitForPlugin(t *testing.T) {
 		// This should fail immediately due to context cancellation
 		client, _, err := WaitForPlugin(ctx, p)
 
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.Nil(t, client)
 		assert.Contains(t, err.Error(), "timed out waiting for server to start")
 	})
@@ -132,7 +138,7 @@ func TestWaitForPlugin(t *testing.T) {
 		buffer.Write([]byte("http+unix://dummy"))
 		client, _, err := WaitForPlugin(ctx, p)
 
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.Nil(t, client)
 	})
 }
@@ -182,7 +188,7 @@ func TestConnect(t *testing.T) {
 
 		// This should fail because the socket doesn't exist, but we're testing the connection attempt
 		_, err = client.Do(req)
-		assert.Error(t, err)
+		require.Error(t, err)
 		// Check that the error mentions unix socket
 		assert.Contains(t, err.Error(), "/non/existent/socket")
 	})
@@ -201,7 +207,7 @@ func TestConnect(t *testing.T) {
 
 		// This should fail because port 12345 likely isn't open, but we're testing the connection attempt
 		_, err = client.Do(req)
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.Contains(t, err.Error(), "localhost:12345")
 	})
 }

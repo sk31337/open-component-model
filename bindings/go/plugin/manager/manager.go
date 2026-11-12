@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	genericv1 "ocm.software/open-component-model/bindings/go/configuration/generic/v1/spec"
+	"ocm.software/open-component-model/bindings/go/plugin/internal/osutil"
 	blobtransformerv1 "ocm.software/open-component-model/bindings/go/plugin/manager/contracts/blobtransformer/v1"
 	componentlisterv1 "ocm.software/open-component-model/bindings/go/plugin/manager/contracts/componentlister/v1"
 	credentialpluginv1 "ocm.software/open-component-model/bindings/go/plugin/manager/contracts/credentialplugin/v1"
@@ -30,6 +30,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/componentversionrepository"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/credentialplugin"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/credentialrepository"
+	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/credentialtyperepository"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/digestprocessor"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/input"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/resource"
@@ -37,6 +38,7 @@ import (
 	mtypes "ocm.software/open-component-model/bindings/go/plugin/manager/types"
 	pluginruntime "ocm.software/open-component-model/bindings/go/plugin/manager/types/runtime"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/types/spec"
+	"ocm.software/open-component-model/bindings/go/repository/integrity"
 	"ocm.software/open-component-model/bindings/go/runtime"
 )
 
@@ -56,6 +58,7 @@ type PluginManager struct {
 	ResourcePluginRegistry             *resource.ResourceRegistry
 	BlobTransformerRegistry            *blobtransformer.Registry
 	SigningRegistry                    *signinghandler.SigningRegistry
+	CredentialTypeRegistry             *credentialtyperepository.CredentialTypeRegistry
 
 	mu sync.Mutex
 
@@ -66,10 +69,23 @@ type PluginManager struct {
 	baseCtx context.Context
 }
 
+// Option configures a PluginManager.
+type Option func(*PluginManager)
+
+// WithArtifactVerifier sets the verifier for OCI artifacts (OCI layouts, artifact sets) that
+// external plugins deliver as archives. Without it, plugin content recorded with an OCI
+// artifact digest cannot be verified and is refused.
+func WithArtifactVerifier(v integrity.ArtifactVerifier) Option {
+	return func(pm *PluginManager) {
+		pm.ComponentVersionRepositoryRegistry.SetArtifactVerifier(v)
+		pm.ResourcePluginRegistry.SetArtifactVerifier(v)
+	}
+}
+
 // NewPluginManager initializes the PluginManager
 // the passed ctx is used for all plugins.
-func NewPluginManager(ctx context.Context) *PluginManager {
-	return &PluginManager{
+func NewPluginManager(ctx context.Context, opts ...Option) *PluginManager {
+	pm := &PluginManager{
 		ComponentVersionRepositoryRegistry: componentversionrepository.NewComponentVersionRepositoryRegistry(ctx),
 		ComponentListerRegistry:            componentlister.NewComponentListerRegistry(ctx),
 		CredentialPluginRegistry:           credentialplugin.NewRegistry(ctx),
@@ -79,8 +95,13 @@ func NewPluginManager(ctx context.Context) *PluginManager {
 		ResourcePluginRegistry:             resource.NewResourceRegistry(ctx),
 		BlobTransformerRegistry:            blobtransformer.NewBlobTransformerRegistry(ctx),
 		SigningRegistry:                    signinghandler.NewSigningRegistry(ctx),
+		CredentialTypeRegistry:             credentialtyperepository.NewCredentialTypeRegistry(ctx),
 		baseCtx:                            ctx,
 	}
+	for _, opt := range opts {
+		opt(pm)
+	}
+	return pm
 }
 
 type RegistrationOptions struct {
@@ -123,11 +144,7 @@ func (pm *PluginManager) RegisterPlugins(ctx context.Context, dir string, opts .
 		IdleTimeout: &defaultOpts.IdleTimeout,
 	}
 
-	t, err := determineConnectionType(ctx)
-	if err != nil {
-		return fmt.Errorf("could not determine connection type: %w", err)
-	}
-	conf.Type = t
+	conf.Type = osutil.ConnectionType(ctx)
 
 	plugins, err := pm.fetchPlugins(ctx, conf, dir)
 	if err != nil {
@@ -206,13 +223,10 @@ func (pm *PluginManager) fetchPlugins(ctx context.Context, conf *mtypes.Config, 
 			return nil
 		}
 
-		// TODO(Skarlso): Determine plugin extension.
-		ext := filepath.Ext(info.Name())
-		if ext != "" {
+		id, ok := pluginID(info.Name())
+		if !ok {
 			return nil
 		}
-
-		id := filepath.Base(path)
 
 		p := &mtypes.Plugin{
 			ID:     id,
@@ -230,6 +244,21 @@ func (pm *PluginManager) fetchPlugins(ctx context.Context, conf *mtypes.Config, 
 	}
 
 	return plugins, nil
+}
+
+// pluginID returns the ID of the plugin executable with the given file name and whether the file is a plugin.
+// Plugins are files without extension, on Windows executables have to carry the .exe extension.
+func pluginID(name string) (string, bool) {
+	ext := filepath.Ext(name)
+	switch {
+	case ext == "":
+		// Without the extension this OS requires for executables, the file cannot be run.
+		return name, mtypes.ExecutableSuffix == ""
+	case mtypes.ExecutableSuffix != "" && strings.EqualFold(ext, mtypes.ExecutableSuffix):
+		return strings.TrimSuffix(name, ext), true
+	default:
+		return "", false
+	}
 }
 
 var scheme *runtime.Scheme
@@ -314,6 +343,11 @@ func (pm *PluginManager) addPlugin(ctx context.Context, ocmConfig *genericv1.Con
 			if err := pm.CredentialRepositoryRegistry.AddPlugin(plugin, capability); err != nil {
 				return fmt.Errorf("failed to register plugin %s: %w", plugin.ID, err)
 			}
+			// The credential type registry is a type sink: it takes the credential types the
+			// plugin declares, the repository registry runs the plugin.
+			if err := pm.CredentialTypeRegistry.RegisterCustomTypes(plugin, capability.CustomCredentialTypes); err != nil {
+				return fmt.Errorf("failed to register credential types of plugin %s: %w", plugin.ID, err)
+			}
 		case *componentlisterv1.CapabilitySpec:
 			slog.DebugContext(ctx, "adding component lister plugin", "id", plugin.ID)
 			if err := pm.ComponentListerRegistry.AddPlugin(plugin, capability); err != nil {
@@ -344,36 +378,13 @@ func (pm *PluginManager) addPlugin(ctx context.Context, ocmConfig *genericv1.Con
 			if err := pm.CredentialPluginRegistry.AddPlugin(plugin, capability); err != nil {
 				return fmt.Errorf("failed to register plugin %s: %w", plugin.ID, err)
 			}
+			if err := pm.CredentialTypeRegistry.RegisterCustomTypes(plugin, capability.CustomCredentialTypes); err != nil {
+				return fmt.Errorf("failed to register credential types of plugin %s: %w", plugin.ID, err)
+			}
 		default:
 			return fmt.Errorf("unknown capability type %T for plugin %s", capability, plugin.ID)
 		}
 	}
 
 	return nil
-}
-
-func determineConnectionType(ctx context.Context) (mtypes.ConnectionType, error) {
-	// if we can't create a temp folder ( for example we are in a scratch container ) we default to TCP
-	tmp, err := os.MkdirTemp("", "")
-	if err != nil {
-		slog.DebugContext(ctx, "failed to create temporary folder, falling back to TCP connection", "err", err.Error())
-		return mtypes.TCP, nil
-	}
-
-	defer func() {
-		_ = os.RemoveAll(tmp)
-	}()
-
-	socketPath := filepath.Join(tmp, "plugin.sock")
-	var lc net.ListenConfig
-	listener, err := lc.Listen(ctx, "unix", socketPath)
-	if err != nil {
-		return mtypes.TCP, nil
-	}
-
-	if err := listener.Close(); err != nil {
-		return "", fmt.Errorf("failed to close socket: %w", err)
-	}
-
-	return mtypes.Socket, nil
 }

@@ -199,26 +199,26 @@ nestedDigests:
 func TestDescriptor_JSON(t *testing.T) {
 	desc := descriptorv2.Descriptor{}
 	err := json.Unmarshal([]byte(jsonData), &desc)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.NoError(t, descriptorv2.Validate(&desc))
 
 	assert.NotEmpty(t, desc.Component.Resources[0].ToIdentity())
 
 	descData, err := json.Marshal(desc)
 	assert.JSONEq(t, jsonData, string(descData))
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.NoError(t, descriptorv2.ValidateRawJSON(descData))
 }
 
 func TestDescriptor_YAML(t *testing.T) {
 	desc := descriptorv2.Descriptor{}
 	err := yaml.Unmarshal([]byte(yamlData), &desc)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.NoError(t, descriptorv2.Validate(&desc))
 
 	descData, err := yaml.Marshal(desc)
 	assert.YAMLEq(t, yamlData, string(descData))
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.NoError(t, descriptorv2.ValidateRawYAML(descData))
 }
 
@@ -566,8 +566,8 @@ func TestConstantValues(t *testing.T) {
 	assert.Equal(t, "NO-DIGEST", descriptorv2.NoDigest)
 
 	// Test resource relation constants
-	assert.Equal(t, descriptorv2.ResourceRelation("local"), descriptorv2.LocalRelation)
-	assert.Equal(t, descriptorv2.ResourceRelation("external"), descriptorv2.ExternalRelation)
+	assert.Equal(t, descriptorv2.LocalRelation, descriptorv2.ResourceRelation("local"))
+	assert.Equal(t, descriptorv2.ExternalRelation, descriptorv2.ResourceRelation("external"))
 }
 
 func TestResource_Struct(t *testing.T) {
@@ -662,6 +662,30 @@ func TestReference_Struct(t *testing.T) {
 	assert.Contains(t, string(jsonData), `"version":"1.0.0"`)
 	assert.Contains(t, string(jsonData), `"componentName":"referenced-component"`)
 	assert.Contains(t, string(jsonData), `"digest":{"hashAlgorithm":"SHA-256","normalisationAlgorithm":"JsonNormalization","value":"0123456789abcdef"}`)
+}
+
+// An undigested reference must not be serialised with an empty digest object:
+// consumers that check for presence (e.g. OCM v1) would read it as a set digest.
+func TestReference_UnsetDigestOmitted(t *testing.T) {
+	r := require.New(t)
+	reference := descriptorv2.Reference{
+		ElementMeta: descriptorv2.ElementMeta{
+			ObjectMeta: descriptorv2.ObjectMeta{Name: "child", Version: "1.0.0"},
+		},
+		Component: "acme.org/child",
+	}
+
+	jsonData, err := json.Marshal(reference)
+	r.NoError(err)
+	r.JSONEq(`{"name":"child","version":"1.0.0","componentName":"acme.org/child"}`, string(jsonData))
+
+	yamlData, err := yaml.Marshal(reference)
+	r.NoError(err)
+	r.NotContains(string(yamlData), "digest")
+
+	var roundTripped descriptorv2.Reference
+	r.NoError(json.Unmarshal(jsonData, &roundTripped))
+	r.Equal(reference, roundTripped)
 }
 
 func TestSignature_Struct(t *testing.T) {
@@ -960,9 +984,16 @@ func TestSchemaConformance(t *testing.T) {
 				valid:   true,
 			},
 			{
-				name:    "InvalidVersion",
+				// "invalid" is now structurally valid (non-empty string); the
+				// concrete scheme is checked by ValidateVersions, not the schema.
+				name:    "NonSemverIsStructurallyValid",
 				version: "invalid",
-				valid:   false,
+				valid:   true,
+			},
+			{
+				name:    "CalverIsStructurallyValid",
+				version: "2024.03.15",
+				valid:   true,
 			},
 		}
 
@@ -991,7 +1022,6 @@ func TestSchemaConformance(t *testing.T) {
 					assert.NoError(t, err)
 				} else {
 					assert.Error(t, err)
-					assert.Contains(t, err.Error(), "does not match pattern")
 				}
 			})
 		}
@@ -1056,7 +1086,7 @@ func TestSchemaConformance(t *testing.T) {
 					},
 				}
 				err := descriptorv2.Validate(&desc)
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectedError)
 			})
 		}
@@ -1119,7 +1149,7 @@ func TestSchemaConformance(t *testing.T) {
 					},
 				}
 				err := descriptorv2.Validate(&desc)
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectedError)
 			})
 		}
@@ -1176,7 +1206,7 @@ func TestSchemaConformance(t *testing.T) {
 					},
 				}
 				err := descriptorv2.Validate(&desc)
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectedError)
 			})
 		}

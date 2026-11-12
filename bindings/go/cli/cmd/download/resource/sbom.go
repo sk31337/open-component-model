@@ -12,7 +12,6 @@ import (
 	"ocm.software/open-component-model/bindings/go/cli/internal/sbom"
 	"ocm.software/open-component-model/bindings/go/credentials"
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
-	"ocm.software/open-component-model/bindings/go/oci/compref"
 	"ocm.software/open-component-model/bindings/go/plugin/manager"
 	"ocm.software/open-component-model/bindings/go/repository"
 	"ocm.software/open-component-model/bindings/go/runtime"
@@ -23,7 +22,6 @@ type downloadContext struct {
 	pluginManager   *manager.PluginManager
 	credentialGraph credentials.Resolver
 	logger          *slog.Logger
-	ref             *compref.Ref
 	repo            repository.ComponentVersionRepository
 	descriptor      *descriptor.Descriptor
 	resource        *descriptor.Resource
@@ -38,16 +36,22 @@ func downloadSBOMs(cmd *cobra.Command, dc downloadContext) error {
 
 	dc.logger.Warn("--sbom is experimental: the set of SBOMs discovered, the layout written and the flags themselves may change in a future release")
 
+	var localSBOMDiscoverer repository.LocalSBOMDiscoverer
+	if discoverer, ok := dc.repo.(repository.LocalSBOMDiscoverer); ok {
+		localSBOMDiscoverer = discoverer
+	}
+
 	discovered, err := sbom.Discover(ctx, sbom.Request{
 		Descriptor:    dc.descriptor,
 		Resource:      dc.resource,
 		PluginManager: dc.pluginManager,
 		Credentials:   dc.credentialGraph,
 		Logger:        dc.logger,
-		Download: func(ctx context.Context, res *descriptor.Resource, identity runtime.Identity) (ocmblob.ReadOnlyBlob, error) {
-			return shared.DownloadResourceData(ctx, dc.pluginManager, dc.credentialGraph, dc.ref.Component, dc.ref.Version, dc.repo, res, identity)
+		Download: func(ctx context.Context, res *descriptor.Resource, _ runtime.Identity) (ocmblob.ReadOnlyBlob, error) {
+			return shared.DownloadResourceData(ctx, dc.pluginManager, dc.credentialGraph, dc.descriptor, dc.repo, res)
 		},
-		Options: []repository.SBOMOption{repository.WithAllSBOMPlatforms()},
+		DiscoverLocal: localSBOMDiscoverer,
+		Options:       []repository.SBOMOption{repository.WithAllSBOMPlatforms()},
 	})
 	if err != nil {
 		return err

@@ -1,0 +1,54 @@
+{{- /* dig: a helm upgrade --reuse-values from a release without these keys must not fail */}}
+{{- if dig "networkPolicy" "enabled" false .Values.manager }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+    labels:
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
+        app.kubernetes.io/name: {{ include "ocm-k8s-toolkit.name" . }}
+        helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        control-plane: controller-manager
+    name: {{ include "ocm-k8s-toolkit.resourceName" (dict "suffix" "controller-manager" "context" $) }}
+    namespace: {{ .Release.Namespace }}
+spec:
+    podSelector:
+        matchLabels:
+            app.kubernetes.io/name: {{ include "ocm-k8s-toolkit.name" . }}
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            control-plane: controller-manager
+    policyTypes:
+        - Ingress
+        - Egress
+    ingress:
+        {{- /* Mirror the ports the manager listens on, see manager.yaml. */}}
+        - ports:
+            - port: {{ regexFind "[0-9]+$" (dig "healthProbe" "bindAddress" ":8081" .Values.manager | default ":8081" | toString) | int }}
+              protocol: TCP
+            {{- with include "ocm-k8s-toolkit.metricsPort" . }}
+            - port: {{ . | int }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.webhook.enable }}
+            - port: 9443
+              protocol: TCP
+            {{- end }}
+        {{- with dig "networkPolicy" "ingress" (list) .Values.manager }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    egress:
+        {{- with dig "networkPolicy" "egress" (list) .Values.manager }}
+        {{- toYaml . | nindent 8 }}
+        {{- else }}
+        - ports:
+            - port: 53
+              protocol: UDP
+            - port: 53
+              protocol: TCP
+        - ports:
+            - port: 443
+              protocol: TCP
+            - port: 6443
+              protocol: TCP
+        {{- end }}
+{{- end }}

@@ -18,6 +18,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/helm/input"
 	helmcredsv1 "ocm.software/open-component-model/bindings/go/helm/spec/credentials/v1"
 	v1 "ocm.software/open-component-model/bindings/go/helm/spec/input/v1"
+	httpv1alpha1 "ocm.software/open-component-model/bindings/go/http/spec/config/v1alpha1"
 	ocicredsv1 "ocm.software/open-component-model/bindings/go/oci/spec/credentials/v1"
 	"ocm.software/open-component-model/bindings/go/oci/tar"
 )
@@ -242,6 +243,7 @@ func TestGetV1HelmBlob_OCICredentialsBasicAuthFallback(t *testing.T) {
 	b, chart, err := input.GetV1HelmBlob(t.Context(), spec, t.TempDir(),
 		input.WithCredentials(&helmcredsv1.HelmHTTPCredentials{Username: expectedUser}),
 		input.WithOCICredentials(&ocicredsv1.OCICredentials{AccessToken: accessToken}),
+		input.WithHTTPConfig(&httpv1alpha1.Config{ProtocolConfig: httpv1alpha1.ProtocolConfig{PlainHTTP: new(true)}}),
 	)
 	require.NoError(t, err)
 	require.NotNil(t, b)
@@ -279,4 +281,91 @@ func TestGetV1HelmBlob_BadCharts(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErrMgs)
 		})
 	}
+}
+
+func TestGetV1HelmBlob_WorkingDirectory(t *testing.T) {
+	r := require.New(t)
+	workDir, err := os.Getwd()
+	r.NoError(err, "failed to get current working directory")
+	testDataDir := filepath.Join(workDir, "../testdata")
+
+	tests := []struct {
+		name       string
+		workingDir string
+		path       string
+		wantProv   bool
+		wantErrMsg string
+	}{
+		{
+			name:       "relative chart directory",
+			workingDir: testDataDir,
+			path:       "./mychart",
+		},
+		{
+			name:       "relative packaged chart",
+			workingDir: testDataDir,
+			path:       "mychart-0.1.0.tgz",
+		},
+		{
+			name:       "relative packaged chart with provenance file",
+			workingDir: testDataDir,
+			path:       "provenance/mychart-0.1.0.tgz",
+			wantProv:   true,
+		},
+		{
+			name:       "absolute chart path inside working directory",
+			workingDir: testDataDir,
+			path:       filepath.Join(testDataDir, "mychart"),
+		},
+		{
+			name:       "absolute chart path inside relative working directory",
+			workingDir: "../testdata",
+			path:       filepath.Join(testDataDir, "mychart"),
+		},
+		{
+			name:       "chart path escaping the working directory",
+			workingDir: filepath.Join(testDataDir, "provenance"),
+			path:       "../mychart",
+			wantErrMsg: "path escapes from parent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := require.New(t)
+			spec := v1.Helm{
+				Path: tt.path,
+			}
+			b, chart, err := input.GetV1HelmBlob(t.Context(), spec, t.TempDir(), input.WithWorkingDirectory(tt.workingDir))
+			if tt.wantErrMsg != "" {
+				r.ErrorContains(err, tt.wantErrMsg)
+				r.Nil(b)
+				return
+			}
+			r.NoError(err)
+			r.NotNil(b)
+			r.Equal("mychart", chart.Name)
+			r.Equal(tt.wantProv, chart.ProvBlob != nil)
+		})
+	}
+}
+
+func TestGetV1HelmBlob_WorkingDirectoryProvSymlinkEscape(t *testing.T) {
+	r := require.New(t)
+	chart, err := os.ReadFile(filepath.Join("..", "testdata", "mychart-0.1.0.tgz"))
+	r.NoError(err)
+
+	base := t.TempDir()
+	secret := filepath.Join(base, "secret.txt")
+	r.NoError(os.WriteFile(secret, []byte("host secret"), 0o600))
+	workDir := filepath.Join(base, "work")
+	r.NoError(os.Mkdir(workDir, 0o700))
+	r.NoError(os.WriteFile(filepath.Join(workDir, "mychart-0.1.0.tgz"), chart, 0o600))
+	if err := os.Symlink(secret, filepath.Join(workDir, "mychart-0.1.0.tgz.prov")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	b, _, err := input.GetV1HelmBlob(t.Context(), v1.Helm{Path: "mychart-0.1.0.tgz"}, t.TempDir(), input.WithWorkingDirectory(workDir))
+	r.ErrorContains(err, "path escapes from parent")
+	r.Nil(b)
 }

@@ -1,7 +1,6 @@
 package ctf
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,10 +12,11 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ociImageSpecV1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"oras.land/oras-go/v2/content"
-	"oras.land/oras-go/v2/errdef"
-	"oras.land/oras-go/v2/registry"
+	"github.com/oras-project/oras-go/v3/content"
+	"github.com/oras-project/oras-go/v3/errdef"
+	"github.com/oras-project/oras-go/v3/registry"
 
+	"ocm.software/open-component-model/bindings/go/blob/direct"
 	v1 "ocm.software/open-component-model/bindings/go/ctf/index/v1"
 	ociblob "ocm.software/open-component-model/bindings/go/oci/blob"
 )
@@ -159,7 +159,7 @@ func (s *repository) updateReferrersIndex(ctx context.Context, idx v1.Index, sub
 	if err != nil {
 		return err
 	}
-	if err := s.archive.SaveBlob(ctx, ociblob.NewDescriptorBlob(io.NopCloser(bytes.NewReader(newIndexJSON)), newIndexDesc)); err != nil {
+	if err := s.archive.SaveBlob(ctx, ociblob.NewDescriptorBlob(direct.NewFromBytes(newIndexJSON), newIndexDesc)); err != nil {
 		return fmt.Errorf("unable to save referrers index for referrers tag %q: %w", referrersTag, err)
 	}
 

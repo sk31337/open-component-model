@@ -11,10 +11,10 @@ import (
 	"time"
 
 	ociImageSpecV1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/oras-project/oras-go/v3/content"
+	orasregistry "github.com/oras-project/oras-go/v3/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"oras.land/oras-go/v2/content"
-	orasregistry "oras.land/oras-go/v2/registry"
 
 	"ocm.software/open-component-model/bindings/go/blob/inmemory"
 	"ocm.software/open-component-model/bindings/go/cli/cmd"
@@ -152,8 +152,7 @@ components:
           type: file/v1
           path: hello-ocm.tar.gz
           mediaType: application/vnd.ocm.software.oci.layout.v1+tar+gzip
-`, component, ownershipVersion, resourceName),
-		"--component-version-conflict-policy", "replace")
+`, component, ownershipVersion, resourceName))
 	assertOwnershipReferrer(t, ctx, resolver, subject, component, ownershipVersion, resourceName, true)
 }
 
@@ -207,8 +206,7 @@ components:
           type: file/v1
           path: hello-ocm.tar.gz
           mediaType: application/vnd.ocm.software.oci.layout.v1+tar+gzip
-`, component, ownershipVersion, resourceName),
-		"--component-version-conflict-policy", "replace")
+`, component, ownershipVersion, resourceName))
 	assertOwnershipReferrer(t, ctx, resolver, subject, component, ownershipVersion, resourceName, true)
 }
 
@@ -243,7 +241,7 @@ components:
           mediaType: application/vnd.ocm.software.oci.layout.v1+tar+gzip
 `, component, ownershipVersion, resourceName))
 
-	dstResolver, dstRepo := transferComponentVersion(t, ctx, srcReg, component, ownershipVersion, true, "localBlob")
+	dstResolver, dstRepo := transferComponentVersion(t, ctx, srcReg, component, ownershipVersion, true, false)
 	subject := localBlobSubjectReference(t, ctx, dstResolver, dstRepo, component, ownershipVersion, runtime.Identity{"name": resourceName, "version": ownershipVersion})
 	assertOwnershipReferrer(t, ctx, dstResolver, subject, component, ownershipVersion, resourceName, true)
 }
@@ -279,12 +277,12 @@ components:
           imageReference: http://%[4]s
 `, component, ownershipVersion, resourceName, ownedImageRef))
 
-	dstResolver, dstRepo := transferComponentVersion(t, ctx, srcReg, component, ownershipVersion, true, "ociArtifact")
+	dstResolver, dstRepo := transferComponentVersion(t, ctx, srcReg, component, ownershipVersion, true, true)
 	subject := ociImageReference(t, ctx, dstRepo, component, ownershipVersion, runtime.Identity{"name": resourceName, "version": ownershipVersion})
 	assertOwnershipReferrer(t, ctx, dstResolver, subject, component, ownershipVersion, resourceName, true)
 }
 
-func transferComponentVersion(t *testing.T, ctx context.Context, srcReg *internal.OCIRegistry, component, version string, copyResources bool, uploadAs string) (*urlresolver.CachingResolver, *oci.Repository) {
+func transferComponentVersion(t *testing.T, ctx context.Context, srcReg *internal.OCIRegistry, component, version string, copyResources, ociUploader bool) (*urlresolver.CachingResolver, *oci.Repository) {
 	t.Helper()
 	r := require.New(t)
 
@@ -306,8 +304,8 @@ func transferComponentVersion(t *testing.T, ctx context.Context, srcReg *interna
 	if copyResources {
 		args = append(args, "--copy-resources")
 	}
-	if uploadAs != "" {
-		args = append(args, "--upload-as", uploadAs)
+	if ociUploader {
+		args = append(args, "--config", writeOCIUploaderConfig(t))
 	}
 
 	transferCMD := cmd.New()
@@ -390,7 +388,7 @@ func localBlobSubjectReference(t *testing.T, ctx context.Context, resolver oci.R
 		ref, err := looseref.ParseReference(resolver.ComponentVersionReference(ctx, component, version))
 		r.NoError(err)
 		ref.Tag = ""
-		ref.Reference.Reference = local.LocalReference
+		ref.Digest = local.LocalReference
 		return ref.String()
 	}
 	t.Fatalf("resource matching identity %q not present in component version %s:%s", identity, component, version)
@@ -399,7 +397,7 @@ func localBlobSubjectReference(t *testing.T, ctx context.Context, resolver oci.R
 
 // ociImageReference reads the component version back, locates the resource matching
 // identity, and returns its OCIImage access's imageReference. Use when access is
-// expected to be OCIImage (e.g. after `transfer --upload-as ociArtifact`).
+// expected to be OCIImage (e.g. after a transfer with an OCI uploader configuration).
 func ociImageReference(t *testing.T, ctx context.Context, repo *oci.Repository, component, version string, identity runtime.Identity) string {
 	t.Helper()
 	r := require.New(t)
@@ -460,7 +458,7 @@ func assertOwnershipReferrer(t *testing.T, ctx context.Context, resolver oci.Res
 	r.NoError(err)
 	sref, err := looseref.ParseReference(subjectRef)
 	r.NoError(err)
-	subject, err := store.Resolve(ctx, sref.ReferenceOrTag())
+	subject, err := store.Resolve(ctx, sref.GetReference())
 	r.NoError(err)
 
 	rc, err := store.Fetch(ctx, ref)
@@ -483,7 +481,7 @@ func listOwnershipReferrers(t *testing.T, ctx context.Context, resolver oci.Reso
 	r.Truef(ok, "store %T must implement content.ReadOnlyGraphStorage for referrers discovery", store)
 	ref, err := looseref.ParseReference(reference)
 	r.NoError(err)
-	subject, err := store.Resolve(ctx, ref.ReferenceOrTag())
+	subject, err := store.Resolve(ctx, ref.GetReference())
 	r.NoError(err)
 	refs, err := orasregistry.Referrers(ctx, graphStore, subject, annotations.OwnershipArtifactType)
 	r.NoError(err)

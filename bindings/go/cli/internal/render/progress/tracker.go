@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -28,6 +29,16 @@ type Event[T any] struct {
 	State State
 	Err   error
 	Data  T
+
+	// Duration is the elapsed time from the item's Running event to its
+	// terminal (Completed, Failed, Cancelled) event. The tracker populates
+	// it; zero means unknown, either because no Running event was seen or
+	// the item never reached a terminal state.
+	Duration time.Duration
+
+	// InFlight is the number of items currently being processed in parallel
+	// at the time this event was handled, including this item while it runs.
+	InFlight int
 }
 
 // Operation represents a running unit of work created by [Tracker.StartOperation].
@@ -40,6 +51,7 @@ type OperationOption[T any] func(*operationConfig[T])
 
 type operationConfig[T any] struct {
 	total          int
+	concurrency    int
 	errorFormatter func(T, error) string
 	events         <-chan Event[T]
 }
@@ -73,6 +85,41 @@ func WithErrorFormatter[T any](f func(T, error) string) OperationOption[T] {
 	}
 }
 
+// WithConcurrency records how many items the operation may process in parallel
+// ("runners"). Visualizers that implement [ConcurrencyAware] surface it.
+func WithConcurrency[T any](runners int) OperationOption[T] {
+	return func(cfg *operationConfig[T]) {
+		cfg.concurrency = runners
+	}
+}
+
+// forceNonInteractiveKey marks a context so that trackers created from it never
+// use interactive terminal rendering, even when the output is a TTY.
+type forceNonInteractiveKey struct{}
+
+// WithForceNonInteractive returns a context that makes [NewTracker] skip the
+// interactive terminal visualizer and always use the slog-based fallback. The
+// CLI sets this when the user requests a specific log format, so structured log
+// output is never replaced by the animated progress UI.
+func WithForceNonInteractive(ctx context.Context) context.Context {
+	return context.WithValue(ctx, forceNonInteractiveKey{}, true)
+}
+
+func forceNonInteractive(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	forced, _ := ctx.Value(forceNonInteractiveKey{}).(bool)
+	return forced
+}
+
+// useTerminalVisualizer reports whether the interactive terminal visualizer
+// should be used: a factory must be present, out must be a TTY, and the context
+// must not force non-interactive rendering via [WithForceNonInteractive].
+func useTerminalVisualizer(ctx context.Context, hasFactory, isTTY bool) bool {
+	return hasFactory && isTTY && !forceNonInteractive(ctx)
+}
+
 // Tracker manages progress rendering for CLI operations.
 //
 // In terminal mode, it uses the injected factory and redirects slog to a buffer
@@ -89,14 +136,16 @@ type Tracker[T any] struct {
 // NewTracker creates a tracker for the given output writer.
 // The factory creates terminal visualizers; in non-terminal mode it is ignored.
 // If factory is nil, the tracker always uses [SlogVisualizer].
-func NewTracker[T any](_ context.Context, out io.Writer, factory ...VisualizerFactory[T]) *Tracker[T] {
+// A context carrying [WithForceNonInteractive] also disables the terminal
+// visualizer, regardless of whether out is a TTY.
+func NewTracker[T any](ctx context.Context, out io.Writer, factory ...VisualizerFactory[T]) *Tracker[T] {
 	var f VisualizerFactory[T]
 	if len(factory) > 0 {
 		f = factory[0]
 	}
 	return &Tracker[T]{
 		out:        out,
-		isTerminal: f != nil && isTerminal(out),
+		isTerminal: useTerminalVisualizer(ctx, f != nil, isTerminal(out)),
 		factory:    f,
 	}
 }
@@ -119,6 +168,12 @@ func (t *Tracker[T]) StartOperation(name string, opts ...OperationOption[T]) Ope
 		t.interceptSlog(vis)
 	} else {
 		vis = &SlogVisualizer[T]{}
+	}
+
+	if cfg.concurrency > 0 {
+		if setter, ok := vis.(ConcurrencyAware); ok {
+			setter.SetConcurrency(cfg.concurrency)
+		}
 	}
 
 	vis.Begin(name)
@@ -181,11 +236,30 @@ func (op *operation[T]) processEvents(events <-chan Event[T]) {
 	op.finished = make(chan struct{})
 	go func() {
 		defer close(op.finished)
+		starts := make(map[string]time.Time)
 		for event := range events {
 			if event.Err != nil && (errors.Is(event.Err, context.Canceled) || errors.Is(event.Err, context.DeadlineExceeded)) {
 				event.State = Cancelled
 				event.Err = nil
 			}
+			switch event.State {
+			case Running:
+				// Repeated Running updates for one item keep the first start
+				// time, so the duration spans the whole processing.
+				if _, ok := starts[event.ID]; !ok {
+					starts[event.ID] = time.Now()
+				}
+			case Completed, Failed, Cancelled:
+				if start, ok := starts[event.ID]; ok {
+					// Producers may set their own measurement; tracker timing is the fallback.
+					if event.Duration == 0 {
+						event.Duration = time.Since(start)
+					}
+					delete(starts, event.ID)
+				}
+			}
+			// After updating the running set, expose how many items run in parallel right now.
+			event.InFlight = len(starts)
 			op.vis.HandleEvent(event)
 		}
 	}()

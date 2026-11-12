@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"ocm.software/open-component-model/bindings/go/blob"
+	"ocm.software/open-component-model/bindings/go/blob/compression/gzippool"
 )
 
 const (
@@ -109,16 +110,18 @@ func (b *Blob) ReadCloser() (io.ReadCloser, error) {
 
 // compress compresses the data from the reader with the specified compression method and writes it to the writer.
 func compress(reader io.ReadCloser, writer *io.PipeWriter, method Method) {
-	var compressed io.WriteCloser
+	var compressed *gzip.Writer
 	switch method {
 	case MethodGzip:
 		fallthrough
 	default:
-		compressed = gzip.NewWriter(writer)
+		compressed = gzippool.Get(writer)
 	}
 
-	_, err := io.Copy(compressed, reader)
-	writer.CloseWithError(errors.Join(err, compressed.Close(), reader.Close()))
+	_, err := blob.CopyReader(compressed, reader)
+	closeErr := compressed.Close()
+	gzippool.Put(compressed)
+	writer.CloseWithError(errors.Join(err, closeErr, reader.Close()))
 }
 
 // Decompress creates a decompressed version of the given blob if it is compressed.
@@ -137,6 +140,8 @@ func Decompress(b blob.ReadOnlyBlob) (blob.ReadOnlyBlob, error) {
 	var mediaType string
 	if mediaTypeAware, ok := b.(blob.MediaTypeAware); ok {
 		if mediaType, ok = mediaTypeAware.MediaType(); ok {
+			// TODO(matthiasbruns): application/x-tgz (Git and GitHub archives) stays compressed, as
+			// extracting it fails on symlinks: https://github.com/open-component-model/ocm-project/issues/1343
 			if isGzip := mediaType == MediaTypeGzip || strings.HasSuffix(mediaType, MediaTypeGzipSuffix); isGzip {
 				method = MethodGzip
 				if mediaType == MediaTypeGzip {

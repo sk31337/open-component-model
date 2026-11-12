@@ -32,11 +32,11 @@ func TestFileSystemOperations(t *testing.T) {
 
 	// Test MkdirAll
 	dirPath := "testdir"
-	require.NoError(t, fsys.MkdirAll(dirPath, 0755))
+	require.NoError(t, fsys.MkdirAll(dirPath, 0o755))
 
 	// Test OpenFile
 	filePath := "testdir/testfile.txt"
-	file, err := fsys.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := fsys.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o644)
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 
@@ -68,10 +68,10 @@ func TestReadOnly(t *testing.T) {
 
 	// Test that write operations fail
 	dirPath := "testdir"
-	require.ErrorIs(t, fsys.MkdirAll(dirPath, 0755), filesystem.ErrReadOnly)
+	require.ErrorIs(t, fsys.MkdirAll(dirPath, 0o755), filesystem.ErrReadOnly)
 
 	filePath := "testfile.txt"
-	_, err = fsys.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+	_, err = fsys.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o644)
 	require.ErrorIs(t, err, filesystem.ErrReadOnly)
 
 	// Test that force read only also works on an original RDWR instance
@@ -82,9 +82,9 @@ func TestReadOnly(t *testing.T) {
 	require.True(t, fsys.ReadOnly())
 
 	// Test that write operations fail
-	require.ErrorIs(t, fsys.MkdirAll(dirPath, 0755), filesystem.ErrReadOnly)
+	require.ErrorIs(t, fsys.MkdirAll(dirPath, 0o755), filesystem.ErrReadOnly)
 
-	_, err = fsys.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+	_, err = fsys.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o644)
 	require.ErrorIs(t, err, filesystem.ErrReadOnly)
 }
 
@@ -94,10 +94,39 @@ func TestOpen(t *testing.T) {
 	require.NoError(t, err)
 
 	filePath := "testfile.txt"
-	_, err = fsys.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := fsys.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o644)
 	require.NoError(t, err)
+	require.NoError(t, f.Close())
 
 	file, err := fsys.Open(filePath)
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
+}
+
+// TestRootFileSystem_BaseReplacedBySymlink covers the confinement RootFileSystem
+// promises: operations reopen base by name, so a base swapped for a symlink must
+// be rejected instead of writing into the symlink target.
+func TestRootFileSystem_BaseReplacedBySymlink(t *testing.T) {
+	r := require.New(t)
+	parent := t.TempDir()
+	base := filepath.Join(parent, "ctf")
+	outside := filepath.Join(parent, "outside")
+	r.NoError(os.Mkdir(base, 0o755))
+	r.NoError(os.Mkdir(outside, 0o755))
+
+	fsys, err := filesystem.NewFS(base, os.O_RDWR)
+	r.NoError(err)
+
+	r.NoError(os.Rename(base, base+".moved"))
+	if err := os.Symlink(outside, base); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+
+	_, err = fsys.OpenFile("payload", os.O_CREATE|os.O_RDWR, 0o644)
+	r.ErrorIs(err, filesystem.ErrBaseReplaced)
+	r.ErrorIs(fsys.MkdirAll("blobs", 0o755), filesystem.ErrBaseReplaced)
+
+	entries, err := os.ReadDir(outside)
+	r.NoError(err)
+	r.Empty(entries, "writes escaped into %s", outside)
 }

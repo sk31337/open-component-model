@@ -9,10 +9,12 @@ import (
 	"ocm.software/open-component-model/bindings/go/oci/cache"
 	"ocm.software/open-component-model/bindings/go/oci/repository/provider"
 	ocires "ocm.software/open-component-model/bindings/go/oci/repository/resource"
+	ocicachev1alpha1 "ocm.software/open-component-model/bindings/go/oci/spec/config/cache/v1alpha1"
 	"ocm.software/open-component-model/bindings/go/oci/transformer"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/blobtransformer"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/componentlister"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/componentversionrepository"
+	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/credentialtyperepository"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/digestprocessor"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/registries/resource"
 )
@@ -25,8 +27,10 @@ func Register(
 	digRegistry *digestprocessor.RepositoryRegistry,
 	blobTransformerRegistry *blobtransformer.Registry,
 	compListRegistry *componentlister.ComponentListerRegistry,
+	credTypeRegistry *credentialtyperepository.CredentialTypeRegistry,
 	filesystemConfig *filesystemv1alpha1.Config,
 	httpConfig *httpv1alpha1.Config,
+	cacheConfig *ocicachev1alpha1.Config,
 	logger *slog.Logger,
 ) error {
 	var tempDir string
@@ -37,8 +41,9 @@ func Register(
 		provider.WithTempDir(tempDir),
 		provider.WithUserAgent(creator),
 		provider.WithHTTPConfig(httpConfig),
-		provider.WithBlobCacheOptions(&cache.Options{RemotePolicy: cache.RemotePolicyIfNotPresent}),
-		provider.WithReferenceCacheOptions(&cache.Options{RemotePolicy: cache.RemotePolicyIfNotPresent}),
+		provider.WithBlobCacheOptions(&cache.Options{}),
+		provider.WithReferenceCacheOptions(&cache.Options{}),
+		provider.WithOCICacheConfig(cacheConfig),
 	)
 
 	resourceRepoPlugin := ocires.NewResourceRepository(
@@ -56,6 +61,9 @@ func Register(
 			resourceRepoPlugin,
 		),
 		digRegistry.RegisterInternalDigestProcessorPlugin(
+			resourceRepoPlugin,
+		),
+		credTypeRegistry.RegisterInternalCredentialTypeSchemeProvider(
 			resourceRepoPlugin,
 		),
 		blobTransformerRegistry.RegisterInternalBlobTransformerPlugin(

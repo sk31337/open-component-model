@@ -3,27 +3,26 @@ package componentlister
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
 	"ocm.software/open-component-model/bindings/go/plugin/internal/dummytype"
 	dummyv1 "ocm.software/open-component-model/bindings/go/plugin/internal/dummytype/v1"
+	"ocm.software/open-component-model/bindings/go/plugin/internal/osutil"
 	v1 "ocm.software/open-component-model/bindings/go/plugin/manager/contracts/componentlister/v1"
 	mtypes "ocm.software/open-component-model/bindings/go/plugin/manager/types"
 	"ocm.software/open-component-model/bindings/go/repository"
 	"ocm.software/open-component-model/bindings/go/runtime"
 )
 
-var (
-	dummyType = runtime.NewVersionedType(dummyv1.Type, dummyv1.Version)
-)
+var dummyType = runtime.NewVersionedType(dummyv1.Type, dummyv1.Version)
 
 func dummyCapability(schema []byte) v1.CapabilitySpec {
 	return v1.CapabilitySpec{
@@ -37,20 +36,20 @@ func dummyCapability(schema []byte) v1.CapabilitySpec {
 
 func TestPluginFlow(t *testing.T) {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
-	path := filepath.Join("..", "..", "..", "tmp", "testdata", "test-plugin-component-lister")
+	path := filepath.Join("..", "..", "..", "tmp", "testdata", mtypes.ExecutableName("test-plugin-component-lister"))
 	_, err := os.Stat(path)
 	require.NoError(t, err, "test plugin not found, please build the plugin under tmp/testdata/test-plugin-component-lister first")
 
 	ctx := context.Background()
 
-	id := "test-plugin-component-lister" + time.Now().Format(time.RFC3339)
+	id := "test-plugin-component-lister" + strconv.FormatInt(time.Now().UnixNano(), 10)
 
 	scheme := runtime.NewScheme()
 	dummytype.MustAddToScheme(scheme)
 	registry := NewComponentListerRegistry(ctx)
 	config := mtypes.Config{
 		ID:         id,
-		Type:       mtypes.Socket,
+		Type:       osutil.ConnectionType(t.Context()),
 		PluginType: v1.ComponentListerPluginType,
 	}
 	serialized, err := json.Marshal(config)
@@ -58,8 +57,11 @@ func TestPluginFlow(t *testing.T) {
 
 	pluginCmd := exec.CommandContext(ctx, path, "--config", string(serialized))
 	t.Cleanup(func() {
-		_ = os.Remove(fmt.Sprintf("/tmp/%s-plugin.socket", id))
-		_ = pluginCmd.Process.Kill()
+		if pluginCmd.Process != nil {
+			_ = pluginCmd.Process.Kill()
+		}
+		_ = os.Remove(osutil.SocketPath(id))
+		_ = os.Remove(osutil.SocketPath(id) + ".lock")
 	})
 	pipe, err := pluginCmd.StdoutPipe()
 	require.NoError(t, err)
@@ -102,7 +104,7 @@ func TestPluginFlow(t *testing.T) {
 	require.Error(t, err)
 	require.Empty(t, resultIfErr)
 	expectedErr := `unknown last: "last"`
-	require.Truef(t, strings.Contains(err.Error(), expectedErr), "returned error '%s' does not contain expected '%s'", err.Error(), expectedErr)
+	require.Containsf(t, err.Error(), expectedErr, "returned error '%s' does not contain expected '%s'", err.Error(), expectedErr)
 }
 
 func TestRegisterInternalComponentListerPlugin(t *testing.T) {

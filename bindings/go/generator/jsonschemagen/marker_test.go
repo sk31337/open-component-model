@@ -4,9 +4,9 @@ import (
 	"go/ast"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	. "ocm.software/open-component-model/bindings/go/generator/jsonschemagen"
+
+	"github.com/stretchr/testify/require"
 )
 
 func cg(lines ...string) *ast.CommentGroup {
@@ -81,10 +81,10 @@ func TestApplyNumericMarkers(t *testing.T) {
 	require.NotNil(t, s.ExclusiveMinimum)
 	require.NotNil(t, s.ExclusiveMaximum)
 
-	require.Equal(t, 1.0, *s.Minimum)
-	require.Equal(t, 5.0, *s.Maximum)
-	require.Equal(t, 2.0, *s.ExclusiveMinimum)
-	require.Equal(t, 10.0, *s.ExclusiveMaximum)
+	require.InDelta(t, 1.0, *s.Minimum, 1e-9)
+	require.InDelta(t, 5.0, *s.Maximum, 1e-9)
+	require.InDelta(t, 2.0, *s.ExclusiveMinimum, 1e-9)
+	require.InDelta(t, 10.0, *s.ExclusiveMaximum, 1e-9)
 }
 
 func TestApplyNumericMarkers_IgnoresInvalid(t *testing.T) {
@@ -98,5 +98,61 @@ func TestApplyNumericMarkers_IgnoresInvalid(t *testing.T) {
 
 	require.Nil(t, s.Minimum)
 	require.NotNil(t, s.Maximum)
-	require.Equal(t, 100.0, *s.Maximum)
+	require.InDelta(t, 100.0, *s.Maximum, 1e-9)
+}
+
+func TestApplyEnumMarkers(t *testing.T) {
+	tests := []struct {
+		name    string
+		markers map[string]string
+		want    []*JSONSchemaDraft202012
+	}{
+		{
+			name:    "enum only",
+			markers: map[string]string{"enum": "Git/v1,Git"},
+			want: []*JSONSchemaDraft202012{
+				{Const: "Git/v1"},
+				{Const: "Git"},
+			},
+		},
+		{
+			name:    "deprecated spellings follow the current ones and carry no message of their own",
+			markers: map[string]string{"enum": "Git/v1,Git", "enum:deprecated": "git,git/v1alpha1"},
+			want: []*JSONSchemaDraft202012{
+				{Const: "Git/v1"},
+				{Const: "Git"},
+				{Const: "git", Deprecated: Ptr(true)},
+				{Const: "git/v1alpha1", Deprecated: Ptr(true)},
+			},
+		},
+		{
+			name: "hint lands on every deprecated spelling",
+			markers: map[string]string{
+				"enum":                 "Git/v1",
+				"enum:deprecated":      "GitHub/v1,github",
+				"enum:deprecated:hint": "use Git/v1 instead",
+			},
+			want: []*JSONSchemaDraft202012{
+				{Const: "Git/v1"},
+				{Const: "GitHub/v1", Deprecated: Ptr(true), DeprecationMessage: "use Git/v1 instead"},
+				{Const: "github", Deprecated: Ptr(true), DeprecationMessage: "use Git/v1 instead"},
+			},
+		},
+		{
+			name:    "hint without deprecated spellings does nothing",
+			markers: map[string]string{"enum": "Git/v1", "enum:deprecated:hint": "use Git/v1 instead"},
+			want: []*JSONSchemaDraft202012{
+				{Const: "Git/v1"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := require.New(t)
+			s := &JSONSchemaDraft202012{Type: "string"}
+			ApplyEnumMarkers(s, tc.markers)
+			r.Equal(tc.want, s.OneOf)
+		})
+	}
 }

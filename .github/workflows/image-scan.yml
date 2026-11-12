@@ -1,0 +1,383 @@
+name: Image scan
+
+# Reusable: pipeline.yml scans the CLI (default, slim) and controller images it
+# built, per architecture: with Trivy and govulncheck's OpenVEX (findings warn;
+# a broken scan fails), against the DISA GPOS SRG as tailored in .github/stig,
+# and against the CIS Docker Benchmark (dockle). STIG and CIS findings fail.
+# The controller chart, rendered with its opt-in NetworkPolicy, is checked
+# against the CIS Kubernetes Benchmark (Trivy config) and NSA/CISA and MITRE
+# (Kubescape); the image build files get Trivy's Dockerfile checks. OCM's own
+# Trivy checks are in .github/trivy-checks (unit-tested by trivy-checks.yml),
+# accepted findings and check settings in .github/benchmarks.
+# Benchmark findings fail.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The ref to check out the scan configuration from. Defaults to the current ref."
+        type: string
+        required: false
+      cli_artifact:
+        description: "Artifact with the CLI OCI images (oci/cli.tar and oci/cli-slim.tar)."
+        type: string
+        required: true
+      controller_artifact:
+        description: "Artifact with the controller OCI image (controller.tar)."
+        type: string
+        required: true
+    outputs:
+      vex_artifact_prefix:
+        description: "Prefix of the per-architecture OpenVEX artifacts <prefix>-<arch> (arm64, amd64), each with the ocm.openvex.json its images were scanned with."
+        value: ${{ jobs.vex.outputs.vex_artifact_prefix }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  vex:
+    name: OpenVEX
+    uses: $/.github/workflows/govulncheck.yml
+    with:
+      ref: ${{ inputs.ref }}
+
+  scan:
+    name: ${{ matrix.image }} (${{ matrix.arch }})
+    needs: vex
+    runs-on: ubuntu-26.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [cli, cli-slim, controller]
+        arch: [arm64, amd64]
+        # containerfile: its digest-pinned "certs" stage is the expected source
+        # of the image's CA bundle.
+        include:
+          - image: cli
+            artifact: ${{ inputs.cli_artifact }}
+            oci_tar: oci/cli.tar
+            containerfile: bindings/go/cli/Containerfile
+          - image: cli-slim
+            artifact: ${{ inputs.cli_artifact }}
+            oci_tar: oci/cli-slim.tar
+            containerfile: bindings/go/cli/Containerfile
+          - image: controller
+            artifact: ${{ inputs.controller_artifact }}
+            oci_tar: controller.tar
+            containerfile: bindings/go/kubernetes/controller/Dockerfile
+    env:
+      IMAGE: ${{ matrix.image }}
+      ARCH: ${{ matrix.arch }}
+      CONTAINERFILE: ${{ matrix.containerfile }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          sparse-checkout: |
+            .github/stig
+            .env
+            ${{ matrix.containerfile }}
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Load .env
+        run: grep -E '^(TRIVY_VERSION|OPENSCAP_IMAGE|DOCKLE_IMAGE)=' .env >> "$GITHUB_ENV"
+
+      - name: Download image artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: tmp/artifact
+
+      - name: Download OpenVEX
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ${{ needs.vex.outputs.vex_artifact_prefix }}-${{ matrix.arch }}
+          path: tmp/vex
+
+      # Trivy scans the first manifest of a layout and ignores --platform, so the
+      # layout's index is narrowed to this architecture. Nothing is loaded into
+      # the docker daemon and nothing runs the image, so amd64 is scanned on the
+      # arm64 runner too.
+      - name: Extract image layout
+        env:
+          OCI_TAR: ${{ matrix.oci_tar }}
+        run: |
+          blob() { echo "tmp/layout/blobs/${1/://}"; }
+          mkdir -p tmp/layout
+          tar -xf "tmp/artifact/${OCI_TAR}" -C tmp/layout
+          jq --arg arch "$ARCH" '.manifests |= map(select(.platform.os == "linux" and .platform.architecture == $arch))' \
+            "$(blob "$(jq -r '.manifests[0].digest' tmp/layout/index.json)")" > tmp/index.json
+          mv tmp/index.json tmp/layout/index.json
+          manifest="$(blob "$(jq -r '.manifests[0].digest' tmp/layout/index.json)")"
+
+          # dockle reads only docker-archive tarballs: the layout plus a docker
+          # manifest.json pointing at the same blobs.
+          jq '[{Config: ("blobs/" + (.config.digest | sub(":"; "/"))), RepoTags: ["ocm-scan:\($ENV.IMAGE)-\($ENV.ARCH)"],
+            Layers: [.layers[].digest | "blobs/" + sub(":"; "/")]}]' "$manifest" > tmp/manifest.json
+          tar -C tmp/layout -cf tmp/image.tar .
+          tar -C tmp -rf tmp/image.tar manifest.json
+
+          # Root filesystem for the STIG scan and the provenance checks. Extracting
+          # as root keeps ownership and setuid/setgid bits. The images are scratch
+          # plus COPY, so their layers stack without whiteouts; fail if that changes.
+          mkdir -p tmp/rootfs
+          for layer in $(jq -r '.layers[].digest' "$manifest"); do
+            sudo tar -xpf "$(blob "$layer")" -C tmp/rootfs
+          done
+          if sudo find tmp/rootfs -name '.wh.*' | grep -q .; then
+            echo "::error::image has whiteout layers; extract them with a tool that applies them"; exit 1
+          fi
+
+      # Nothing goes to code scanning: Dependabot alerts stay the only alert surface.
+      - name: Vulnerability scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_VEX: tmp/vex/ocm.openvex.json
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          input: tmp/layout
+          scanners: vuln
+          exit-code: '0'
+          format: json
+          output: trivy.json
+
+      - name: Vulnerability scan summary
+        id: vulns
+        run: |
+          jq -r '"count=\([.Results[]?.Vulnerabilities[]?] | length)"' trivy.json >> "$GITHUB_OUTPUT"
+          jq -r '"### 🔎 Vulnerability scan: \($ENV.IMAGE) (linux/\($ENV.ARCH))\n",
+            if [.Results[]?.Vulnerabilities[]?] == [] then "No vulnerabilities beyond those the OpenVEX document marks as not_affected."
+            else "Not ruled out by the OpenVEX document: for the OCM binary, govulncheck found the code reachable or does not know the advisory; for cosign, its attested OpenVEX does not cover it.\n\n| Binary | ID | Severity | Package | Installed | Fixed | Title |\n| --- | --- | --- | --- | --- | --- | --- |",
+              (.Results[]? | .Target as $t | .Vulnerabilities[]? | "| \($t) | \(.VulnerabilityID) | \(.Severity) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion // "") | \(.Title // "" | gsub("\\|"; "\\|")) |")
+            end' trivy.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No vulnerabilities (see job summary)
+        if: steps.vulns.outputs.count != '0'
+        continue-on-error: true
+        run: exit 1
+
+      # DISA GPOS SRG as tailored in .github/stig, plus OCM's supplement for the
+      # deselected rules, evaluated offline on the image's root filesystem.
+      # Fails on any failed rule of either evaluation.
+      - name: STIG scan (DISA GPOS SRG)
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p stig
+          oscap() {
+            docker run --rm -u 0:0 -e OSCAP_PROBE_ROOT=/rootfs \
+              -v "$PWD/tmp/rootfs:/rootfs:ro" -v "$PWD/.github/stig:/stig:ro" -v "$PWD/stig:/out" \
+              "$OPENSCAP_IMAGE" xccdf eval "$@"
+          }
+          rc=0
+          oscap --tailoring-file /stig/tailoring.xml --profile xccdf_software.ocm_profile_gpos-container \
+            --results /out/gpos-results.xml --report /out/gpos-report.html \
+            /usr/share/xml/scap/ssg/content/ssg-chainguard-gpos-ds.xml || rc=$?
+          oscap --profile "xccdf_software.ocm_profile_${IMAGE}" \
+            --results /out/ocm-results.xml --report /out/ocm-report.html \
+            /stig/ocm-supplement-xccdf.xml || rc=$?
+          exit "$rc"
+
+      # The supplement's checks that OVAL cannot do: OVAL reads no binaries and
+      # no values from outside the scanned root filesystem.
+      - name: Image provenance (FIPS module, CA bundle)
+        if: ${{ !cancelled() }}
+        run: |
+          fail=0
+          # Every executable in the image (the supplement limits them to the
+          # declared ones), by its Go build information as `go version -m` shows it.
+          bins="$(sudo find tmp/rootfs -type f -perm /111)"
+          [[ -n "$bins" ]] || { echo "::error::image contains no executable"; exit 1; }
+          while IFS= read -r bin; do
+            path="${bin#tmp/rootfs}"
+            grep -aqP '^build\tGOFIPS140=v\S+$' "$bin" ||
+              { echo "::error::$path is not built with GOFIPS140=v<version>"; fail=1; }
+            grep -aqP '^build\tDefaultGODEBUG=(.*,)?fips140=(on|only)(,|$)' "$bin" ||
+              { echo "::error::$path does not default to fips140=on"; fail=1; }
+          done <<< "$bins"
+
+          base="$(sed -nE 's/^FROM .* (ghcr\.io\/gardenlinux\/\S+@sha256:[0-9a-f]{64}) AS certs$/\1/p' "$CONTAINERFILE")"
+          [[ -n "$base" ]] || { echo "::error::no digest-pinned Garden Linux certs stage in $CONTAINERFILE"; exit 1; }
+          docker run --rm --platform "linux/$(docker version -f '{{.Server.Arch}}')" --entrypoint cat "$base" \
+            /etc/ssl/certs/ca-certificates.crt > tmp/base-ca.crt
+          cmp -s tmp/rootfs/etc/ssl/certs/ca-certificates.crt tmp/base-ca.crt ||
+            { echo "::error::CA bundle differs from the one in $base"; fail=1; }
+          exit "$fail"
+
+      # CIS Docker Benchmark section 4. Fails on WARN and FATAL; INFO (content
+      # trust) and SKIP (no /etc/passwd in scratch) do not fail.
+      - name: CIS Docker Benchmark (dockle)
+        if: ${{ !cancelled() }}
+        run: |
+          docker run --rm -v "$PWD/tmp/image.tar:/image.tar:ro" "$DOCKLE_IMAGE" \
+            --exit-code 1 --exit-level warn --input /image.tar
+
+      - name: Upload reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: image-scan-${{ matrix.image }}-${{ matrix.arch }}
+          path: |
+            trivy.json
+            stig/
+          if-no-files-found: ignore
+
+  # The chart is rendered with the opt-in NetworkPolicy. That render is the
+  # default render plus the NetworkPolicy, so it covers every default template
+  # and lets Kubescape check the policy against C-0030 (Ingress and Egress blocked).
+  chart:
+    name: chart
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          sparse-checkout: |
+            .github/benchmarks
+            .github/trivy-checks/*.rego
+            .env
+            bindings/go/kubernetes/controller/chart
+            bindings/go/kubernetes/controller/Dockerfile
+            bindings/go/cli/Containerfile
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Load .env
+        run: grep -E '^(TRIVY_VERSION|TRIVY_CHECKS_IMAGE|KUBESCAPE_IMAGE|KUBESCAPE_CONTROLS_VERSION)=' .env >> "$GITHUB_ENV"
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # renovate: datasource=github-releases depName=helm/helm
+          version: v4.3.0
+
+      # One file per template, so accepted Trivy findings are scoped to the
+      # template that needs them. The image build files sit next to them for
+      # Trivy's Dockerfile checks; Kubescape ignores them.
+      - name: Render chart
+        run: |
+          mkdir -p tmp/chart-scan
+          helm template ocm-k8s-toolkit bindings/go/kubernetes/controller/chart \
+            --namespace ocm-k8s-toolkit-system --set manager.networkPolicy.enabled=true \
+            --output-dir tmp/chart
+          install -D -m 0644 bindings/go/cli/Containerfile tmp/chart/build/cli/Containerfile
+          install -D -m 0644 bindings/go/kubernetes/controller/Dockerfile tmp/chart/build/controller/Dockerfile
+
+      # The "# syntax=" frontend directive is a comment, so no Trivy check sees
+      # it, while BuildKit pulls and runs it. OCM-DS-0001 covers every other
+      # image a build pulls; this covers the frontend.
+      - name: Check build frontends are pinned by digest
+        run: |
+          for file in tmp/chart/build/*/*; do
+            if grep -qiE '^#[[:space:]]*syntax=' "$file" &&
+              ! grep -qiE '^#[[:space:]]*syntax=[^[:space:]]+@sha256:[a-f0-9]{64}[[:space:]]*$' "$file"; then
+              echo "::error file=$file::# syntax= frontend image is not pinned by digest"
+              exit 1
+            fi
+          done
+
+      - name: CIS Kubernetes Benchmark (Trivy config)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # OCM's own checks (OCM-*) for what no built-in check covers.
+          TRIVY_CONFIG_CHECK: .github/trivy-checks
+          TRIVY_CHECK_NAMESPACES: user
+          # Settings of built-in checks (KSV-0125 trusted registries).
+          TRIVY_CONFIG_DATA: .github/benchmarks/trivy-data
+          TRIVY_CHECKS_BUNDLE_REPOSITORY: ${{ env.TRIVY_CHECKS_IMAGE }}
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          # A config scan needs no vulnerability DB, and a restored cache could
+          # hold a checks bundle other than the pinned one: Trivy reuses a bundle
+          # downloaded within the last day without comparing digests.
+          cache: 'false'
+          scan-type: config
+          scan-ref: tmp/chart
+          trivyignores: .github/benchmarks/trivyignore.yaml
+          exit-code: '1'
+          format: json
+          output: tmp/chart-scan/trivy.json
+
+      # Trivy's JSON lists only failed checks; accepted findings are dropped.
+      # trivy convert renders the failed ones with their source lines.
+      - name: Render CIS Kubernetes Benchmark findings
+        if: ${{ !cancelled() && hashFiles('tmp/chart-scan/trivy.json') != '' }}
+        run: trivy convert --format table --table-mode detailed --scanners misconfig --output tmp/chart-scan/trivy.txt tmp/chart-scan/trivy.json
+
+      - name: CIS Kubernetes Benchmark summary
+        if: ${{ !cancelled() }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const fs = require('node:fs');
+            const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '');
+            const report = read('tmp/chart-scan/trivy.json');
+            if (!report) return core.setFailed('Trivy wrote no report for the chart');
+            const results = JSON.parse(report).Results ?? [];
+            const passed = results.reduce((n, r) => n + (r.MisconfSummary?.Successes ?? 0), 0);
+            const failed = results.reduce((n, r) => n + (r.Misconfigurations?.length ?? 0), 0);
+            const table = read('tmp/chart-scan/trivy.txt');
+            core.info(table);
+            core.summary
+              .addHeading('☸️ CIS Kubernetes Benchmark: controller chart and image build files (Trivy config)', 3)
+              .addRaw(`${passed} checks passed, ${failed} failed in ${results.length} files. Accepted findings: \`.github/benchmarks/trivyignore.yaml\`.`, true);
+            if (table) core.summary.addRaw(`\n\`\`\`text\n${table}\`\`\`\n`);
+            await core.summary.write();
+
+      # Kubescape fails on an empty input, but its thresholds count controls
+      # covered by an exception as failed, so the open ones are selected below.
+      - name: NSA/CISA and MITRE (Kubescape)
+        if: ${{ !cancelled() }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e KS_SKIP_UPDATE_CHECK=true -v "$PWD:/work" -w /work "$KUBESCAPE_IMAGE" \
+            scan framework nsa,mitre tmp/chart --controls-version "$KUBESCAPE_CONTROLS_VERSION" \
+            --exceptions .github/benchmarks/kubescape-exceptions.json \
+            --format pretty-printer,json --output tmp/chart-scan/kubescape
+
+      - name: NSA/CISA and MITRE summary
+        if: ${{ !cancelled() && hashFiles('tmp/chart-scan/kubescape.json') != '' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const report = JSON.parse(require('node:fs').readFileSync('tmp/chart-scan/kubescape.json', 'utf8'));
+            // Resource IDs chain the objects a control relates (path=<n>/api=<group>/<ns>/<Kind>/<name>/...);
+            // only Kind/name pairs are kept. The report omits results and controls when empty.
+            const failed = (report.results ?? []).flatMap((r) => {
+              const resource = [...r.resourceID.matchAll(/(?:^|\/)([A-Z][A-Za-z]+)\/([^/]+)/g)]
+                .map((m) => `${m[1]}/${m[2]}`).join(' → ');
+              return (r.controls ?? [])
+                .filter((c) => c.status?.status === 'failed')
+                .map((c) => ({ resource, id: c.controlID, name: c.name, accepted: c.status.subStatus === 'w/exceptions' }));
+            });
+            const open = failed.filter((f) => !f.accepted);
+
+            core.summary
+              .addHeading('🛡️ NSA/CISA and MITRE: controller chart (Kubescape)', 3)
+              .addList((report.summaryDetails?.frameworks ?? [])
+                .map((f) => `${f.name}: compliance score ${Math.round(f.complianceScore * 100) / 100}%`))
+              .addRaw(`${open.length} open, ${failed.length - open.length} accepted (\`.github/benchmarks/kubescape-exceptions.json\`) control failures.`, true);
+            if (failed.length > 0) {
+              failed.sort((a, b) => a.accepted - b.accepted || a.id.localeCompare(b.id));
+              core.summary.addTable([
+                ['Control', 'Name', 'Resource', 'Status'].map((data) => ({ data, header: true })),
+                ...failed.map((f) => [f.id, f.name, f.resource, f.accepted ? 'accepted' : '❌ open']),
+              ]);
+            }
+            await core.summary.write();
+            for (const f of open) core.error(`${f.id} ${f.name} fails on ${f.resource}`);
+            if (open.length > 0) core.setFailed(`${open.length} open Kubescape control failures`);
+
+      - name: Upload reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: chart-scan
+          path: |
+            tmp/chart-scan/
+            tmp/chart/
+          if-no-files-found: ignore

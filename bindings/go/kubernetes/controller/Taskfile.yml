@@ -22,6 +22,10 @@ vars:
     sh: 'source {{.PROJECT_ROOT}}/.env && [ -f .env ] && source .env; echo "${HELM_DOCS_VERSION:-v1.14.2}"'
   YQ_VERSION:
     sh: 'source {{.PROJECT_ROOT}}/.env && [ -f .env ] && source .env; echo "${YQ_VERSION:-v4.49.2}"'
+  REGISTRY_IMAGE_VERSION:
+    sh: 'source {{.PROJECT_ROOT}}/.env && [ -f .env ] && source .env; echo "$REGISTRY_IMAGE_VERSION"'
+  HELM_UNITTEST_VERSION:
+    sh: 'source {{.PROJECT_ROOT}}/.env && [ -f .env ] && source .env; echo "$HELM_UNITTEST_VERSION"'
 
   CONTAINER_TOOL: '{{.CONTAINER_TOOL | default "docker"}}'
   LOCALBIN: '{{.TASKFILE_DIR}}/bin'
@@ -32,6 +36,8 @@ vars:
   YQ: '{{.LOCALBIN}}/yq-{{.YQ_VERSION}}'
   IGNORE_NOT_FOUND: '{{.IGNORE_NOT_FOUND | default "false"}}'
   PLATFORMS: '{{.PLATFORMS | default "linux/arm64,linux/amd64"}}'
+  PPROF_GO_TAGS: '{{.PPROF_GO_TAGS | default "pprof"}}'
+  PPROF_IMAGE_TAG_SUFFIX: '{{.PPROF_IMAGE_TAG_SUFFIX | default "-debug"}}'
 
 tasks:
   default:
@@ -90,14 +96,14 @@ tasks:
       - 'docker rm -f ocm-e2e-image-registry 2>/dev/null || true'
 
   test/e2e:
-    desc: "Run end-to-end tests against a running cluster. Pass ginkgo flags via `--`, e.g. `task test/e2e -- -ginkgo.focus=helm-simple`. Omit to run all scenarios."
+    desc: "Run end-to-end tests against a running cluster, 4 specs in parallel. Pass Ginkgo CLI flags via `--`, e.g. `task test/e2e -- --focus=helm-simple`; `-- --procs=1` runs serially. Omit to run all scenarios."
     dotenv: [ '{{.TASKFILE_DIR}}/test/e2e/hacks/.env' ]
     cmds:
       - task: helm/install
-      - PROJECT_DIR='{{.TASKFILE_DIR}}' go test '{{.TASKFILE_DIR}}/test/e2e/' -v -timeout 30m -ginkgo.v {{.CLI_ARGS}}
+      - PROJECT_DIR='{{.TASKFILE_DIR}}' go run github.com/onsi/ginkgo/v2/ginkgo --procs=4 -v --timeout=30m {{.CLI_ARGS}} '{{.TASKFILE_DIR}}/test/e2e/'
 
   test/e2e/fresh:
-    desc: "Teardown, setup, and run E2E tests from scratch. Pass ginkgo flags via `--`, e.g. `task test/e2e/fresh -- -ginkgo.focus=helm-simple`."
+    desc: "Teardown, setup, and run E2E tests from scratch. Pass Ginkgo CLI flags via `--`, e.g. `task test/e2e/fresh -- --focus=helm-simple`."
     cmds:
       - task: test/e2e/setup/teardown
       - task: test/e2e/setup/local
@@ -105,17 +111,56 @@ tasks:
         vars:
           CLI_ARGS: '{{.CLI_ARGS}}'
 
+  test/performance/setup/local:
+    desc: "Set up a local Kind cluster for the performance benchmark"
+    deps:
+      - task: docker-build
+        vars:
+          LOAD: "true"
+    cmds:
+      - 'KIND_NODE_IMAGE_VERSION={{.KIND_NODE_IMAGE_VERSION}} REGISTRY_IMAGE_VERSION={{.REGISTRY_IMAGE_VERSION}} bash test/performance/hacks/setup.sh'
+      - 'kind load docker-image {{.CONTROLLER_IMG}} --name ocm-perf'
+
+  test/performance/setup/teardown:
+    desc: "Delete the 'ocm-perf' Kind cluster and its registry. Only affects resources created by test/performance/setup/local."
+    cmds:
+      - 'kind delete cluster --name ocm-perf 2>/dev/null || true'
+      - 'docker rm -f ocm-perf-registry 2>/dev/null || true'
+
+  test/performance:
+    desc: "Run the controller performance benchmark against the 'ocm-perf' cluster. Pass flags via `--`, e.g. `task test/performance -- --objects=100 --repeats=1`. Omit to run every object count."
+    cmds:
+      - task: helm/install
+        vars:
+          VALUES: test/performance/hacks/values.yaml
+          KUBE_CONTEXT: kind-ocm-perf
+      - 'go run ./test/performance {{.CLI_ARGS}}'
+
+  test/performance/fresh:
+    desc: "Teardown, setup, and run the performance benchmark from scratch. Pass flags via `--`, e.g. `task test/performance/fresh -- --objects=100`."
+    cmds:
+      - task: test/performance/setup/teardown
+      - task: test/performance/setup/local
+      - task: test/performance
+        vars:
+          CLI_ARGS: '{{.CLI_ARGS}}'
+
   # Build
   build:
     desc: "Build the controller manager binary"
     deps: [manifests, generate, fmt, vet]
-    cmd: 'go build -o bin/manager {{.TASKFILE_DIR}}/cmd/main.go'
+    cmd: 'go build -o bin/manager {{.TASKFILE_DIR}}/cmd'
+
+  build/debug:
+    desc: "Build the controller manager binary with pprof enabled"
+    deps: [manifests, generate, fmt, vet]
+    cmd: 'go build -tags={{.PPROF_GO_TAGS}} -o bin/manager {{.TASKFILE_DIR}}/cmd'
 
   run:
     desc: "Run the controller manager locally (installs CRDs into the current kube-context first)"
     deps: [manifests, generate, fmt, vet, helm/install-crds]
     cmds:
-      - 'go run {{.TASKFILE_DIR}}/cmd/main.go'
+      - 'go run {{.TASKFILE_DIR}}/cmd'
 
   # Always build only for the host architecture.
   # We force "linux" OS because all Docker base images are Linux,
@@ -127,18 +172,35 @@ tasks:
       vars:
         PLATFORMS:
           sh: 'echo "linux/$(go env GOARCH)"'
+        LOAD: '{{.LOAD | default ""}}'
+        PUSH: '{{.PUSH | default ""}}'
+        OCI_OUTPUT: '{{.OCI_OUTPUT | default ""}}'
 
+  # Same as docker-build, but with the pprof build tag and a suffixed image tag.
+  docker-build/debug:
+    desc: "Build the Docker image for the host architecture with pprof enabled"
+    cmd:
+      task: docker-build/multi-arch
+      vars:
+        GO_TAGS: '{{.PPROF_GO_TAGS}}'
+        CONTROLLER_IMG: '{{.CONTROLLER_IMG}}{{.PPROF_IMAGE_TAG_SUFFIX}}'
+        PLATFORMS:
+          sh: 'echo "linux/$(go env GOARCH)"'
 
   # Multi-arch capable build task.
   # In this setup it is used only with a single platform (the local arch),
   # but it still supports --push / --load flags if desired.
   docker-build/multi-arch:
+    # GOFIPS140 (root .env) is forwarded as a build arg from the environment.
+    dotenv: ['{{.TASKFILE_DIR}}/../../../../.env']
     desc: "Build a multi-architecture Docker image"
     requires:
       vars: [ PLATFORMS, CONTROLLER_IMG ]
     cmd: |
       args=(
         --platform={{.PLATFORMS}}
+        --build-arg GO_TAGS='{{.GO_TAGS | default ""}}'
+        --build-arg GOFIPS140
         -f '{{.TASKFILE_DIR}}/Dockerfile' '{{.TASKFILE_DIR}}/../..'
       )
 
@@ -146,6 +208,16 @@ tasks:
       for tag in {{.CONTROLLER_IMG}}; do
         args+=(-t "$tag")
       done
+
+      # OCI annotations; the version is the tag of the first CONTROLLER_IMG.
+      # Single-platform builds have no image index to annotate.
+      first_img="$(echo {{.CONTROLLER_IMG}} | cut -d' ' -f1)"
+      levels=manifest
+      [[ "{{.PLATFORMS}}" == *,* ]] && levels=manifest,index
+      out="$('{{.PROJECT_ROOT}}/.github/scripts/oci-annotations.sh' \
+        '{{.TASKFILE_DIR}}/Dockerfile' "" "${first_img##*:}" "ocm-k8s-toolkit-controller" \
+        "Open Component Model Kubernetes controller" "$levels")" || exit 1
+      while IFS= read -r a; do args+=("$a"); done <<< "$out"
 
       # If LOAD is set, load single-arch image into local daemon
       if [ "{{.LOAD | default ""}}" = "true" ]; then
@@ -206,14 +278,20 @@ tasks:
     desc: "Lint the Helm chart"
     cmd: 'helm lint chart/'
 
+  helm/unittest:
+    desc: "Run the helm-unittest suites in chart/tests"
+    deps: [helm-unittest-plugin]
+    cmd: 'helm unittest -f "tests/**/*_test.yaml" chart/'
+
   helm/validate:
-    desc: "Validate the Helm chart (regenerate, then lint, template, and verify CRDs/RBAC/schema/docs are in sync)"
+    desc: "Validate the Helm chart (regenerate, then lint, unit-test, template, and verify CRDs/RBAC/schema/docs are in sync)"
     silent: true
     cmds:
       - task: helm/generate
       - task: helm/schema
       - task: helm/docs
       - task: helm/lint
+      - task: helm/unittest
       - task: helm/template
       - |
         status=$(git status --porcelain)
@@ -249,13 +327,21 @@ tasks:
       - helm template ocm-k8s-toolkit chart/ --namespace ocm-k8s-toolkit-system -f chart/test-values.yaml > dist/generated.yaml
 
   helm/install:
-    desc: "Install the Helm chart"
+    desc: "Install the Helm chart into a namespace that enforces the restricted Pod Security Standard. VALUES and KUBE_CONTEXT override the values file and the target context."
+    vars:
+      VALUES: '{{.VALUES | default "chart/test-values.yaml"}}'
+      # kubectl and Helm must target the same cluster, or the namespace lands on the current context.
+      KUBECTL_CONTEXT: '{{if .KUBE_CONTEXT}}--context {{.KUBE_CONTEXT}}{{end}}'
     cmds:
+      # Enforcing "restricted" makes the install fail if the chart's pod spec
+      # regresses on the hardening baseline (non-root, seccomp, no privilege
+      # escalation, dropped capabilities).
+      - kubectl create namespace ocm-k8s-toolkit-system --dry-run=client -o yaml | kubectl {{.KUBECTL_CONTEXT}} apply -f -
+      - kubectl {{.KUBECTL_CONTEXT}} label namespace ocm-k8s-toolkit-system --overwrite pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest
       - |
         helm upgrade --install ocm-k8s-toolkit chart/ \
-          -f chart/test-values.yaml \
+          {{if .KUBE_CONTEXT}}--kube-context {{.KUBE_CONTEXT}} {{end}}-f {{.VALUES}} \
           --namespace ocm-k8s-toolkit-system \
-          --create-namespace \
           --wait \
           --timeout 120s
 
@@ -346,3 +432,42 @@ tasks:
       fi
     status:
       - helm plugin list | grep -q "schema"
+
+  helm-unittest-plugin:
+    internal: true
+    silent: true
+    desc: "Install the helm-unittest plugin if not present; fail if another version than the one pinned in .env is installed or its binary does not run"
+    # helm plugin list prints the version without the "v" prefix.
+    # Never replace another installed version: it belongs to the developer, not to this repo.
+    # When the install hook fails (it downloads the binary), Helm keeps the plugin registered
+    # without its binary, and a second install fails with "plugin already exists". So roll back
+    # our own failed install, and check that the binary runs, not only that the plugin is listed.
+    # The install hook checks the download with `sha256sum -c --status`. macOS ships a BSD
+    # sha256sum without --status, so on macOS a shim that calls `shasum -a 256` goes first on PATH.
+    cmd: |
+      installed=$(helm plugin list | awk '$1=="unittest"{print "v"$2}')
+      if [ -z "$installed" ]; then
+        shim=""
+        if [ "$(uname -s)" = "Darwin" ]; then
+          shim=$(mktemp -d)
+          printf '#!/bin/sh\nexec shasum -a 256 "$@"\n' > "$shim/sha256sum"
+          chmod +x "$shim/sha256sum"
+        fi
+        rc=0
+        PATH="${shim:+$shim:}$PATH" helm plugin install https://github.com/helm-unittest/helm-unittest.git --version {{.HELM_UNITTEST_VERSION}} --verify=false || rc=$?
+        if [ -n "$shim" ]; then rm -f "$shim/sha256sum"; rmdir "$shim"; fi
+        if [ "$rc" -ne 0 ]; then
+          helm plugin uninstall unittest >/dev/null 2>&1 || true
+          echo "ERROR: helm-unittest install failed; removed the partial install." >&2
+          exit 1
+        fi
+      elif [ "$installed" != "{{.HELM_UNITTEST_VERSION}}" ]; then
+        echo "ERROR: helm-unittest plugin $installed is installed, but .env pins {{.HELM_UNITTEST_VERSION}}. Run 'helm plugin uninstall unittest', then rerun this task." >&2
+        exit 1
+      elif ! helm unittest --help >/dev/null 2>&1; then
+        echo "ERROR: helm-unittest $installed is registered but its binary does not run (an earlier install hook failed?). Run 'helm plugin uninstall unittest', then rerun this task." >&2
+        exit 1
+      fi
+    status:
+      - helm plugin list | awk '$1=="unittest"{print "v"$2}' | grep -qx "{{.HELM_UNITTEST_VERSION}}"
+      - helm unittest --help >/dev/null 2>&1

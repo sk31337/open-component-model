@@ -2,12 +2,16 @@ package filesystem_test
 
 import (
 	"archive/tar"
+	"bytes"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
 
 	"ocm.software/open-component-model/bindings/go/blob"
@@ -37,6 +41,83 @@ func TestGetBlobFromPath_SingleFile(t *testing.T) {
 	content, err := io.ReadAll(reader)
 	r.NoError(err)
 	r.Equal(testContent, string(content))
+
+	// Single files are stat- and digest-aware without buffering the content.
+	r.Implements((*blob.SizeAware)(nil), b)
+	r.Equal(int64(len(testContent)), b.(blob.SizeAware).Size())
+	r.Implements((*blob.DigestAware)(nil), b)
+	dig, ok := b.(blob.DigestAware).Digest()
+	r.True(ok)
+	r.Equal(digest.FromString(testContent).String(), dig)
+}
+
+// A symlink to a file outside its own directory is followed, as os.Stat does.
+func TestGetBlobFromPath_SingleFileSymlinkOutsideParent(t *testing.T) {
+	r := require.New(t)
+
+	tmpDir := t.TempDir()
+	createTestFile(t, filepath.Join(tmpDir, "data"), "target.txt", "linked content")
+	linkDir := filepath.Join(tmpDir, "links")
+	r.NoError(os.MkdirAll(linkDir, 0o755))
+	link := filepath.Join(linkDir, "link.txt")
+	if err := os.Symlink(filepath.Join("..", "data", "target.txt"), link); err != nil {
+		t.Skipf("symlink creation failed (may not be supported on this system): %v", err)
+	}
+
+	b, err := filesystem.GetBlobFromPath(t.Context(), "links/link.txt", filesystem.DirOptions{WorkingDir: tmpDir})
+	r.NoError(err)
+
+	reader, err := b.ReadCloser()
+	r.NoError(err)
+	defer func() { r.NoError(reader.Close()) }()
+	content, err := io.ReadAll(reader)
+	r.NoError(err)
+	r.Equal("linked content", string(content))
+}
+
+// The file is reopened on every read, so confinement must hold at read time,
+// not only when the blob is created.
+func TestGetBlobFromPath_SingleFileSwappedToEscapingSymlink(t *testing.T) {
+	r := require.New(t)
+
+	workDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	r.NoError(os.WriteFile(outside, []byte("secret"), 0o600))
+	file := filepath.Join(workDir, "file.txt")
+	r.NoError(os.WriteFile(file, []byte("content"), 0o600))
+
+	b, err := filesystem.GetBlobFromPath(t.Context(), "file.txt", filesystem.DirOptions{WorkingDir: workDir})
+	r.NoError(err)
+
+	r.NoError(os.Remove(file))
+	if err := os.Symlink(outside, file); err != nil {
+		t.Skipf("symlink creation failed (may not be supported on this system): %v", err)
+	}
+
+	_, err = b.ReadCloser()
+	r.Error(err)
+	r.Equal(blob.SizeUnknown, b.(blob.SizeAware).Size())
+}
+
+// A relative path is resolved when the blob is created, not when it is read.
+func TestGetBlobFromPath_SingleFileRelativePathSurvivesChdir(t *testing.T) {
+	r := require.New(t)
+
+	dir := t.TempDir()
+	createTestFile(t, dir, "file.txt", "content")
+	t.Chdir(dir)
+
+	b, err := filesystem.GetBlobFromPath(t.Context(), "file.txt", filesystem.DirOptions{})
+	r.NoError(err)
+
+	t.Chdir(t.TempDir())
+
+	reader, err := b.ReadCloser()
+	r.NoError(err)
+	defer func() { r.NoError(reader.Close()) }()
+	content, err := io.ReadAll(reader)
+	r.NoError(err)
+	r.Equal("content", string(content))
 }
 
 func TestGetBlobFromPath_SimpleDirectory(t *testing.T) {
@@ -104,8 +185,6 @@ func TestGetBlobFromPath_RelativeDirectory(t *testing.T) {
 
 // PATTERN FILTERING: Include/exclude pattern functionality
 func TestGetBlobFromPath_PatternSemantics(t *testing.T) {
-	r := require.New(t)
-
 	tests := []struct {
 		name            string
 		includePatterns []string
@@ -147,6 +226,7 @@ func TestGetBlobFromPath_PatternSemantics(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			r := require.New(t)
 			// Setup
 			tmpDir := t.TempDir()
 			createTestFile(t, tmpDir, "main.go", "package main")
@@ -155,7 +235,7 @@ func TestGetBlobFromPath_PatternSemantics(t *testing.T) {
 			createTestFile(t, tmpDir, "config/my-config.json", `{"key": "value"}`)
 			createTestFile(t, tmpDir, "README.md", "# Project")
 			createTestFile(t, tmpDir, "temp.tmp", "temporary")
-			require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "test"), 0755))
+			require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "test"), 0o755))
 			createTestFile(t, tmpDir, "test/file.txt", "test content")
 
 			// Test with patterns
@@ -202,7 +282,7 @@ func TestGetBlobFromPath_PreserveDirectory(t *testing.T) {
 	parent := t.TempDir()
 	targetDirName := "preserve_me"
 	targetDir := filepath.Join(parent, targetDirName)
-	r.NoError(os.Mkdir(targetDir, 0755))
+	r.NoError(os.Mkdir(targetDir, 0o755))
 	createTestFile(t, targetDir, "file.txt", "content")
 
 	// Test: preserve directory structure
@@ -229,7 +309,7 @@ func TestGetBlobFromPath_PreserveDirectory(t *testing.T) {
 
 		foundHeaders = append(foundHeaders, header.Name)
 
-		// Expect exact directory header for preserved directory in canonical form (base + "/")
+		// Expect exact directory header for the preserved directory
 		if header.Typeflag == tar.TypeDir && header.Name == expectedDirHeader {
 			foundPrefixed = true
 		}
@@ -241,7 +321,7 @@ func TestGetBlobFromPath_PreserveDirectory(t *testing.T) {
 
 	// Debug output to understand what we got
 	if !foundPrefixed {
-		t.Logf("Expected prefix: %s/", targetDirName)
+		t.Logf("Expected entry: %s", targetDirName)
 		t.Logf("Found headers: %v", foundHeaders)
 	}
 
@@ -345,7 +425,7 @@ func TestGetBlobFromPath_ReproducibleBuilds(t *testing.T) {
 	// Setup: create test file
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
-	r.NoError(os.WriteFile(testFile, []byte("test content"), 0644))
+	r.NoError(os.WriteFile(testFile, []byte("test content"), 0o644))
 
 	// Test: create blob with reproducible option
 	opt := filesystem.DirOptions{Reproducible: true}
@@ -381,6 +461,7 @@ func TestGetBlobFromPath_ErrorCases(t *testing.T) {
 		{
 			name: "empty_path",
 			setupFunc: func(t *testing.T) (string, filesystem.DirOptions) {
+				t.Helper()
 				return "", filesystem.DirOptions{}
 			},
 			expectError: true,
@@ -388,6 +469,7 @@ func TestGetBlobFromPath_ErrorCases(t *testing.T) {
 		{
 			name: "non_existent_path",
 			setupFunc: func(t *testing.T) (string, filesystem.DirOptions) {
+				t.Helper()
 				return "/non/existent/path", filesystem.DirOptions{}
 			},
 			expectError: true,
@@ -395,14 +477,15 @@ func TestGetBlobFromPath_ErrorCases(t *testing.T) {
 		{
 			name: "path_outside_working_directory",
 			setupFunc: func(t *testing.T) (string, filesystem.DirOptions) {
+				t.Helper()
 				base := t.TempDir()
 				allowed := filepath.Join(base, "allowed")
 				outside := filepath.Join(base, "outside")
-				require.NoError(t, os.MkdirAll(allowed, 0755))
-				require.NoError(t, os.MkdirAll(outside, 0755))
+				require.NoError(t, os.MkdirAll(allowed, 0o755))
+				require.NoError(t, os.MkdirAll(outside, 0o755))
 
 				testFile := filepath.Join(outside, "test.txt")
-				require.NoError(t, os.WriteFile(testFile, []byte("content"), 0644))
+				require.NoError(t, os.WriteFile(testFile, []byte("content"), 0o644))
 
 				return testFile, filesystem.DirOptions{WorkingDir: allowed}
 			},
@@ -437,7 +520,7 @@ func TestGetBlobFromPath_SymlinkRejection(t *testing.T) {
 	targetFile := filepath.Join(tmpDir, "target.txt")
 	symlinkFile := filepath.Join(tmpDir, "symlink.txt")
 
-	r.NoError(os.WriteFile(targetFile, []byte("target content"), 0644))
+	r.NoError(os.WriteFile(targetFile, []byte("target content"), 0o644))
 
 	if err := os.Symlink("target.txt", symlinkFile); err != nil {
 		t.Skipf("symlink creation failed (may not be supported on this system): %v", err)
@@ -460,7 +543,7 @@ func TestGetBlobFromPath_IncludeDirectoryOnly(t *testing.T) {
 	// Setup: create directory with an empty sub directory
 	tmpDir := t.TempDir()
 	targetDir := filepath.Join(tmpDir, "sub", "dir")
-	r.NoError(os.MkdirAll(targetDir, 0755))
+	r.NoError(os.MkdirAll(targetDir, 0o755))
 
 	// Only include the directory itself
 	opt := filesystem.DirOptions{IncludePatterns: []string{"sub/dir"}, Reproducible: true}
@@ -530,16 +613,18 @@ func readAllFromBlob(b blob.ReadOnlyBlob) ([]byte, error) {
 }
 
 func createTestFile(t *testing.T, basePath, relativePath, content string) string {
+	t.Helper()
 	fullPath := filepath.Join(basePath, relativePath)
 	dir := filepath.Dir(fullPath)
 
-	require.NoError(t, os.MkdirAll(dir, 0755))
-	require.NoError(t, os.WriteFile(fullPath, []byte(content), 0644))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(fullPath, []byte(content), 0o644))
 
 	return fullPath
 }
 
 func extractTarContents(t *testing.T, b blob.ReadOnlyBlob) []string {
+	t.Helper()
 	reader, err := b.ReadCloser()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, reader.Close()) }()
@@ -566,4 +651,176 @@ func extractTarContents(t *testing.T, b blob.ReadOnlyBlob) []string {
 	}
 
 	return files
+}
+
+func readTarHeaders(t *testing.T, b blob.ReadOnlyBlob) []*tar.Header {
+	t.Helper()
+	r := require.New(t)
+	data, err := readAllFromBlob(b)
+	r.NoError(err)
+
+	tr := tar.NewReader(bytes.NewReader(data))
+	var headers []*tar.Header
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		r.NoError(err)
+		headers = append(headers, header)
+		_, err = io.ReadAll(tr)
+		r.NoError(err)
+	}
+	return headers
+}
+
+// Git-style directory layout is explicitly opt-in.
+func TestGetBlobFromPath_ArchiveLayout(t *testing.T) {
+	r := require.New(t)
+
+	tmpDir := t.TempDir()
+	r.NoError(os.MkdirAll(filepath.Join(tmpDir, "sub", "nested"), 0o755))
+	createTestFile(t, tmpDir, "root.txt", "root")
+	createTestFile(t, filepath.Join(tmpDir, "sub"), "file.txt", "content")
+
+	b, err := filesystem.GetBlobFromPath(t.Context(), tmpDir, filesystem.DirOptions{
+		Reproducible: true, OmitRoot: true, OmitDirTrailingSlash: true,
+	})
+	r.NoError(err)
+
+	names := map[string]byte{}
+	for _, header := range readTarHeaders(t, b) {
+		names[header.Name] = header.Typeflag
+	}
+
+	r.Equal(map[string]byte{
+		"root.txt":     tar.TypeReg,
+		"sub":          tar.TypeDir,
+		"sub/file.txt": tar.TypeReg,
+		"sub/nested":   tar.TypeDir,
+	}, names)
+}
+
+// PreserveSymlinks stores a link as a link. The target is recorded as written,
+// so an absolute or dangling one is kept verbatim rather than resolved, and the
+// walk does not descend through a link to a directory.
+func TestGetBlobFromPath_PreserveSymlinks(t *testing.T) {
+	r := require.New(t)
+
+	tmpDir := t.TempDir()
+	createTestFile(t, tmpDir, "target.txt", "target content")
+	r.NoError(os.MkdirAll(filepath.Join(tmpDir, "realdir"), 0o755))
+	createTestFile(t, filepath.Join(tmpDir, "realdir"), "inner.txt", "inner")
+
+	absolute := filepath.Join(tmpDir, "target.txt")
+	links := map[string]string{
+		"relative.txt": "target.txt",
+		"absolute.txt": absolute,
+		"dangling.txt": "nonexistent.txt",
+		"escaping.txt": filepath.Join("..", "..", "outside.txt"),
+		"dirlink":      "realdir",
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(tmpDir, name)); err != nil {
+			t.Skipf("symlink creation failed (may not be supported on this system): %v", err)
+			return
+		}
+	}
+
+	b, err := filesystem.GetBlobFromPath(t.Context(), tmpDir, filesystem.DirOptions{PreserveSymlinks: true})
+	r.NoError(err)
+
+	targets := map[string]string{}
+	var names []string
+	for _, header := range readTarHeaders(t, b) {
+		names = append(names, header.Name)
+		if header.Typeflag == tar.TypeSymlink {
+			targets[header.Name] = header.Linkname
+		}
+	}
+
+	want := map[string]string{}
+	for name, target := range links {
+		want[name] = filepath.ToSlash(target)
+	}
+	r.Equal(want, targets, "every link is stored as a link, with its target as written")
+
+	// The link to a directory contributes the link alone; the directory itself is
+	// still walked under its own name.
+	r.NotContains(names, "dirlink/inner.txt")
+	r.Contains(names, "realdir/inner.txt")
+}
+
+func TestGetBlobFromPath_DefaultTarBytes(t *testing.T) {
+	for _, reproducible := range []bool{false, true} {
+		name := "default"
+		if reproducible {
+			name = "reproducible"
+		}
+		t.Run(name, func(t *testing.T) {
+			r := require.New(t)
+			dir := t.TempDir()
+			createTestFile(t, dir, "sub/file", "content")
+			var expected bytes.Buffer
+			tw := tar.NewWriter(&expected)
+			for _, name := range []string{".", "sub", "sub/file"} {
+				info, err := os.Stat(filepath.Join(dir, name))
+				r.NoError(err)
+				h, err := tar.FileInfoHeader(info, "")
+				r.NoError(err)
+				h.Name = name
+				if info.IsDir() {
+					h.Name += "/"
+				}
+				if reproducible {
+					h.ModTime, h.AccessTime, h.ChangeTime = time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0)
+					h.Uid, h.Gid, h.Uname, h.Gname = 0, 0, "", ""
+					h.Mode &= 0o777
+				}
+				r.NoError(tw.WriteHeader(h))
+				if !info.IsDir() {
+					_, err = tw.Write([]byte("content"))
+					r.NoError(err)
+				}
+			}
+			r.NoError(tw.Close())
+			b, err := filesystem.GetBlobFromPath(t.Context(), dir, filesystem.DirOptions{Reproducible: reproducible})
+			r.NoError(err)
+			actual, err := readAllFromBlob(b)
+			r.NoError(err)
+			r.Equal(expected.Bytes(), actual, "default bytes retain ./ and sub/ entries")
+		})
+	}
+}
+
+func TestWriteTarLayoutOptions(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		opt   filesystem.DirOptions
+		names []string
+	}{
+		{name: "defaults", names: []string{"./", "sub/"}},
+		{name: "omit root", opt: filesystem.DirOptions{OmitRoot: true}, names: []string{"sub/"}},
+		{name: "omit slash", opt: filesystem.DirOptions{OmitDirTrailingSlash: true}, names: []string{".", "sub"}},
+		{name: "git layout", opt: filesystem.DirOptions{OmitRoot: true, OmitDirTrailingSlash: true}, names: []string{"sub"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := require.New(t)
+			source := fstest.MapFS{"sub": &fstest.MapFile{Mode: fs.ModeDir | 0o755}}
+			var output bytes.Buffer
+			writer := tar.NewWriter(&output)
+			r.NoError(filesystem.WriteTar(t.Context(), source, writer, tt.opt))
+			r.NoError(writer.Close())
+			reader := tar.NewReader(&output)
+			var names []string
+			for range tt.names {
+				h, err := reader.Next()
+				r.NoError(err)
+				names = append(names, h.Name)
+			}
+			r.Equal(tt.names, names)
+			_, err := reader.Next()
+			r.ErrorIs(err, io.EOF)
+		})
+	}
 }

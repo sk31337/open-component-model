@@ -56,7 +56,8 @@ configurations:
       properties:
         username: %[3]q
         password: %[4]q
-`, registry.Host, registry.Port, registry.User, registry.Password)
+- type: http.config.ocm.software/v1alpha1
+  plainHTTP: true`, registry.Host, registry.Port, registry.User, registry.Password)
 
 	cfgPath := filepath.Join(t.TempDir(), "ocmconfig.yaml")
 	r.NoError(os.WriteFile(cfgPath, []byte(cfg), os.ModePerm))
@@ -77,7 +78,7 @@ configurations:
 	r.NoError(err)
 
 	// We can use the 'add component-version' command to create a CTF archive easily
-	// Or we manually construct one using constructor.yaml and 'add component-version' command targetting a ctf path
+	// Or we manually construct one using constructor.yaml and 'add component-version' command targeting a ctf path
 
 	constructorContent := fmt.Sprintf(`
 components:
@@ -171,7 +172,8 @@ configurations:
       properties:
         username: %[3]q
         password: %[4]q
-`, registry.Host, registry.Port, registry.User, registry.Password)
+- type: http.config.ocm.software/v1alpha1
+  plainHTTP: true`, registry.Host, registry.Port, registry.User, registry.Password)
 
 	cfgPath := filepath.Join(t.TempDir(), "ocmconfig.yaml")
 	r.NoError(os.WriteFile(cfgPath, []byte(cfg), os.ModePerm))
@@ -405,7 +407,8 @@ configurations:
       properties:
         username: %[3]q
         password: %[4]q
-`, registry.Host, registry.Port, registry.User, registry.Password)
+- type: http.config.ocm.software/v1alpha1
+  plainHTTP: true`, registry.Host, registry.Port, registry.User, registry.Password)
 	cfgPath := filepath.Join(t.TempDir(), "ocmconfig.yaml")
 	r.NoError(os.WriteFile(cfgPath, []byte(cfg), os.ModePerm))
 

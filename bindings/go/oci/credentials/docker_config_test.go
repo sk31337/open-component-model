@@ -1,13 +1,16 @@
 package credentials
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/oras-project/oras-go/v3/registry/remote/auth"
+	remotecredentials "github.com/oras-project/oras-go/v3/registry/remote/credentials"
+	"github.com/oras-project/oras-go/v3/registry/remote/properties"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"oras.land/oras-go/v2/registry/remote/auth"
 
-	"ocm.software/open-component-model/bindings/go/oci/spec/credentials/v1"
 	credentialsv1 "ocm.software/open-component-model/bindings/go/oci/spec/credentials/v1"
 	identityv1 "ocm.software/open-component-model/bindings/go/oci/spec/identity/v1"
 	"ocm.software/open-component-model/bindings/go/runtime"
@@ -17,11 +20,11 @@ func TestCredentialFunc(t *testing.T) {
 	tests := []struct {
 		name        string
 		identity    *identityv1.OCIRegistryIdentity
-		credentials *v1.OCICredentials
+		credentials *credentialsv1.OCICredentials
 		hostport    string
 		wantErr     bool
 		wantEmpty   bool
-		wantCred    *auth.Credential // if set, assert exact credential match
+		wantCred    *remotecredentials.Credential // if set, assert exact credential match
 	}{
 		{
 			name: "matching host and port",
@@ -29,7 +32,7 @@ func TestCredentialFunc(t *testing.T) {
 				Hostname: "example.com",
 				Port:     "443",
 			},
-			credentials: &v1.OCICredentials{
+			credentials: &credentialsv1.OCICredentials{
 				Username: "testuser",
 				Password: "testpass",
 			},
@@ -43,7 +46,7 @@ func TestCredentialFunc(t *testing.T) {
 				Hostname: "example.com",
 				Port:     "443",
 			},
-			credentials: &v1.OCICredentials{
+			credentials: &credentialsv1.OCICredentials{
 				Username: "testuser",
 				Password: "testpass",
 			},
@@ -57,7 +60,7 @@ func TestCredentialFunc(t *testing.T) {
 				Hostname: "example.com",
 				Port:     "443",
 			},
-			credentials: &v1.OCICredentials{
+			credentials: &credentialsv1.OCICredentials{
 				Username: "testuser",
 				Password: "testpass",
 			},
@@ -70,7 +73,7 @@ func TestCredentialFunc(t *testing.T) {
 			identity: &identityv1.OCIRegistryIdentity{
 				Hostname: "example.com",
 			},
-			credentials: &v1.OCICredentials{
+			credentials: &credentialsv1.OCICredentials{
 				Username: "testuser",
 			},
 			hostport:  "example.com",
@@ -82,7 +85,7 @@ func TestCredentialFunc(t *testing.T) {
 			identity: &identityv1.OCIRegistryIdentity{
 				Hostname: "example.com",
 			},
-			credentials: &v1.OCICredentials{
+			credentials: &credentialsv1.OCICredentials{
 				Username:     "testuser",
 				Password:     "testpass",
 				AccessToken:  "testtoken",
@@ -97,7 +100,7 @@ func TestCredentialFunc(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			credFunc := CredentialFunc(tt.identity, tt.credentials)
-			cred, err := credFunc(t.Context(), tt.hostport)
+			cred, err := credFunc(t.Context(), properties.Resource{Registry: tt.hostport})
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -106,7 +109,7 @@ func TestCredentialFunc(t *testing.T) {
 
 			require.NoError(t, err)
 			if tt.wantEmpty {
-				assert.Equal(t, auth.EmptyCredential, cred)
+				assert.Equal(t, remotecredentials.EmptyCredential, cred)
 				return
 			}
 
@@ -126,23 +129,23 @@ func TestCredentialFunc(t *testing.T) {
 func TestCredentialFromTyped(t *testing.T) {
 	tests := []struct {
 		name        string
-		credentials *v1.OCICredentials
-		expected    auth.Credential
+		credentials *credentialsv1.OCICredentials
+		expected    remotecredentials.Credential
 	}{
 		{
 			name:        "zero-value credentials",
-			credentials: &v1.OCICredentials{},
-			expected:    auth.Credential{},
+			credentials: &credentialsv1.OCICredentials{},
+			expected:    remotecredentials.Credential{},
 		},
 		{
 			name: "all fields populated",
-			credentials: &v1.OCICredentials{
+			credentials: &credentialsv1.OCICredentials{
 				Username:     "user",
 				Password:     "pass",
 				AccessToken:  "atoken",
 				RefreshToken: "rtoken",
 			},
-			expected: auth.Credential{
+			expected: remotecredentials.Credential{
 				Username:     "user",
 				Password:     "pass",
 				AccessToken:  "atoken",
@@ -151,21 +154,21 @@ func TestCredentialFromTyped(t *testing.T) {
 		},
 		{
 			name: "only username and password",
-			credentials: &v1.OCICredentials{
+			credentials: &credentialsv1.OCICredentials{
 				Username: "user",
 				Password: "pass",
 			},
-			expected: auth.Credential{
+			expected: remotecredentials.Credential{
 				Username: "user",
 				Password: "pass",
 			},
 		},
 		{
 			name: "only access token",
-			credentials: &v1.OCICredentials{
+			credentials: &credentialsv1.OCICredentials{
 				AccessToken: "atoken",
 			},
-			expected: auth.Credential{
+			expected: remotecredentials.Credential{
 				AccessToken: "atoken",
 			},
 		},
@@ -186,7 +189,7 @@ func TestResolveV1DockerConfigCredentials(t *testing.T) {
 		wantErr      bool
 		wantEmpty    bool
 		wantNil      bool
-		wantCreds    *v1.OCICredentials
+		wantCreds    *credentialsv1.OCICredentials
 	}{
 		{
 			name:         "missing hostname in identity leads to no credentials",
@@ -219,8 +222,8 @@ func TestResolveV1DockerConfigCredentials(t *testing.T) {
 			identity: identityv1.OCIRegistryIdentity{
 				Hostname: "registry.example.com",
 			},
-			wantCreds: &v1.OCICredentials{
-				Type:     runtime.NewVersionedType(v1.OCICredentialsType, credentialsv1.Version),
+			wantCreds: &credentialsv1.OCICredentials{
+				Type:     runtime.NewVersionedType(credentialsv1.OCICredentialsType, credentialsv1.Version),
 				Username: "testuser",
 				Password: "testpass",
 			},
@@ -233,8 +236,8 @@ func TestResolveV1DockerConfigCredentials(t *testing.T) {
 			identity: identityv1.OCIRegistryIdentity{
 				Hostname: "docker.io",
 			},
-			wantCreds: &v1.OCICredentials{
-				Type:     runtime.NewVersionedType(v1.OCICredentialsType, credentialsv1.Version),
+			wantCreds: &credentialsv1.OCICredentials{
+				Type:     runtime.NewVersionedType(credentialsv1.OCICredentialsType, credentialsv1.Version),
 				Username: "testuser",
 				Password: "testpass",
 			},
@@ -248,8 +251,8 @@ func TestResolveV1DockerConfigCredentials(t *testing.T) {
 				Hostname: "registry.example.com",
 				Port:     "5000",
 			},
-			wantCreds: &v1.OCICredentials{
-				Type:     runtime.NewVersionedType(v1.OCICredentialsType, credentialsv1.Version),
+			wantCreds: &credentialsv1.OCICredentials{
+				Type:     runtime.NewVersionedType(credentialsv1.OCICredentialsType, credentialsv1.Version),
 				Username: "portuser",
 				Password: "portpass",
 			},
@@ -284,8 +287,8 @@ func TestResolveV1DockerConfigCredentials(t *testing.T) {
 				Hostname: "registry.example.com",
 				Port:     "443",
 			},
-			wantCreds: &v1.OCICredentials{
-				Type:     runtime.NewVersionedType(v1.OCICredentialsType, credentialsv1.Version),
+			wantCreds: &credentialsv1.OCICredentials{
+				Type:     runtime.NewVersionedType(credentialsv1.OCICredentialsType, credentialsv1.Version),
 				Username: "user",
 				Password: "pass",
 			},
@@ -299,8 +302,8 @@ func TestResolveV1DockerConfigCredentials(t *testing.T) {
 				Hostname: "registry.example.com",
 				Port:     "8080",
 			},
-			wantCreds: &v1.OCICredentials{
-				Type:     runtime.NewVersionedType(v1.OCICredentialsType, credentialsv1.Version),
+			wantCreds: &credentialsv1.OCICredentials{
+				Type:     runtime.NewVersionedType(credentialsv1.OCICredentialsType, credentialsv1.Version),
 				Username: "fulluser",
 				Password: "fullpass",
 			},
@@ -314,8 +317,8 @@ func TestResolveV1DockerConfigCredentials(t *testing.T) {
 				Hostname: "registry.example.com",
 				Port:     "5000",
 			},
-			wantCreds: &v1.OCICredentials{
-				Type:     runtime.NewVersionedType(v1.OCICredentialsType, credentialsv1.Version),
+			wantCreds: &credentialsv1.OCICredentials{
+				Type:     runtime.NewVersionedType(credentialsv1.OCICredentialsType, credentialsv1.Version),
 				Username: "noport",
 				Password: "noport",
 			},
@@ -398,4 +401,57 @@ func TestGetStore(t *testing.T) {
 			assert.NotNil(t, store)
 		})
 	}
+}
+
+// oras passes the credential function a canonical registry name (lower-cased,
+// docker.io for registry-1.docker.io) while the identity keeps the host as written
+// in the base URL; every spelling of the same registry must still match.
+func TestCredentialFunc_HostSpellings(t *testing.T) {
+	for _, tc := range []struct {
+		name, identityHost, requestHost string
+	}{
+		{"lower-case", "registry.example.com", "registry.example.com"},
+		{"upper-case", "REGISTRY.EXAMPLE.COM", "REGISTRY.EXAMPLE.COM"},
+		{"mixed-case", "Registry.Example.Com", "Registry.Example.Com"},
+		{"docker hub endpoint", "registry-1.docker.io", "registry-1.docker.io"},
+		{"docker hub name", "docker.io", "registry-1.docker.io"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := require.New(t)
+			client := &auth.Client{
+				Cache: auth.NewCache(),
+				CredentialFunc: CredentialFunc(
+					&identityv1.OCIRegistryIdentity{Hostname: tc.identityHost},
+					&credentialsv1.OCICredentials{Username: "user", Password: "pass"},
+				),
+			}
+			r.True(sendsBasicAuth(t, client, tc.requestHost), "request went out unauthenticated")
+		})
+	}
+}
+
+// sendsBasicAuth sends one request addressed to host through client and
+// reports whether the registry received a basic credential.
+func sendsBasicAuth(t *testing.T, client *auth.Client, host string) bool {
+	t.Helper()
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if _, _, ok := req.BasicAuth(); ok {
+			saw = true
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	client.Client = srv.Client()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/v2/some/repo/manifests/latest", nil)
+	require.NoError(t, err)
+	// oras derives the credential lookup from the request host, not the dialled address.
+	req.Host = host
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	return saw
 }

@@ -2,19 +2,20 @@ package ctf
 
 import (
 	"bytes"
-	_ "crypto/sha512" // for digest.SHA512 in TestBuildReferrersTag
 	"encoding/json"
 	"strconv"
 	"sync"
 	"testing"
 
+	_ "crypto/sha512" // for digest.SHA512 in TestBuildReferrersTag
+
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ociImageSpecV1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/oras-project/oras-go/v3"
+	"github.com/oras-project/oras-go/v3/content/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"oras.land/oras-go/v2"
-	"oras.land/oras-go/v2/content/memory"
 
 	"ocm.software/open-component-model/bindings/go/ctf"
 	ocmannotations "ocm.software/open-component-model/bindings/go/oci/spec/annotations"
@@ -310,7 +311,7 @@ func TestRepushReferrerIsIdempotent(t *testing.T) {
 
 	idx, err = archive.GetIndex(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, entriesAfterFirst, len(idx.GetArtifacts()))
+	assert.Len(t, idx.GetArtifacts(), entriesAfterFirst)
 	indexAfterSecond, err := repo.Resolve(ctx, referrersTag)
 	require.NoError(t, err)
 	assert.Equal(t, indexAfterFirst.Digest, indexAfterSecond.Digest)

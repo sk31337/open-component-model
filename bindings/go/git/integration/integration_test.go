@@ -1,0 +1,138 @@
+package integration_test
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/cgi"
+	"net/http/httptest"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/stretchr/testify/require"
+
+	"ocm.software/open-component-model/bindings/go/blob"
+	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
+	gitrepository "ocm.software/open-component-model/bindings/go/git/repository"
+	"ocm.software/open-component-model/bindings/go/runtime"
+	testgit "ocm.software/open-component-model/bindings/go/testutils/git"
+)
+
+// trustServerCertificate changes process-global state; callers and their ancestors must not run in parallel.
+// The shared HTTP factory clones the default transport, preserving TLS certificate verification.
+func trustServerCertificate(t *testing.T, certificatePEM []byte) {
+	t.Helper()
+
+	r := require.New(t)
+
+	original := http.DefaultTransport
+	transport, ok := original.(*http.Transport)
+	r.True(ok)
+	transport = transport.Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	roots := x509.NewCertPool()
+	r.True(roots.AppendCertsFromPEM(certificatePEM))
+	transport.TLSClientConfig.RootCAs = roots
+	http.DefaultTransport = transport
+	t.Cleanup(func() {
+		http.DefaultTransport = original
+		transport.CloseIdleConnections()
+	})
+}
+
+func newHTTPSServer(t *testing.T, path, authorization string) (url string, ca []byte) {
+	t.Helper()
+
+	r := require.New(t)
+
+	executable, err := exec.LookPath("git")
+	r.NoError(err)
+
+	backend := &cgi.Handler{
+		Path: executable,
+		Args: []string{"http-backend"},
+		Env:  []string{"GIT_PROJECT_ROOT=" + filepath.Dir(path), "GIT_HTTP_EXPORT_ALL=1"},
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if authorization != "" && req.Header.Get("Authorization") != authorization {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		backend.ServeHTTP(w, req)
+	}))
+	t.Cleanup(server.Close)
+
+	return server.URL + "/" + filepath.Base(path), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+}
+
+// downloadError downloads res and reads it to its end, which is when a download fails.
+func downloadError(ctx context.Context, repo *gitrepository.ResourceRepository, res *descriptor.Resource, creds runtime.Typed) error {
+	b, err := repo.DownloadResource(ctx, res, creds)
+	if err != nil {
+		return err
+	}
+	rc, err := b.ReadCloser()
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(io.Discard, rc)
+	return errors.Join(err, rc.Close())
+}
+
+func assertArchive(t *testing.T, content blob.ReadOnlyBlob, expectedReadme string) []byte {
+	t.Helper()
+
+	r := require.New(t)
+
+	reader, err := content.ReadCloser()
+	r.NoError(err)
+
+	data, err := io.ReadAll(reader)
+	r.NoError(err)
+	r.NoError(reader.Close())
+
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	r.NoError(err)
+	defer func() { r.NoError(gz.Close()) }()
+	files := map[string]string{}
+	tr := tar.NewReader(gz)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		r.NoError(err)
+		if header.Name == ".git" || strings.HasPrefix(header.Name, ".git/") {
+			continue
+		}
+		payload, err := io.ReadAll(tr)
+		r.NoError(err)
+		files[header.Name] = string(payload)
+	}
+	r.Equal(map[string]string{"README.md": expectedReadme}, files)
+
+	return data
+}
+
+// newRepository creates a bare repository with two commits on main and returns
+// its path and the first commit. That is all a real transport needs to exercise
+// a clone for a ref and a fetch for a pinned commit; ref resolution, archive
+// contents and size limits are covered against a local repository in
+// internal/download.
+func newRepository(t *testing.T) (path string, first plumbing.Hash) {
+	t.Helper()
+	return testgit.Repository(t, testgit.Options{DefaultBranch: "main", Bare: true})
+}

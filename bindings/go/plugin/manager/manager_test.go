@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +21,8 @@ import (
 	genericv1 "ocm.software/open-component-model/bindings/go/configuration/generic/v1/spec"
 	"ocm.software/open-component-model/bindings/go/plugin/internal/dummytype"
 	dummyv1 "ocm.software/open-component-model/bindings/go/plugin/internal/dummytype/v1"
+	"ocm.software/open-component-model/bindings/go/plugin/internal/osutil"
+	credentialpluginv1 "ocm.software/open-component-model/bindings/go/plugin/manager/contracts/credentialplugin/v1"
 	ocmrepositoryv1 "ocm.software/open-component-model/bindings/go/plugin/manager/contracts/ocmrepository/v1"
 	"ocm.software/open-component-model/bindings/go/plugin/manager/types"
 	pluginruntime "ocm.software/open-component-model/bindings/go/plugin/manager/types/runtime"
@@ -52,7 +57,7 @@ func TestPluginManager(t *testing.T) {
 	t.Cleanup(func() {
 		require.NoError(t, pm.Shutdown(ctx))
 		// make sure it's not there but during a proper shutdown now this is removed by the plugin
-		if err := os.Remove("/tmp/test-plugin-plugin.socket"); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(osutil.SocketPath("test-plugin-component-version")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(fmt.Errorf("error was not nil and not NotFound when clearing the socket: %w", err))
 		}
 	})
@@ -102,7 +107,7 @@ func TestConfigurationPassedToPlugin(t *testing.T) {
 			},
 		},
 	}
-	writer := bytes.NewBuffer(nil)
+	writer := &syncBuffer{}
 	slog.SetDefault(slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -116,7 +121,7 @@ func TestConfigurationPassedToPlugin(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		// make sure it's not there but during a proper shutdown now this is removed by the plugin
-		if err := os.Remove("/tmp/test-plugin-plugin.socket"); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(osutil.SocketPath("test-plugin-component-version")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(fmt.Errorf("error was not nil and not NotFound when clearing the socket: %w", err))
 		}
 	})
@@ -182,7 +187,7 @@ func TestPluginManagerCancelContext(t *testing.T) {
 	t.Cleanup(func() {
 		require.NoError(t, pm.Shutdown(ctx))
 		// normally, this shouldn't exist because shutdown deletes now properly, but sometimes this deletes it earlier.
-		if err := os.Remove("/tmp/test-plugin-component-version-plugin.socket"); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(osutil.SocketPath("test-plugin-component-version")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(fmt.Errorf("error was not nil and not NotFound when clearing the socket: %w", err))
 		}
 	})
@@ -236,7 +241,7 @@ func TestPluginManagerShutdownPlugin(t *testing.T) {
 	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata"), WithConfiguration(config)))
 	t.Cleanup(func() {
 		// make sure it's gone even if the test fails, but ignore the deletion error since it should be removed.
-		if err := os.Remove("/tmp/test-plugin-plugin.socket"); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(osutil.SocketPath("test-plugin-component-version")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(fmt.Errorf("error was not nil and not NotFound when clearing the socket: %w", err))
 		}
 	})
@@ -259,8 +264,10 @@ func TestPluginManagerShutdownPlugin(t *testing.T) {
 		_, err = plugin.GetComponentVersion(context.Background(), "test", "v1.0.0")
 		return err != nil
 	}, 1*time.Second, 100*time.Millisecond)
-	_, err = os.Stat("/tmp/test-plugin-plugin.socket")
-	require.Error(t, err)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(osutil.SocketPath("test-plugin-component-version"))
+		return errors.Is(err, fs.ErrNotExist)
+	}, 1*time.Second, 100*time.Millisecond)
 }
 
 func TestPluginManagerShutdownWithoutWait(t *testing.T) {
@@ -279,7 +286,7 @@ func TestPluginManagerShutdownWithoutWait(t *testing.T) {
 			},
 		},
 	}
-	writer := bytes.NewBuffer(nil)
+	writer := &syncBuffer{}
 	slog.SetDefault(slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -289,7 +296,7 @@ func TestPluginManagerShutdownWithoutWait(t *testing.T) {
 	require.NoError(t, pm.RegisterPlugins(ctx, filepath.Join("..", "tmp", "testdata"), WithConfiguration(config)))
 	t.Cleanup(func() {
 		// make sure it's gone even if the test fails, but ignore the deletion error since it should be removed.
-		if err := os.Remove("/tmp/test-plugin-plugin.socket"); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(osutil.SocketPath("test-plugin-component-version")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(fmt.Errorf("error was not nil and not NotFound when clearing the socket: %w", err))
 		}
 	})
@@ -320,11 +327,7 @@ func TestPluginManagerShutdownWithoutWait(t *testing.T) {
 
 	// we need some time for the logs to be streamed back
 	require.Eventually(t, func() bool {
-		content, err := io.ReadAll(writer)
-		if err != nil {
-			return false
-		}
-		return strings.Contains(string(content), "gracefully shutting down plugin")
+		return strings.Contains(writer.String(), "gracefully shutting down plugin")
 	}, 1*time.Second, 100*time.Millisecond)
 }
 
@@ -384,7 +387,7 @@ func TestPluginManagerMultiplePluginsForSameType(t *testing.T) {
 
 func TestPluginManagerWithNoPlugins(t *testing.T) {
 	pm := NewPluginManager(context.Background())
-	require.ErrorContains(t, pm.RegisterPlugins(context.Background(), filepath.Join(".")), "no plugins found")
+	require.ErrorContains(t, pm.RegisterPlugins(context.Background(), "."), "no plugins found")
 }
 
 func TestCredentialTypeRegistryPopulatedFromPlugin(t *testing.T) {
@@ -401,14 +404,69 @@ func TestCredentialTypeRegistryPopulatedFromPlugin(t *testing.T) {
 	require.NoError(t, pm.RegisterPlugins(t.Context(), filepath.Join("..", "tmp", "testdata"), WithConfiguration(config)))
 	t.Cleanup(func() {
 		require.NoError(t, pm.Shutdown(t.Context()))
-		if err := os.Remove("/tmp/test-plugin-plugin.socket"); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(osutil.SocketPath("test-plugin-component-version")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(fmt.Errorf("error was not nil and not NotFound when clearing the socket: %w", err))
 		}
-		if err := os.Remove("/tmp/test-plugin-credential-repository-plugin.socket"); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(osutil.SocketPath("test-plugin-credential-repository")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(fmt.Errorf("error was not nil and not NotFound when clearing the socket: %w", err))
 		}
 	})
 
-	scheme := pm.CredentialRepositoryRegistry.GetCredentialTypeScheme()
+	scheme := pm.CredentialTypeRegistry.GetCredentialTypeScheme()
 	require.True(t, scheme.IsRegistered(runtime.NewVersionedType("DummyToken", "v1")))
+}
+
+// TestCredentialTypeRegistryPopulatedFromCredentialPluginCapability covers the credential plugin
+// capability: the types it declares reach the credential type registry, while the credential
+// plugin registry owns the plugin itself.
+func TestCredentialTypeRegistryPopulatedFromCredentialPluginCapability(t *testing.T) {
+	ctx := t.Context()
+	pm := NewPluginManager(context.Background())
+
+	credType := runtime.NewVersionedType("VaultToken", "v1")
+	capabilitySpec := credentialpluginv1.CapabilitySpec{
+		Type: runtime.NewUnversionedType(string(credentialpluginv1.CredentialPluginType)),
+		SupportedCredentialPluginTypes: []types.Type{
+			{Type: runtime.NewVersionedType("HashiCorpVault", "v1")},
+		},
+		CustomCredentialTypes: []types.Type{{Type: credType}},
+	}
+	pluginSpec := pluginruntime.PluginSpec{CapabilitySpecs: []runtime.Typed{&capabilitySpec}}
+	rawPluginSpec, err := pluginruntime.ConvertToSpec(&pluginSpec)
+	require.NoError(t, err)
+	serialized, err := json.Marshal(rawPluginSpec)
+	require.NoError(t, err)
+
+	testPlugin := types.Plugin{
+		ID:   "vault-plugin",
+		Path: "/tmp/test-credential-plugin.socket",
+		Config: types.Config{
+			ID:         "vault-plugin",
+			Type:       "unix",
+			PluginType: credentialpluginv1.CredentialPluginType,
+		},
+	}
+	config := &genericv1.Config{Type: runtime.Type{Name: "custom.config", Version: "v1"}}
+
+	require.NoError(t, pm.addPlugin(ctx, config, testPlugin, bytes.NewBuffer(serialized)))
+	require.True(t, pm.CredentialTypeRegistry.GetCredentialTypeScheme().IsRegistered(credType))
+}
+
+// syncBuffer is safe for concurrent use: plugin log streamers write to the
+// default slog logger from their own goroutines while tests poll the output.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

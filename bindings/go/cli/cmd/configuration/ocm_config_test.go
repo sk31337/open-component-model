@@ -56,6 +56,19 @@ func TestGetOCMConfigPaths(t *testing.T) {
 			},
 		},
 		{
+			name:     "files are not discovered multiple times",
+			existing: map[string]bool{"/home/user/.ocmconfig": true},
+			envVars: map[string]string{
+				"OCM_CONFIG":      "/home/user",
+				"XDG_CONFIG_HOME": "/home/user",
+			},
+			want: func(workingDirectory, executableDirectory string) []string {
+				return []string{
+					"/home/user/.ocmconfig",
+				}
+			},
+		},
+		{
 			name:     "no files found returns error",
 			existing: map[string]bool{},
 			envVars:  map[string]string{},
@@ -73,7 +86,7 @@ func TestGetOCMConfigPaths(t *testing.T) {
 
 			options := OCMConfigOptions{
 				Stat: func(path string) (os.FileInfo, error) {
-					if tt.existing == nil || tt.existing[path] {
+					if tt.existing == nil || tt.existing[filepath.ToSlash(path)] {
 						return nil, nil
 					}
 					return nil, os.ErrNotExist
@@ -92,7 +105,14 @@ func TestGetOCMConfigPaths(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tt.want(workingDirectory, executableDirectory), got)
+			want := tt.want(workingDirectory, executableDirectory)
+			for i := range want {
+				want[i] = filepath.ToSlash(want[i])
+			}
+			for i := range got {
+				got[i] = filepath.ToSlash(got[i])
+			}
+			assert.Equal(t, want, got)
 		})
 	}
 }

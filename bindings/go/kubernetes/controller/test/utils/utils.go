@@ -18,8 +18,12 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"oras.land/oras-go/v2"
-	ocistore "oras.land/oras-go/v2/content/oci"
+	"github.com/oras-project/oras-go/v3"
+	ocistore "github.com/oras-project/oras-go/v3/content/oci"
+	"sigs.k8s.io/yaml"
+
+	genericv1 "ocm.software/open-component-model/bindings/go/configuration/generic/v1/spec"
+	signingspec "ocm.software/open-component-model/bindings/go/signing/v1alpha1/spec"
 )
 
 const (
@@ -36,6 +40,20 @@ func OCMBinary() string {
 		return v
 	}
 	return "ocm"
+}
+
+// PlainHTTPConfig writes an OCM config file into dir that lets the ocm CLI talk
+// plain HTTP to every e2e registry. OCM rejects an http:// prefix unless the HTTP
+// client configuration sets plainHTTP, so every CLI call against an e2e registry
+// passes the returned path via --config. ghcr.io stays on HTTPS: the examples pull
+// public images from it, and it refuses cleartext requests.
+func PlainHTTPConfig(dir string) (string, error) {
+	cfg := "type: generic.config.ocm.software/v1\nconfigurations:\n  - type: http.config.ocm.software/v1alpha1\n    plainHTTP: true\n    hosts:\n      ghcr.io:\n        plainHTTP: false\n"
+	path := filepath.Join(dir, "plain-http.ocmconfig")
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		return "", fmt.Errorf("could not write plain HTTP ocmconfig: %w", err)
+	}
+	return path, nil
 }
 
 // Run executes the provided command within this context.
@@ -82,10 +100,17 @@ func DeployResource(ctx context.Context, manifestFilePath string) error {
 		return err
 	}
 	DeferCleanup(func(ctx SpecContext) error {
-		cmd = exec.CommandContext(ctx, "kubectl", "delete", "-f", manifestFilePath)
+		// No --timeout: the OCM finalizer teardown is a dependency cascade
+		// (Deployer -> Resource -> Component -> Repository) whose controllers
+		// return errors on the transient "still referenced" condition, so
+		// controller-runtime's exponential backoff can stretch a brief ordering
+		// conflict into several minutes. Let the Ginkgo spec deadline bound the
+		// wait instead of a fixed timeout that flakes on slow teardowns (observed
+		// exceeding 180s on the cross-namespace Repository finalizer).
+		cmd = exec.CommandContext(ctx, "kubectl", "delete", "--ignore-not-found", "--wait=true", "-f", manifestFilePath)
 		_, err := Run(cmd)
 		if err != nil {
-			GinkgoLogr.V(3).Info("WARNING: failed to delete resource", "manifest", manifestFilePath)
+			GinkgoLogr.V(3).Info("WARNING: cleanup failed", "manifest", manifestFilePath)
 		}
 
 		return err
@@ -128,7 +153,15 @@ func WaitForResource(ctx context.Context, condition, timeout string, resource ..
 
 // PrepareOCMComponent creates an OCM component from a component-constructor file.
 // After creating the OCM component, the component is transferred to imageRegistry.
-func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, imageRegistry, signingKey string) error {
+//
+// When the example directory ships an .ocmconfig alongside the component-constructor.yaml,
+// PrepareOCMComponent signs the component with every signature configured in that file
+// (one `ocm sign cv` invocation per signing.config.ocm.software entry with a non-empty
+// signature name) and creates a Kubernetes Secret named <name>-ocmconfig in the default
+// namespace carrying the same file. The controller reads verification credentials from
+// that Secret via spec.ocmConfig on the Component CR. The Secret is deleted after the
+// test through DeferCleanup.
+func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, imageRegistry string) error {
 	ocm := OCMBinary()
 
 	By("creating ocm component for " + name)
@@ -157,34 +190,65 @@ func PrepareOCMComponent(ctx context.Context, name, componentConstructorPath, im
 	componentName := componentNamePrefix + filepath.Base(filepath.Dir(componentConstructorPath))
 	transferRef := fmt.Sprintf("ctf::%s//%s", ctfDir, componentName)
 
-	if signingKey != "" {
-		By("signing ocm component for " + name)
-		ocmConfigPath := filepath.Join(tmpDir, ".ocmconfig")
-		if err := writeSigningConfig(ocmConfigPath, signingKey, signingKey+".pub"); err != nil {
-			return fmt.Errorf("could not write signing ocmconfig: %w", err)
+	// If the example ships its own .ocmconfig, use it to sign each configured signature
+	// and materialize a Kubernetes Secret carrying the same file for the controller.
+	ocmConfigPath := filepath.Join(exampleDir, ".ocmconfig")
+	if _, err := os.Stat(ocmConfigPath); err == nil {
+		sigNames, err := SigningConfigSignatureNames(ocmConfigPath)
+		if err != nil {
+			return fmt.Errorf("could not read signature names from .ocmconfig: %w", err)
+		}
+		for _, sigName := range sigNames {
+			By(fmt.Sprintf("signing ocm component for %s with signature %q", name, sigName))
+			signRef := fmt.Sprintf("ctf::%s//%s:%s", ctfDir, componentName, signingVersion)
+			cmd = exec.CommandContext(ctx, ocm,
+				"sign", "cv",
+				signRef,
+				"--signature", sigName,
+				"--config", ocmConfigPath,
+			)
+			cmd.Dir = exampleDir
+			if _, err := Run(cmd); err != nil {
+				return fmt.Errorf("could not sign ocm component with signature %q: %w", sigName, err)
+			}
 		}
 
-		signRef := fmt.Sprintf("ctf::%s//%s:%s", ctfDir, componentName, signingVersion)
-		cmd = exec.CommandContext(ctx, ocm,
-			"sign", "cv",
-			signRef,
-			"--signature", "ocm.software",
-			"--config", ocmConfigPath,
+		By("creating k8s Secret " + name + "-ocmconfig from .ocmconfig")
+		secretName := name + "-ocmconfig"
+		cmd = exec.CommandContext(ctx, "kubectl", "create", "secret", "generic", secretName,
+			"--namespace", "default",
+			"--from-file=.ocmconfig="+ocmConfigPath,
 		)
 		if _, err := Run(cmd); err != nil {
-			return fmt.Errorf("could not sign ocm component: %w", err)
+			return fmt.Errorf("could not create ocmconfig secret: %w", err)
 		}
+		DeferCleanup(func(ctx SpecContext) error {
+			if _, err := Run(exec.CommandContext(ctx, "kubectl", "delete", "secret", secretName,
+				"--namespace", "default", "--ignore-not-found")); err != nil {
+				return fmt.Errorf("could not delete ocmconfig secret %q: %w", secretName, err)
+			}
+			return nil
+		})
 	}
 
 	By("transferring ocm component for " + name)
-	cmd = exec.CommandContext(ctx, ocm, "transfer", "cv", transferRef, imageRegistry)
+	plainHTTPConfig, err := PlainHTTPConfig(tmpDir)
+	if err != nil {
+		return err
+	}
+	cmd = exec.CommandContext(ctx, ocm, "transfer", "cv", transferRef, imageRegistry, "--config", plainHTTPConfig)
 
 	if strings.Contains(name, "nested") {
 		cmd.Args = append(cmd.Args, "--recursive")
 	}
 
 	if strings.Contains(name, "localization") {
-		cmd.Args = append(cmd.Args, "--copy-resources", "--upload-as", "ociArtifact")
+		uploaderConfigPath := filepath.Join(tmpDir, "oci-uploader.ocmconfig")
+		uploaderConfig := "type: generic.config.ocm.software/v1\nconfigurations:\n- type: oci.uploader.transfer.config.ocm.software/v1alpha1\n"
+		if err := os.WriteFile(uploaderConfigPath, []byte(uploaderConfig), 0o600); err != nil {
+			return fmt.Errorf("could not write oci uploader ocmconfig: %w", err)
+		}
+		cmd.Args = append(cmd.Args, "--copy-resources", "--config", uploaderConfigPath)
 	}
 
 	if _, err := Run(cmd); err != nil {
@@ -289,24 +353,35 @@ func tarGzipDir(w io.Writer, dir string) error {
 	return walkErr
 }
 
-// writeSigningConfig writes an .ocmconfig that resolves the RSA credential
-// for the "ocm.software" signature from a pair of PEM files.
-func writeSigningConfig(path, privateKeyPEM, publicKeyPEM string) error {
-	content := fmt.Sprintf(`type: generic.config.ocm.software/v1
-configurations:
-  - type: credentials.config.ocm.software
-    consumers:
-      - identity:
-          type: RSA/v1alpha1
-          algorithm: RSASSA-PSS
-          signature: ocm.software
-        credentials:
-          - type: Credentials/v1
-            properties:
-              private_key_pem_file: %s
-              public_key_pem_file: %s
-`, privateKeyPEM, publicKeyPEM)
-	return os.WriteFile(path, []byte(content), 0o600)
+// SigningConfigSignatureNames loads the .ocmconfig at path and returns the deduplicated list of
+// signature names found across all signing.config.ocm.software entries with a non-empty
+// signature field. Global entries (no signature field) are skipped: the CLI requires an
+// explicit --signature name per invocation.
+func SigningConfigSignatureNames(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg genericv1.Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse ocmconfig: %w", err)
+	}
+	entries, err := genericv1.FilterForType[*signingspec.Config](signingspec.Scheme, &cfg)
+	if err != nil {
+		return nil, fmt.Errorf("filter signing configs: %w", err)
+	}
+	seen := make(map[string]struct{})
+	var names []string
+	for _, e := range entries {
+		if e.Signature == "" {
+			continue
+		}
+		if _, dup := seen[e.Signature]; !dup {
+			seen[e.Signature] = struct{}{}
+			names = append(names, e.Signature)
+		}
+	}
+	return names, nil
 }
 
 // DumpLogs dumps pod logs and resource status for the given namespace and resource type.
@@ -339,6 +414,60 @@ func DumpLogs(namespace, resourceType string) {
 		"custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type==\"Ready\")].status,READY_MSG:.status.conditions[?(@.type==\"Ready\")].message",
 	)
 	logCmd("kro-logs", "kubectl", "logs", "-n", namespace, "--all-containers", "--tail=100", "-l", "app.kubernetes.io/name=kro")
+}
+
+// DumpCrossplaneDiagnostics dumps Crossplane composite/managed resource status and
+// crossplane-system logs on test failure. DumpLogs targets kro's
+// app.kubernetes.io/name=kro selector, which matches nothing in crossplane-system
+// (Crossplane pods carry app=crossplane), so the Crossplane flow needs its own dump
+// to surface the XR Ready condition, composed resources, and controller logs.
+// Creates its own context with a 30s timeout to survive parent context cancellation.
+func DumpCrossplaneDiagnostics() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logLine := func(msg string) {
+		GinkgoLogr.Info(msg)
+	}
+
+	logCmd := func(label string, args ...string) {
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // args are hardcoded in test code
+		output, err := Run(cmd)
+		if err != nil {
+			logLine(fmt.Sprintf("[DIAG] %s: error: %v", label, err))
+		} else {
+			for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+				logLine(fmt.Sprintf("[DIAG] %s: %s", label, line))
+			}
+		}
+	}
+
+	logCmd("xr-conditions",
+		"kubectl", "get", "composite", "-o",
+		"custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type==\"Ready\")].status,READY_MSG:.status.conditions[?(@.type==\"Ready\")].message",
+	)
+	// Composed resources the Compositions create. Crossplane v2 has no `managed`
+	// category for these, so dump each kind's Ready condition across all namespaces
+	// to show which composed resource (e.g. the Flux Kustomization) blocks the XR.
+	readyCols := "custom-columns=NS:.metadata.namespace,NAME:.metadata.name," +
+		"READY:.status.conditions[?(@.type==\"Ready\")].status," +
+		"MSG:.status.conditions[?(@.type==\"Ready\")].message"
+	for _, kind := range []string{
+		"resources.delivery.ocm.software",
+		"gitrepositories.source.toolkit.fluxcd.io",
+		"ocirepositories.source.toolkit.fluxcd.io",
+		"kustomizations.kustomize.toolkit.fluxcd.io",
+		"helmreleases.helm.toolkit.fluxcd.io",
+	} {
+		logCmd("composed/"+kind, "kubectl", "get", kind, "-A", "-o", readyCols)
+	}
+	logCmd("composed/applications.argoproj.io",
+		"kubectl", "get", "applications.argoproj.io", "-A", "-o",
+		"custom-columns=NS:.metadata.namespace,NAME:.metadata.name,"+
+			"SYNC:.status.sync.status,HEALTH:.status.health.status",
+	)
+	logCmd("crossplane-events", "kubectl", "get", "events", "-n", "crossplane-system", "--sort-by=.lastTimestamp")
+	logCmd("crossplane-logs", "kubectl", "logs", "-n", "crossplane-system", "--all-containers", "--tail=100", "-l", "app=crossplane")
 }
 
 // CompareResourceField compares the value of a specific field in a Kubernetes resource

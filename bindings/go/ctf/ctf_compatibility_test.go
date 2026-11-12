@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path/filepath"
 	"testing"
 
 	"github.com/nlepage/go-tarfs"
@@ -172,7 +171,7 @@ func Test_CTF_Advanced_ReadOnly_Compatibility(t *testing.T) {
 			})
 			r.NoError(err)
 
-			r.Equal(as.Format(), ctf.ArtifactSetFormatLegacyOCI)
+			r.Equal(ctf.ArtifactSetFormatLegacyOCI, as.Format())
 
 			blobs, err = as.ListBlobs(ctx)
 			r.NoError(err)
@@ -220,7 +219,7 @@ func Test_CTF_Advanced_ReadOnly_Compatibility(t *testing.T) {
 				)
 
 				dirfs := ociLayoutFs.(fs.ReadDirFS)
-				entries, err := dirfs.ReadDir(filepath.Join("blobs", "sha256"))
+				entries, err := dirfs.ReadDir("blobs/sha256")
 				r.NoError(err)
 				r.Len(entries, 3)
 			})

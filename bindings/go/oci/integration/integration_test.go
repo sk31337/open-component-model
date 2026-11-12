@@ -23,18 +23,19 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ociImageSpecV1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/oras-project/oras-go/v3/content"
+	orasoci "github.com/oras-project/oras-go/v3/content/oci"
+	"github.com/oras-project/oras-go/v3/errdef"
+	orasregistry "github.com/oras-project/oras-go/v3/registry"
+	"github.com/oras-project/oras-go/v3/registry/remote/auth"
+	orascreds "github.com/oras-project/oras-go/v3/registry/remote/credentials"
+	"github.com/oras-project/oras-go/v3/registry/remote/retry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/log"
 	"github.com/testcontainers/testcontainers-go/modules/registry"
 	"golang.org/x/crypto/bcrypt"
-	"oras.land/oras-go/v2/content"
-	orasoci "oras.land/oras-go/v2/content/oci"
-	"oras.land/oras-go/v2/errdef"
-	orasregistry "oras.land/oras-go/v2/registry"
-	"oras.land/oras-go/v2/registry/remote/auth"
-	"oras.land/oras-go/v2/registry/remote/retry"
 
 	"ocm.software/open-component-model/bindings/go/blob"
 	"ocm.software/open-component-model/bindings/go/blob/filesystem"
@@ -47,6 +48,7 @@ import (
 	"ocm.software/open-component-model/bindings/go/ctf"
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
 	v2 "ocm.software/open-component-model/bindings/go/descriptor/v2"
+	httpv1alpha1 "ocm.software/open-component-model/bindings/go/http/spec/config/v1alpha1"
 	"ocm.software/open-component-model/bindings/go/oci"
 	ocictf "ocm.software/open-component-model/bindings/go/oci/ctf"
 	"ocm.software/open-component-model/bindings/go/oci/looseref"
@@ -146,8 +148,14 @@ func Test_Integration_OCIRepository_BackwardsCompatibility(t *testing.T) {
 		r.NoError(blob.Copy(cliFile, cliDataBlob))
 		r.NoError(cliFile.Close())
 
-		out, err := exec.CommandContext(t.Context(), cliPath, "version").CombinedOutput()
-		r.NoError(err)
+		// The released CLI reads ~/.ocmconfig and errors if it holds a config type
+		// newer than that release. Pin a throwaway empty config so the test does not
+		// depend on the developer's environment.
+		emptyConfig := filepath.Join(t.TempDir(), "empty.ocmconfig")
+		r.NoError(os.WriteFile(emptyConfig, []byte("type: generic.config.ocm.software/v1\n"), 0o600))
+
+		out, err := exec.CommandContext(t.Context(), cliPath, "--config", emptyConfig, "version").CombinedOutput()
+		r.NoError(err, "ocm version failed: %s", out)
 		r.Contains(string(out), version)
 	})
 }
@@ -317,7 +325,7 @@ func Test_Integration_OCIRepository(t *testing.T) {
 		r.NoError(err)
 
 		t.Run("basic connectivity and resolution failure", func(t *testing.T) {
-			repoProvider := provider.NewComponentVersionRepositoryProvider()
+			repoProvider := provider.NewComponentVersionRepositoryProvider(provider.WithHTTPConfig(plainHTTPConfig()))
 			repoSpec := &ocirepospecv1.Repository{BaseUrl: registryAddress}
 			id, err := repoProvider.GetComponentVersionRepositoryCredentialConsumerIdentity(t.Context(), repoSpec)
 			r.NoError(err)
@@ -488,7 +496,7 @@ func Test_Integration_Transformers(t *testing.T) {
 		}
 
 		t.Run("get oci artifact", func(t *testing.T) {
-			resourceRepo := resource.NewResourceRepository(&filesystemv1alpha1.Config{})
+			resourceRepo := resource.NewResourceRepository(&filesystemv1alpha1.Config{}, resource.WithHTTPConfig(plainHTTPConfig()))
 
 			t.Run("get oci transformation", func(t *testing.T) {
 				transformGetOCIArtifact(t, resourceRepo, testUsername, password, "ghcr.io/test:v1.0.0", reference("new-test:v1.0.0"))
@@ -496,7 +504,7 @@ func Test_Integration_Transformers(t *testing.T) {
 		})
 
 		t.Run("add oci artifact", func(t *testing.T) {
-			resourceRepo := resource.NewResourceRepository(&filesystemv1alpha1.Config{})
+			resourceRepo := resource.NewResourceRepository(&filesystemv1alpha1.Config{}, resource.WithHTTPConfig(plainHTTPConfig()))
 
 			t.Run("add oci transformation", func(t *testing.T) {
 				transformAddOCIArtifact(t, resourceRepo, testUsername, password, reference("add-test:v1.0.0"))
@@ -506,6 +514,7 @@ func Test_Integration_Transformers(t *testing.T) {
 }
 
 func uploadDownloadLocalResourceOCILayout(t *testing.T, repo *oci.Repository, component string, version string) {
+	t.Helper()
 	ctx := t.Context()
 	r := require.New(t)
 
@@ -566,7 +575,7 @@ func uploadDownloadLocalResourceOCILayout(t *testing.T, repo *oci.Repository, co
 	err = repo.AddComponentVersion(ctx, cd)
 	r.NoError(err)
 
-	downloaded, newRes, err := repo.GetLocalResource(ctx, component, version, resource.ElementMeta.ToIdentity())
+	downloaded, _, err := repo.GetLocalResource(ctx, component, version, resource.ToIdentity())
 	r.NoError(err)
 	r.NotNil(downloaded)
 
@@ -580,6 +589,7 @@ func uploadDownloadLocalResourceOCILayout(t *testing.T, repo *oci.Repository, co
 }
 
 func uploadDownloadBarebonesOCIImage(t *testing.T, repo *oci.Repository, from, to string) {
+	t.Helper()
 	ctx := t.Context()
 	r := require.New(t)
 
@@ -656,6 +666,7 @@ func uploadDownloadBarebonesOCIImage(t *testing.T, repo *oci.Repository, from, t
 }
 
 func processResourceDigest(t *testing.T, repo *oci.Repository, from, to string) {
+	t.Helper()
 	ctx := t.Context()
 	r := require.New(t)
 
@@ -695,14 +706,15 @@ func processResourceDigest(t *testing.T, repo *oci.Repository, from, to string) 
 
 	r.Contains(resource.Access.(*v1.OCIImage).ImageReference, "test:v1.0.0@sha256:0aa67467eee1b66c5e549e6b67226e226778f689ccdb46c39fe706b6428c98a5")
 
-	r.Equal(resource.Digest.Value, "0aa67467eee1b66c5e549e6b67226e226778f689ccdb46c39fe706b6428c98a5")
-	r.Equal(resource.Digest.HashAlgorithm, "SHA-256")
-	r.Equal(resource.Digest.NormalisationAlgorithm, "genericBlobDigest/v1")
+	r.Equal("0aa67467eee1b66c5e549e6b67226e226778f689ccdb46c39fe706b6428c98a5", resource.Digest.Value)
+	r.Equal("SHA-256", resource.Digest.HashAlgorithm)
+	r.Equal("ociArtifactDigest/v1", resource.Digest.NormalisationAlgorithm)
 
 	r.NotNil(resource.Digest)
 }
 
 func uploadDownloadBarebonesComponentVersion(t *testing.T, repo repository.ComponentVersionRepository, name, version string) {
+	t.Helper()
 	ctx := t.Context()
 	r := require.New(t)
 
@@ -728,6 +740,7 @@ func uploadDownloadBarebonesComponentVersion(t *testing.T, repo repository.Compo
 }
 
 func testResolverConnectivity(t *testing.T, address, reference string, client *auth.Client) {
+	t.Helper()
 	ctx := t.Context()
 	r := require.New(t)
 
@@ -746,6 +759,13 @@ func testResolverConnectivity(t *testing.T, address, reference string, client *a
 	r.ErrorContains(err, fmt.Sprintf("%s: not found", reference))
 }
 
+// plainHTTPConfig returns an HTTP client configuration that turns plain HTTP
+// on for every host. The test registries have no TLS, and only this
+// configuration (not an http:// prefix on a reference) decides that.
+func plainHTTPConfig() *httpv1alpha1.Config {
+	return &httpv1alpha1.Config{ProtocolConfig: httpv1alpha1.ProtocolConfig{PlainHTTP: new(true)}}
+}
+
 func createAuthClient(address, username, password string) *auth.Client {
 	url, err := ocmruntime.ParseURLAndAllowNoScheme(address)
 	if err != nil {
@@ -756,7 +776,7 @@ func createAuthClient(address, username, password string) *auth.Client {
 		Header: http.Header{
 			"User-Agent": []string{userAgent},
 		},
-		Credential: auth.StaticCredential(url.Host, auth.Credential{
+		CredentialFunc: orascreds.StaticCredentialFunc(url.Host, orascreds.Credential{
 			Username: username,
 			Password: password,
 		}),
@@ -782,6 +802,7 @@ func generateRandomPassword(t *testing.T, length int) string {
 }
 
 func createSingleLayerOCIImage(t *testing.T, data []byte, ref ...string) ([]byte, *v1.OCIImage) {
+	t.Helper()
 	r := require.New(t)
 	var buf bytes.Buffer
 	w, err := tar.NewOCILayoutWriterWithTempFile(&buf, t.TempDir())
@@ -839,6 +860,7 @@ func createSingleLayerOCIImage(t *testing.T, data []byte, ref ...string) ([]byte
 }
 
 func uploadDownloadLocalResource(t *testing.T, repo repository.ComponentVersionRepository, name, version string) {
+	t.Helper()
 	ctx := t.Context()
 	r := require.New(t)
 
@@ -904,7 +926,7 @@ func uploadDownloadLocalResource(t *testing.T, repo repository.ComponentVersionR
 	r.NoError(err)
 
 	// Get local resource
-	downloadedBlob, resFromGet, err := repo.GetLocalResource(ctx, name, version, resource.ElementMeta.ToIdentity())
+	downloadedBlob, resFromGet, err := repo.GetLocalResource(ctx, name, version, resource.ToIdentity())
 	r.NoError(err)
 	r.Equal(resFromGet.ElementMeta, newRes.ElementMeta)
 
@@ -915,6 +937,7 @@ func uploadDownloadLocalResource(t *testing.T, repo repository.ComponentVersionR
 }
 
 func uploadDownloadLocalSource(t *testing.T, repo repository.ComponentVersionRepository, name, version string) {
+	t.Helper()
 	ctx := t.Context()
 	r := require.New(t)
 
@@ -979,7 +1002,7 @@ func uploadDownloadLocalSource(t *testing.T, repo repository.ComponentVersionRep
 	r.NoError(err)
 
 	// Get local source
-	downloadedBlob, srcFromGet, err := repo.GetLocalSource(ctx, name, version, source.ElementMeta.ToIdentity())
+	downloadedBlob, srcFromGet, err := repo.GetLocalSource(ctx, name, version, source.ToIdentity())
 	r.NoError(err)
 	r.Equal(srcFromGet.ElementMeta, newSrc.ElementMeta)
 
@@ -1013,6 +1036,7 @@ func getUserAndPasswordWithGitHubCLIAndJQ(t *testing.T) (string, string) {
 }
 
 func getUsername(t *testing.T, gh string) (string, error) {
+	t.Helper()
 	if githubUser := os.Getenv("GITHUB_USER"); githubUser != "" {
 		return githubUser, nil
 	}
@@ -1032,6 +1056,7 @@ func getUsername(t *testing.T, gh string) (string, error) {
 }
 
 func transformGetOCIArtifact(t *testing.T, repo repository.ResourceRepository, username, password, from, to string) {
+	t.Helper()
 	ctx := t.Context()
 	r := require.New(t)
 
@@ -1123,10 +1148,11 @@ func transformGetOCIArtifact(t *testing.T, repo repository.ResourceRepository, u
 
 	require.NotNil(t, ociOutput.Output.File)
 	require.NotNil(t, ociOutput.Output.File.URI)
-	require.Equal(t, ociOutput.Output.File.MediaType, "application/vnd.ocm.software.oci.layout.v1+tar+gzip")
+	require.Equal(t, "application/vnd.ocm.software.oci.layout.v1+tar+gzip", ociOutput.Output.File.MediaType)
 }
 
 func transformAddOCIArtifact(t *testing.T, repo repository.ResourceRepository, username, password, to string) {
+	t.Helper()
 	ctx := t.Context()
 	r := require.New(t)
 
@@ -1515,7 +1541,7 @@ func Test_Integration_OCIRepository_ReferrerChainTransfer(t *testing.T) {
 	require.NoError(t, err)
 	srcRef, err := looseref.ParseReference(srcImageRef)
 	require.NoError(t, err)
-	baseDesc, err := srcStore.Resolve(ctx, srcRef.ReferenceOrTag())
+	baseDesc, err := srcStore.Resolve(ctx, srcRef.GetReference())
 	require.NoError(t, err)
 
 	chain := make([]ociImageSpecV1.Descriptor, 0, chainDepth)
@@ -1536,7 +1562,7 @@ func Test_Integration_OCIRepository_ReferrerChainTransfer(t *testing.T) {
 	require.Truef(t, ok, "dst store %T must implement content.ReadOnlyGraphStorage", dstStore)
 	dstRef, err := looseref.ParseReference(transferred)
 	require.NoError(t, err)
-	dstBase, err := dstStore.Resolve(ctx, dstRef.ReferenceOrTag())
+	dstBase, err := dstStore.Resolve(ctx, dstRef.GetReference())
 	require.NoError(t, err)
 	require.Equal(t, baseDesc.Digest, dstBase.Digest, "transferred base must keep its digest")
 
@@ -1685,7 +1711,7 @@ func addByValueOwnedResource(t *testing.T, ctx context.Context, resolver oci.Res
 	ref, err := looseref.ParseReference(resolver.ComponentVersionReference(ctx, component, version))
 	r.NoError(err)
 	ref.Tag = ""
-	ref.Reference.Reference = res.Access.(*v2.LocalBlob).LocalReference
+	ref.Digest = res.Access.(*v2.LocalBlob).LocalReference
 	return res, ref.String()
 }
 
@@ -1731,7 +1757,7 @@ func listOwnershipReferrers(t *testing.T, ctx context.Context, resolver oci.Reso
 	r.Truef(ok, "store %T must implement content.ReadOnlyGraphStorage for referrers discovery", store)
 	ref, err := looseref.ParseReference(reference)
 	r.NoError(err)
-	subject, err := store.Resolve(ctx, ref.ReferenceOrTag())
+	subject, err := store.Resolve(ctx, ref.GetReference())
 	r.NoError(err)
 	refs, err := orasregistry.Referrers(ctx, graphStore, subject, annotations.OwnershipArtifactType)
 	r.NoError(err)
@@ -1800,7 +1826,7 @@ func assertOwnershipReferrerAnnotations(t *testing.T, ctx context.Context, resol
 	r.NoError(err)
 	sref, err := looseref.ParseReference(subjectRef)
 	r.NoError(err)
-	subject, err := store.Resolve(ctx, sref.ReferenceOrTag())
+	subject, err := store.Resolve(ctx, sref.GetReference())
 	r.NoError(err)
 
 	rc, err := store.Fetch(ctx, ref)
@@ -1811,4 +1837,209 @@ func assertOwnershipReferrerAnnotations(t *testing.T, ctx context.Context, resol
 	r.NotNil(manifest.Subject, "ownership referrer manifest must carry a subject")
 	assert.Equal(t, subject.Digest, manifest.Subject.Digest,
 		"referrer subject digest must match the resolved subject manifest digest")
+}
+
+func Test_Integration_OCIImageLayer(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	password := generateRandomPassword(t, passwordLength)
+	htpasswd := generateHtpasswd(t, testUsername, password)
+
+	t.Logf("Launching test registry (%s)...", distributionRegistryImage)
+	registryContainer, err := registry.Run(ctx, distributionRegistryImage,
+		registry.WithHtpasswd(htpasswd),
+		testcontainers.WithEnv(map[string]string{
+			"REGISTRY_VALIDATION_DISABLED": "true",
+			"REGISTRY_LOG_LEVEL":           "debug",
+		}),
+		testcontainers.WithLogger(log.TestLogger(t)),
+	)
+	r := require.New(t)
+	r.NoError(err)
+	t.Cleanup(func() {
+		r.NoError(testcontainers.TerminateContainer(registryContainer))
+	})
+
+	registryAddress, err := registryContainer.HostAddress(ctx)
+	r.NoError(err)
+
+	client := createAuthClient(registryAddress, testUsername, password)
+	resolver, err := urlresolver.New(
+		urlresolver.WithBaseURL(registryAddress),
+		urlresolver.WithPlainHTTP(true),
+		urlresolver.WithBaseClient(client),
+	)
+	r.NoError(err)
+
+	repo, err := oci.NewRepository(oci.WithResolver(resolver), oci.WithTempDir(t.TempDir()))
+	r.NoError(err)
+
+	// Push a single layer image so the blob genuinely exists, then address it
+	// directly with an OCIImageLayer access, bypassing the manifest.
+	layerData := []byte("layer content addressed directly by an OCIImageLayer access")
+	layerDigest := digest.FromBytes(layerData)
+	imageReference := fmt.Sprintf("%s/layer-test:v1.0.0", registryAddress)
+
+	layoutData, _ := createSingleLayerOCIImage(t, layerData, "ghcr.io/test:v1.0.0")
+	_, err = repo.UploadResource(ctx, &descriptor.Resource{
+		ElementMeta: descriptor.ElementMeta{
+			ObjectMeta: descriptor.ObjectMeta{Name: "carrier", Version: "v1.0.0"},
+		},
+		Type:   "some-arbitrary-type-packed-in-image",
+		Access: &v1.OCIImage{ImageReference: imageReference},
+	}, inmemory.New(bytes.NewReader(layoutData)))
+	r.NoError(err)
+
+	// The plugin path derives the registry from the access, so the reference needs the
+	// scheme to say plain HTTP. The direct repository already has such a resolver.
+	layerReference := fmt.Sprintf("%s/layer-test@%s", registryAddress, layerDigest)
+	schemedLayerReference := fmt.Sprintf("http://%s", layerReference)
+
+	layerAccess := func(reference string) *v1.OCIImageLayer {
+		return &v1.OCIImageLayer{
+			Type:      ocmruntime.NewVersionedType(v1.OCIImageLayerType, v1.Version),
+			Reference: reference,
+			MediaType: ociImageSpecV1.MediaTypeImageLayer,
+			Digest:    layerDigest,
+			Size:      int64(len(layerData)),
+		}
+	}
+	layerResource := func(access ocmruntime.Typed) *descriptor.Resource {
+		return &descriptor.Resource{
+			ElementMeta: descriptor.ElementMeta{
+				ObjectMeta: descriptor.ObjectMeta{Name: "test-layer-resource", Version: "v1.0.0"},
+			},
+			Type:         "helmChart",
+			Access:       access,
+			CreationTime: descriptor.CreationTime(time.Now()),
+		}
+	}
+
+	url, err := ocmruntime.ParseURLAndAllowNoScheme(layerReference)
+	r.NoError(err)
+	expectedIdentity := ocmruntime.Identity{
+		"scheme":   "http",
+		"hostname": url.Hostname(),
+		"port":     url.Port(),
+		"type":     "OCIRegistry",
+	}
+	creds := &credconfigv1.DirectCredentials{
+		Type: ocmruntime.NewVersionedType(credconfigv1.DirectCredentialsType, credconfigv1.Version),
+		Properties: map[string]string{
+			"username": testUsername,
+			"password": password,
+		},
+	}
+
+	t.Run("direct repository processes the layer digest", func(t *testing.T) {
+		r := require.New(t)
+
+		res := layerResource(layerAccess(layerReference))
+		newRes, err := repo.ProcessResourceDigest(ctx, res)
+		r.NoError(err)
+
+		r.NotNil(newRes.Digest, "digest must be taken from the layer access")
+		r.Equal(layerDigest.Encoded(), newRes.Digest.Value)
+		r.Equal("SHA-256", newRes.Digest.HashAlgorithm)
+		r.Equal("genericBlobDigest/v1", newRes.Digest.NormalisationAlgorithm)
+	})
+
+	t.Run("direct repository downloads the raw layer", func(t *testing.T) {
+		r := require.New(t)
+
+		downloaded, err := repo.DownloadResource(ctx, layerResource(layerAccess(layerReference)))
+		r.NoError(err)
+
+		reader, err := downloaded.ReadCloser()
+		r.NoError(err)
+		t.Cleanup(func() { r.NoError(reader.Close()) })
+
+		got, err := io.ReadAll(reader)
+		r.NoError(err)
+		// Not an OCI layout tar: a layer has no manifest a layout could point at.
+		r.Equal(layerData, got)
+	})
+
+	t.Run("resource plugin resolves the credential consumer identity", func(t *testing.T) {
+		r := require.New(t)
+		resourceRepo := resource.NewResourceRepository(&filesystemv1alpha1.Config{})
+
+		// This returned an error before the fix, which the constructor swallows and then
+		// proceeds without credentials, so a private registry failed as an opaque auth error.
+		identity, err := resourceRepo.GetResourceDigestProcessorCredentialConsumerIdentity(
+			ctx, layerResource(layerAccess(schemedLayerReference)))
+		r.NoError(err)
+		r.Equal(expectedIdentity, identity)
+
+		identity, err = resourceRepo.GetResourceCredentialConsumerIdentity(
+			ctx, layerResource(layerAccess(schemedLayerReference)))
+		r.NoError(err)
+		r.Equal(expectedIdentity, identity)
+	})
+
+	t.Run("resource plugin processes and downloads with credentials", func(t *testing.T) {
+		r := require.New(t)
+		resourceRepo := resource.NewResourceRepository(&filesystemv1alpha1.Config{}, resource.WithHTTPConfig(plainHTTPConfig()))
+
+		// The path `ocm add cv` takes, where issue #2873 surfaced.
+		newRes, err := resourceRepo.ProcessResourceDigest(
+			ctx, layerResource(layerAccess(schemedLayerReference)), creds)
+		r.NoError(err)
+		r.NotNil(newRes.Digest)
+		r.Equal(layerDigest.Encoded(), newRes.Digest.Value)
+
+		downloaded, err := resourceRepo.DownloadResource(
+			ctx, layerResource(layerAccess(schemedLayerReference)), creds)
+		r.NoError(err)
+
+		reader, err := downloaded.ReadCloser()
+		r.NoError(err)
+		t.Cleanup(func() { r.NoError(reader.Close()) })
+
+		got, err := io.ReadAll(reader)
+		r.NoError(err)
+		r.Equal(layerData, got)
+	})
+
+	t.Run("legacy ociBlob access type is routed the same way", func(t *testing.T) {
+		r := require.New(t)
+		resourceRepo := resource.NewResourceRepository(&filesystemv1alpha1.Config{}, resource.WithHTTPConfig(plainHTTPConfig()))
+
+		// ociBlob/v1 is the name the old CLI wrote, an alias of OCIImageLayer.
+		// Deserialize through the scheme so the alias is what gets routed.
+		legacy := layerAccess(schemedLayerReference)
+		legacy.Type = ocmruntime.NewVersionedType(v1.LegacyOCIBlobAccessType, v1.LegacyOCIBlobAccessTypeVersion)
+		raw := &ocmruntime.Raw{}
+		r.NoError(ocmoci.Scheme.Convert(legacy, raw))
+		r.Contains(string(raw.Data), `"type":"ociBlob/v1"`)
+
+		newRes, err := resourceRepo.ProcessResourceDigest(ctx, layerResource(raw), creds)
+		r.NoError(err)
+		r.NotNil(newRes.Digest)
+		r.Equal(layerDigest.Encoded(), newRes.Digest.Value)
+	})
+
+	t.Run("layer absent from the registry is reported", func(t *testing.T) {
+		r := require.New(t)
+
+		absent := digest.FromString("never pushed")
+		access := layerAccess(fmt.Sprintf("%s/layer-test@%s", registryAddress, absent))
+		access.Digest = absent
+		access.Size = int64(len("never pushed"))
+
+		_, err := repo.ProcessResourceDigest(ctx, layerResource(access))
+		r.ErrorContains(err, "does not exist")
+	})
+
+	t.Run("layer is rejected as an upload target", func(t *testing.T) {
+		r := require.New(t)
+		resourceRepo := resource.NewResourceRepository(&filesystemv1alpha1.Config{})
+
+		// A layer names one existing blob, so it cannot describe where to push to.
+		_, err := resourceRepo.UploadResource(
+			ctx, layerResource(layerAccess(schemedLayerReference)),
+			inmemory.New(bytes.NewReader(layerData)), creds)
+		r.ErrorContains(err, "as upload target")
+	})
 }

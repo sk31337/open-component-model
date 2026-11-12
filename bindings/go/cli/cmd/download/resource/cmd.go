@@ -54,9 +54,15 @@ It supports optional transformation of the resource using a registered transform
 
 If no transformer is specified, the resource is written directly in its original format.
 
-Resources can be accessed either locally or via a plugin that supports remote fetching, with optional credential resolution.
+Every access type with a built-in resource repository works natively without any plugin,
+with optional credential resolution. Plugins extend OCM with support for additional, custom access types.
 
 When --output is not provided, the output filename is the resource name.
+
+A reference can pin the component version with a digest: "{component}[:{version}]@sha256:<hex>" (OCI digest
+of the artifact the component version is stored as, which local resources are then read from) or
+"{component}:{version}@jsonNormalisation.v4alpha3+sha256:<hex>" (normalized: the digest signatures sign).
+See "ocm get cv --help" for when to use which. The resource content is then verified against its digest in the pinned descriptor.
 
 With --sbom, the Software Bills of Materials describing the resource are downloaded instead of the
 resource itself. This is EXPERIMENTAL: what is discovered, how it is written out and the flags
@@ -72,23 +78,23 @@ Every SBOM found is written to its own file in a directory, byte for byte as pub
 and signatures over them still apply. The directory is --output, or the values of the resource
 identity joined by "-" when that is not given, so --identity name=image,architecture=amd64 writes
 into "image-amd64". The paths written are printed to standard output, one per line.`,
-		Example: ` # Download a resource with identity 'name=example' and write to default output
-  ocm download resource ghcr.io/org/component:v1 --identity name=example
+		Example: ` # Download a resource with identity 'name=image' and write to default output
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image
 
-  # Download a resource with identity 'name=example' and 'architecture=amd64' and write to default output
-  ocm download resource ghcr.io/org/component:v1 --identity name=example,architecture=amd64
+  # Download a resource with identity 'name=cli', 'architecture=amd64' and 'os=windows' and write to default output
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=cli,architecture=amd64,os=windows
 
   # Download a resource and specify an output file
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --output ./my-resource.tar.gz
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --output ./ocmcli-image-0.17.0/
 
   # Download a resource and apply a transformer
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --transformer my-transformer
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --transformer my-transformer
 
   # Download every SBOM describing a resource into a directory
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --sbom --output ./sboms
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --sbom --output ./sboms
 
   # Scan every SBOM found for a resource
-  ocm download resource ghcr.io/org/component:v1 --identity name=example --sbom | xargs -n1 grype sbom:`,
+  ocm download resource ghcr.io/open-component-model//ocm.software/cli:0.17.0 --identity name=image --sbom | xargs -n1 grype sbom:`,
 		RunE:              DownloadResource,
 		DisableAutoGenTag: true,
 	}
@@ -164,7 +170,7 @@ func DownloadResource(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("could not access ocm repository: %w", err)
 	}
 
-	desc, err := repo.GetComponentVersion(cmd.Context(), ref.Component, ref.Version)
+	repo, desc, err := ocm.GetPinnedComponentVersion(cmd.Context(), repo, ref)
 	if err != nil {
 		return fmt.Errorf("getting component version failed: %w", err)
 	}
@@ -189,7 +195,6 @@ func DownloadResource(cmd *cobra.Command, args []string) error {
 			pluginManager:   pluginManager,
 			credentialGraph: credentialGraph,
 			logger:          logger,
-			ref:             ref,
 			repo:            repo,
 			descriptor:      desc,
 			resource:        res,
@@ -198,7 +203,7 @@ func DownloadResource(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	data, err := shared.DownloadResourceData(cmd.Context(), pluginManager, credentialGraph, ref.Component, ref.Version, repo, res, requestedIdentity)
+	data, err := shared.DownloadResourceData(cmd.Context(), pluginManager, credentialGraph, desc, repo, res)
 	if err != nil {
 		return fmt.Errorf("downloading resource for identity %q failed: %w", requestedIdentity, err)
 	}
@@ -240,13 +245,14 @@ func DownloadResource(cmd *cobra.Command, args []string) error {
 		}
 
 		// try extracting FS
-		extractedFS, err := extractFSFromBlob(decompressedOrOriginal)
+		extractedFS, closeFS, err := extractFSFromBlob(decompressedOrOriginal)
 		if err != nil && !errors.Is(err, ErrCannotExtractFS) {
 			return fmt.Errorf("extracting resource as filesystem failed: %w", err)
 		}
 
 		if extractedFS != nil {
-			return os.CopyFS(finalOutputPath, extractedFS)
+			// tarfs reads entries lazily via io.ReaderAt, so the source must stay open until the copy is done.
+			return errors.Join(os.CopyFS(finalOutputPath, extractedFS), closeFS())
 		}
 
 		// if we cannot extract a fs, since it's not supported, return the decompressed blob
@@ -260,35 +266,36 @@ func DownloadResource(cmd *cobra.Command, args []string) error {
 
 var ErrCannotExtractFS = errors.New("cannot extract resource as filesystem")
 
-func extractFSFromBlob(b blob.ReadOnlyBlob) (_ fs.FS, err error) {
+// extractFSFromBlob returns a filesystem view of b and a function closing the underlying reader,
+// which must only be called once the filesystem is no longer used.
+func extractFSFromBlob(b blob.ReadOnlyBlob) (fs.FS, func() error, error) {
 	mediaTypeAware, ok := b.(blob.MediaTypeAware)
 	if !ok {
 		// if were not media type aware, it's unsafe to try to extract it, avoid
-		return nil, fmt.Errorf("blob is not media type aware: %w", ErrCannotExtractFS)
+		return nil, nil, fmt.Errorf("blob is not media type aware: %w", ErrCannotExtractFS)
 	}
 
 	mediaType, ok := mediaTypeAware.MediaType()
 	if !ok {
-		return nil, ErrCannotExtractFS
+		return nil, nil, ErrCannotExtractFS
 	}
 
 	// TODO(jakobmoellerdev): once we add more compression algorithms, use blob media type for discovery.
 	//  For now we just support tar.
-	switch {
-	case isTar(mediaType):
-		data, err := b.ReadCloser()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read resource: %w", err)
-		}
-		defer func() {
-			err = errors.Join(err, data.Close())
-		}()
-
-		f, err := tarfs.New(data)
-		return f, err
-	default:
-		return nil, ErrCannotExtractFS
+	if !isTar(mediaType) {
+		return nil, nil, ErrCannotExtractFS
 	}
+
+	data, err := b.ReadCloser()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read resource: %w", err)
+	}
+
+	f, err := tarfs.New(data)
+	if err != nil {
+		return nil, nil, errors.Join(err, data.Close())
+	}
+	return f, data.Close, nil
 }
 
 func isTar(mediaType string) bool {

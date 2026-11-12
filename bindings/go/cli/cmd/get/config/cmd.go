@@ -16,9 +16,11 @@ import (
 	genericv1 "ocm.software/open-component-model/bindings/go/configuration/generic/v1/spec"
 	ocmv1 "ocm.software/open-component-model/bindings/go/configuration/ocm/v1/spec"
 	resolversv1alpha1 "ocm.software/open-component-model/bindings/go/configuration/resolvers/v1alpha1/spec"
+	versioningv1alpha1 "ocm.software/open-component-model/bindings/go/configuration/versioning/v1alpha1/spec"
 	credentialsruntime "ocm.software/open-component-model/bindings/go/credentials/spec/config/runtime"
 	credentialsv1 "ocm.software/open-component-model/bindings/go/credentials/spec/config/v1"
 	httpv1alpha1 "ocm.software/open-component-model/bindings/go/http/spec/config/v1alpha1"
+	ocicachev1alpha1 "ocm.software/open-component-model/bindings/go/oci/spec/config/cache/v1alpha1"
 	"ocm.software/open-component-model/bindings/go/runtime"
 	transferv1alpha1 "ocm.software/open-component-model/bindings/go/transfer/v1alpha1/spec"
 )
@@ -41,7 +43,23 @@ configuration files and display the merged effective configuration as a single o
   ocm get config --output json
 
   # Display effective config from a specific config file
-  ocm get config --config ./my-ocm-config.yaml`,
+  ocm get config --config ./my-ocm-config.yaml
+
+  # Read config from stdin, on top of a config file
+  ocm get config --config ./my-ocm-config.yaml --config - <<EOF
+  type: generic.config.ocm.software/v1
+  configurations:
+  - type: credentials.config.ocm.software
+    consumers:
+    - identity:
+        type: OCIRegistry
+        hostname: ghcr.io
+      credentials:
+      - type: Credentials/v1
+        properties:
+          username: my-user
+          password: my-token
+  EOF`,
 		RunE:              GetConfig,
 		DisableAutoGenTag: true,
 	}
@@ -122,6 +140,12 @@ func getEffectiveConfig(cfg *genericv1.Config) (*effectiveConfig, error) {
 		result.Configurations = append(result.Configurations, httpCfg)
 	}
 
+	if ociCacheCfg, err := ocicachev1alpha1.LookupConfig(cfg); err != nil {
+		return nil, fmt.Errorf("config lookup failed for oci cache: %w", err)
+	} else if ociCacheCfg != nil {
+		result.Configurations = append(result.Configurations, ociCacheCfg)
+	}
+
 	//nolint:staticcheck // displaying deprecated config for user visibility
 	if ocmCfg, err := ocmv1.Lookup(cfg); err != nil {
 		return nil, fmt.Errorf("config lookup failed for ocm: %w", err)
@@ -139,6 +163,12 @@ func getEffectiveConfig(cfg *genericv1.Config) (*effectiveConfig, error) {
 		return nil, fmt.Errorf("config lookup failed for transfer: %w", err)
 	} else if transferCfg != nil {
 		result.Configurations = append(result.Configurations, transferCfg)
+	}
+
+	if versioningCfg, err := versioningv1alpha1.Lookup(cfg); err != nil {
+		return nil, fmt.Errorf("config lookup failed for versioning: %w", err)
+	} else if versioningCfg != nil && len(versioningCfg.Schemes) > 0 {
+		result.Configurations = append(result.Configurations, versioningCfg)
 	}
 
 	if pluginsCfg, err := pluginsv2alpha1.LookupConfig(cfg); err != nil {

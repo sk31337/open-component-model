@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/google/cel-go/cel"
+	"cel.dev/cel-go/cel"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	descriptor "ocm.software/open-component-model/bindings/go/descriptor/runtime"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/api/v1alpha1"
 	ocmcel "ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/cel"
-	celconv "ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/controller/resource/conversion"
+	celconv "ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/cel/conversion"
 	"ocm.software/open-component-model/bindings/go/runtime"
 )
 

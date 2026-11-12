@@ -116,7 +116,7 @@ func TestAddOCIArtifact_Transform(t *testing.T) {
 					Name:    blobv1alpha1.FileType,
 					Version: blobv1alpha1.Version,
 				},
-				URI:       "file://" + testFile,
+				URI:       fileURI(t, testFile),
 				MediaType: "application/vnd.oci.image.layer.v1.tar+gzip",
 			},
 		},
@@ -212,7 +212,7 @@ func TestAddOCIArtifact_ValidationErrors(t *testing.T) {
 			}
 
 			result, err := transformer.Transform(ctx, spec)
-			assert.Error(t, err)
+			require.Error(t, err)
 			assert.Nil(t, result)
 			assert.Contains(t, err.Error(), tt.expectedErr)
 		})

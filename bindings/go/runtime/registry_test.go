@@ -38,24 +38,24 @@ func TestRegistry_Decode_With_Type_Mismatch_Defaulting_On_Raw(t *testing.T) {
 
 	parsed := &TestType{}
 	r.NoError(registry.Convert(raw, parsed))
-	r.Equal(parsed.Value, "foo")
+	r.Equal("foo", parsed.Value)
 
 	r.NoError(registry.Convert(&TestType{Type: typ, Value: "bar"}, parsed))
-	r.Equal(parsed.Value, "bar")
+	r.Equal("bar", parsed.Value)
 
 	parsed2, err := registry.NewObject(typ)
 	r.NoError(err)
 
 	r.NoError(registry.Clone().Convert(raw, parsed2))
 	r.IsType(&TestType{}, parsed2)
-	r.Equal(parsed2.(*TestType).Value, "foo")
+	r.Equal("foo", parsed2.(*TestType).Value)
 
 	parsed3, err := registry.Clone().NewObject(typ)
 	// forcefully empty the type, because new object defaults to the correct type
 	r.NoError(err)
 	parsed3.SetType(NewUnversionedType(""))
 	r.NoError(registry.Decode(bytes.NewReader(raw.Data), parsed3))
-	r.Equal(parsed3.(*TestType).Value, "foo")
+	r.Equal("foo", parsed3.(*TestType).Value)
 
 	unknown := NewScheme()
 	_, err = unknown.NewObject(typ)
@@ -71,7 +71,7 @@ func TestRegistry_Decode_With_Type_Mismatch_Defaulting_On_Raw(t *testing.T) {
 	r.NoError(unknown.Decode(bytes.NewReader(raw.Data), parsed4))
 	r.IsType(&Raw{}, parsed4)
 	// Version is not set because it is not part of the raw data
-	r.Equal(parsed4.(*Raw).Type.String(), "test.type")
+	r.Equal("test.type", parsed4.(*Raw).Type.String())
 }
 
 func TestRegistry_Convert_WithAllowUnknown(t *testing.T) {
@@ -83,7 +83,7 @@ func TestRegistry_Convert_WithAllowUnknown(t *testing.T) {
 	// Test Raw → Typed conversion
 	parsed := &TestType{}
 	r.NoError(registry.Convert(raw, parsed))
-	r.Equal(parsed.Value, "foo")
+	r.Equal("foo", parsed.Value)
 	r.Equal(parsed.Type, typ)
 
 	// Test Typed → Raw conversion
@@ -122,7 +122,7 @@ func TestRegistry_Decode_UnknownType(t *testing.T) {
 	typed := &TestType{}
 	r.NoError(registry.Decode(bytes.NewReader(raw.Data), typed))
 	r.Equal(typed.Type, typ)
-	r.Equal(typed.Value, "foo")
+	r.Equal("foo", typed.Value)
 }
 
 func TestRegistry_Decode_UnknownType_WithoutAllowUnknown(t *testing.T) {
@@ -427,8 +427,8 @@ func TestRegistry_RegisterScheme(t *testing.T) {
 		err := targetScheme.RegisterScheme(nil)
 		r.NoError(err)
 		// Registering nil scheme should not change the target scheme
-		r.Equal(targetScheme.defaults.Len(), 0)
-		r.Len(targetScheme.aliases, 0)
+		r.Equal(0, targetScheme.defaults.Len())
+		r.Empty(targetScheme.aliases)
 	})
 
 	t.Run("duplicate registration", func(t *testing.T) {
@@ -707,4 +707,74 @@ func TestRegistry_RegisterSchemes(t *testing.T) {
 		r.True(registry.IsRegistered(typ2))
 		r.False(registry.IsRegistered(typ3))
 	})
+}
+
+// TestRegistry_GetTypes_NeverListsDefaultAsItsOwnAlias pins the invariant every scheme merge
+// relies on: whatever order types and aliases arrive in, GetTypes never reports a default type
+// among its own aliases. Callers may therefore build a candidate list as default plus aliases
+// without having to deduplicate it.
+func TestRegistry_GetTypes_NeverListsDefaultAsItsOwnAlias(t *testing.T) {
+	def := NewVersionedType("test", "v1")
+	alias := NewUnversionedType("test")
+
+	for _, tc := range []struct {
+		name string
+		// duplicateDefault marks the cases that offer an already registered default a second
+		// time. They must be rejected rather than absorbed as an alias of the type itself.
+		duplicateDefault bool
+		register         func(*Scheme) error
+		expected         map[Type][]Type
+	}{
+		{
+			name: "default and alias in one call",
+			register: func(s *Scheme) error {
+				return s.RegisterWithAlias(&TestType{}, def, alias)
+			},
+			expected: map[Type][]Type{def: {alias}},
+		},
+		{
+			name: "alias added in a later call",
+			register: func(s *Scheme) error {
+				s.MustRegisterWithAlias(&TestType{}, def)
+				return s.RegisterWithAlias(&TestType{}, alias)
+			},
+			expected: map[Type][]Type{def: {alias}},
+		},
+		{
+			name:             "default registered twice",
+			duplicateDefault: true,
+			register: func(s *Scheme) error {
+				s.MustRegisterWithAlias(&TestType{}, def)
+				return s.RegisterWithAlias(&TestType{}, def)
+			},
+			expected: map[Type][]Type{def: nil},
+		},
+		{
+			name:             "default repeated within one call",
+			duplicateDefault: true,
+			register: func(s *Scheme) error {
+				return s.RegisterWithAlias(&TestType{}, def, def)
+			},
+			expected: map[Type][]Type{def: nil},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := require.New(t)
+			scheme := NewScheme()
+
+			err := tc.register(scheme)
+			if tc.duplicateDefault {
+				r.Error(err, "re-registering a default must fail loudly")
+				r.True(IsTypeAlreadyRegisteredError(err), "got %v", err)
+			} else {
+				r.NoError(err)
+			}
+
+			types := scheme.GetTypes()
+			r.Equal(tc.expected, types)
+			for typ, aliases := range types {
+				r.NotContains(aliases, typ)
+			}
+		})
+	}
 }

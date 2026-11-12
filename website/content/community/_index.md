@@ -1,6 +1,6 @@
 ---
 title: "The OCM Community"
-description: "Communication channels, community calls, and ways to engage with the Open Component Model project."
+description: "Communication channels, community calls, and ways to engage with the Open Component Model project: join the conversation and contribute."
 toc: true
 hideChildren: true
 aliases:
@@ -66,4 +66,4 @@ To make OCM a welcoming and harassment-free experience for everyone, we follow t
 
 ## Security
 
-To report security vulnerabilities, please do not use public GitHub issues. See [Reporting Security Vulnerabilities]({{< relref "contributing.md" >}}#reporting-security-vulnerabilities) for instructions.
+To report security vulnerabilities, please do not use public GitHub issues. See [Reporting Security Vulnerabilities]({{< relref "contributing.md" >}}#reporting-security-vulnerabilities) for instructions and our [Security Policy](https://github.com/open-component-model/.github/blob/main/SECURITY.md) for supported versions and the disclosure process.

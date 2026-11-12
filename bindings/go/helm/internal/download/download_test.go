@@ -11,7 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	helmrepo "helm.sh/helm/v4/pkg/repo/v1"
+
 	helmcredsv1 "ocm.software/open-component-model/bindings/go/helm/spec/credentials/v1"
+	httpv1alpha1 "ocm.software/open-component-model/bindings/go/http/spec/config/v1alpha1"
 	ocicredsv1 "ocm.software/open-component-model/bindings/go/oci/spec/credentials/v1"
 )
 
@@ -259,7 +261,7 @@ func TestNewReadOnlyChartFromRemote_BasicAuthAccessTokenFallback(t *testing.T) {
 			srv := newBasicAuthChartServer(t, testDataDir, tt.serverUser, tt.serverPass)
 			chartURL := srv.URL + "/mychart-0.1.0.tgz"
 
-			var opts []Option
+			opts := []Option{WithHTTPConfig(plainHTTPConfig())}
 			if tt.helmCreds != nil {
 				opts = append(opts, WithCredentials(tt.helmCreds))
 			}
@@ -334,7 +336,7 @@ func TestNewReadOnlyChartFromRemote_HTTPRepoResolvesViaIndexYAML(t *testing.T) {
 	//   url.JoinPath(repoURL, chartName) + ":" + version
 	helmRepoRef := srv.URL + "/mychart:0.1.0"
 
-	chart, err := NewReadOnlyChartFromRemote(t.Context(), helmRepoRef, t.TempDir())
+	chart, err := NewReadOnlyChartFromRemote(t.Context(), helmRepoRef, t.TempDir(), WithHTTPConfig(plainHTTPConfig()))
 	r.NoError(err)
 	r.NotNil(chart)
 	assert.Equal(t, "mychart", chart.Name)
@@ -386,7 +388,7 @@ func TestNewReadOnlyChartFromRemote_VersionOverrideTakesPrecedenceInIndexLookup(
 	// opt.Version = "0.1.0" must win so the index lookup succeeds.
 	helmRepoRef := srv.URL + "/mychart:wrong-tag"
 
-	chart, err := NewReadOnlyChartFromRemote(t.Context(), helmRepoRef, t.TempDir(), WithVersion("0.1.0"))
+	chart, err := NewReadOnlyChartFromRemote(t.Context(), helmRepoRef, t.TempDir(), WithVersion("0.1.0"), WithHTTPConfig(plainHTTPConfig()))
 	r.NoError(err)
 	r.NotNil(chart)
 	assert.Equal(t, "mychart", chart.Name)
@@ -448,6 +450,17 @@ func TestResolveHTTPChartURL(t *testing.T) {
 				})
 			},
 			wantSuffix: "/mychart/mychart-0.1.0.tgz",
+		},
+		{
+			name:     "resolves a version with build metadata from index.yaml",
+			helmRepo: "%s/charts/mychart:0.1.0+abc123",
+			setupMux: func(mux *http.ServeMux, getSrvURL func() string) {
+				mux.HandleFunc("/charts/index.yaml", func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/yaml")
+					_, _ = w.Write([]byte("apiVersion: v1\ngenerated: \"2024-01-01T00:00:00.000Z\"\nentries:\n  mychart:\n  - name: mychart\n    version: 0.1.0+abc123\n    apiVersion: v2\n    urls:\n    - " + getSrvURL() + "/charts/mychart-0.1.0+abc123.tgz\n"))
+				})
+			},
+			wantSuffix: "/charts/mychart-0.1.0+abc123.tgz",
 		},
 		{
 			name:     "chart not found in index returns error",
@@ -531,4 +544,103 @@ func newBasicAuthChartServer(t *testing.T, dir, user, pass string) *httptest.Ser
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// TestNewReadOnlyChartFromRemote_CredentialsStayOnRepositoryHost verifies that the repository
+// credentials are not sent when index.yaml points the chart at another host, e.g. an
+// Artifactory remote repository whose index names the upstream chart URL.
+func TestNewReadOnlyChartFromRemote_CredentialsStayOnRepositoryHost(t *testing.T) {
+	workDir, err := os.Getwd()
+	require.NoError(t, err)
+	chartPath := filepath.Join(workDir, "..", "..", "testdata", "mychart-0.1.0.tgz")
+
+	// Both servers use TLS: the default-client path has no HTTP configuration,
+	// and without one an http:// repository is rejected.
+	for name, opts := range map[string]func(caPEM string) []Option{
+		"default client": func(caPEM string) []Option { return []Option{WithCACert(caPEM)} },
+		"http config": func(caPEM string) []Option {
+			return []Option{WithHTTPConfig(&httpv1alpha1.Config{TLSConfig: httpv1alpha1.TLSConfig{RootCAsPEM: caPEM}})}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := require.New(t)
+			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.Header.Get("Authorization") != "" {
+					http.Error(w, "unexpected credentials", http.StatusUnauthorized)
+					return
+				}
+				http.ServeFile(w, req, chartPath)
+			}))
+			t.Cleanup(upstream.Close)
+			repo := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if user, pass, ok := req.BasicAuth(); !ok || user != "user" || pass != "pw" {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+				_, _ = fmt.Fprintf(w, "apiVersion: v1\nentries:\n  mychart:\n  - name: mychart\n    version: 0.1.0\n    apiVersion: v2\n    urls:\n    - %s/charts/mychart-0.1.0.tgz\n", upstream.URL)
+			}))
+			t.Cleanup(repo.Close)
+
+			// httptest signs every TLS server with the same certificate.
+			opts := append([]Option{WithCredentials(&helmcredsv1.HelmHTTPCredentials{Username: "user", Password: "pw"})}, opts(certPEM(repo))...)
+			chart, err := NewReadOnlyChartFromRemote(t.Context(), repo.URL+"/mychart:0.1.0", t.TempDir(), opts...)
+			r.NoError(err)
+			r.Equal("mychart", chart.Name)
+		})
+	}
+}
+
+// plainHTTPConfig marks every host as plain HTTP, which the httptest servers
+// in this package are.
+func plainHTTPConfig() *httpv1alpha1.Config {
+	return &httpv1alpha1.Config{ProtocolConfig: httpv1alpha1.ProtocolConfig{PlainHTTP: new(true)}}
+}
+
+// TestChartPlainHTTP pins the rule for chart downloads: only the HTTP
+// configuration turns plain HTTP on; a classic http:// URL needs it, https://
+// stays HTTPS, and an oci:// chart follows the setting for its host.
+func TestChartPlainHTTP(t *testing.T) {
+	hostCfg := func(host string, plain *bool) *httpv1alpha1.Config {
+		if plain == nil {
+			return nil
+		}
+		if host == "" {
+			host = "charts.local:5000"
+		}
+		return &httpv1alpha1.Config{Hosts: map[string]*httpv1alpha1.HostConfig{
+			host: {ProtocolConfig: httpv1alpha1.ProtocolConfig{PlainHTTP: plain}},
+		}}
+	}
+	tests := []struct {
+		name      string
+		url       string
+		host      string // host of the config entry; empty means charts.local:5000
+		plain     *bool
+		wantPlain bool
+		wantErr   string
+	}{
+		{name: "oci without config stays HTTPS", url: "oci://charts.local:5000/charts/mychart:0.1.0"},
+		{name: "oci with per-host false stays HTTPS", url: "oci://charts.local:5000/charts/mychart:0.1.0", plain: new(false)},
+		{name: "oci with per-host true uses plain HTTP", url: "oci://charts.local:5000/charts/mychart:0.1.0", plain: new(true), wantPlain: true},
+		{name: "oci on docker.io follows the registry-1.docker.io entry", url: "oci://docker.io/charts/mychart:0.1.0", host: "registry-1.docker.io", plain: new(true), wantPlain: true},
+		{name: "http without config is rejected", url: "http://charts.local:5000/mychart-0.1.0.tgz", wantErr: "plain HTTP is not enabled"},
+		{name: "http with per-host false is rejected", url: "http://charts.local:5000/mychart-0.1.0.tgz", plain: new(false), wantErr: "plain HTTP is not enabled"},
+		{name: "http with per-host true uses plain HTTP", url: "http://charts.local:5000/mychart-0.1.0.tgz", plain: new(true), wantPlain: true},
+		{name: "https stays HTTPS without config", url: "https://charts.local:5000/mychart-0.1.0.tgz"},
+		{name: "https stays HTTPS with per-host true", url: "https://charts.local:5000/mychart-0.1.0.tgz", plain: new(true)},
+		{name: "entry for another host does not apply", url: "http://other.local/mychart-0.1.0.tgz", plain: new(true), wantErr: `host "other.local"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := require.New(t)
+			plain, err := chartPlainHTTP(t.Context(), tt.url, hostCfg(tt.host, tt.plain))
+			if tt.wantErr != "" {
+				r.ErrorContains(err, tt.wantErr)
+				r.ErrorContains(err, tt.url, "the error must name the URL")
+				return
+			}
+			r.NoError(err)
+			r.Equal(tt.wantPlain, plain)
+		})
+	}
 }

@@ -8,15 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/go-logr/logr"
-	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,18 +22,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"ocm.software/open-component-model/bindings/go/descriptor/normalisation/json/v4alpha3"
 	v2 "ocm.software/open-component-model/bindings/go/descriptor/v2"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/api/v1alpha1"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/event"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/ocm"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/resolution"
-	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/resolution/workerpool"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/status"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/util"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/verification"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/pkg/configuration"
 	"ocm.software/open-component-model/bindings/go/repository"
 	"ocm.software/open-component-model/bindings/go/runtime"
+	"ocm.software/open-component-model/bindings/go/runtime/versioning"
 	"ocm.software/open-component-model/bindings/go/signing"
 )
 
@@ -46,17 +42,19 @@ import (
 type Reconciler struct {
 	*ocm.BaseReconciler
 
-	// Resolver provides repository resolution and caching for component reconciliation.
-	// It ensures that repository access is efficient and consistent during reconciliation operations.
+	// Resolver provides repository resolution and verification for component reconciliation.
 	Resolver *resolution.Resolver
 }
 
 var _ ocm.Reconciler = (*Reconciler)(nil)
 
-var resourceIndex = ".spec.componentRef.Name"
+var (
+	resourceIndex  = ".spec.componentRef.Name"
+	discoveryIndex = "Discovery.spec.componentRef.name"
+)
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
+// SetupWithManager sets up the controller with the Manager. Manager bootstrap
+func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, concurrency int) error {
 	// Create index for repository reference name from components to make sure to reconcile, when the base ocm-
 	// repository changes.
 	const fieldName = "spec.repositoryRef.name"
@@ -83,12 +81,21 @@ func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) err
 	}); err != nil {
 		return fmt.Errorf("failed setting index fields: %w", err)
 	}
+	// This index is required to get all discoveries that reference a component. This is required to make sure that when
+	// deleting the component, no discovery exists anymore that references that component.
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &v1alpha1.Discovery{}, discoveryIndex, func(obj client.Object) []string {
+		discovery, ok := obj.(*v1alpha1.Discovery)
+		if !ok {
+			return nil
+		}
 
-	// event source from resolver's worker pool to get notified when resolutions complete
-	eventSource := workerpool.NewEventSource(r.Resolver.WorkerPool())
+		return []string{discovery.Spec.ComponentRef.Name}
+	}); err != nil {
+		return fmt.Errorf("failed setting index fields: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.Component{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		WatchesRawSource(eventSource).
 		Watches(
 			&v1alpha1.Repository{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -99,7 +106,9 @@ func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) err
 
 				// Get list of components that reference the repository
 				list := &v1alpha1.ComponentList{}
-				if err := r.List(ctx, list, client.MatchingFields{fieldName: repository.GetName()}); err != nil {
+				if err := r.List(ctx, list,
+					client.InNamespace(repository.GetNamespace()),
+					client.MatchingFields{fieldName: repository.GetName()}); err != nil {
 					return []reconcile.Request{}
 				}
 
@@ -108,55 +117,59 @@ func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) err
 				requests := make([]reconcile.Request, 0, len(list.Items))
 				for _, component := range list.Items {
 					requests = append(requests, reconcile.Request{
-						NamespacedName: types.NamespacedName{
-							Namespace: component.GetNamespace(),
-							Name:      component.GetName(),
-						},
+						Namespace: component.GetNamespace(),
+						Name:      component.GetName(),
 					})
 				}
 
 				return requests
 			})).
-		Watches(
-			// Ensure to reconcile the component when an OCM resource changes that references this component.
-			// We want to reconcile because the component-finalizer makes sure that the component is only deleted when
-			// it is not referenced by any resource anymore. So, when the component is already marked for deletion, we
-			// want to get notified about resource changes (e.g. deletion) to remove the component-finalizer
-			// respectively.
-			&v1alpha1.Resource{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				resource, ok := obj.(*v1alpha1.Resource)
-				if !ok {
-					return []reconcile.Request{}
-				}
-
-				component := &v1alpha1.Component{}
-				if err := r.Get(ctx, client.ObjectKey{
-					Namespace: resource.GetNamespace(),
-					Name:      resource.Spec.ComponentRef.Name,
-				}, component); err != nil {
-					return []reconcile.Request{}
-				}
-
-				// Only reconcile if the component is marked for deletion
-				if component.GetDeletionTimestamp().IsZero() {
-					return []reconcile.Request{}
-				}
-
-				return []reconcile.Request{
-					{NamespacedName: types.NamespacedName{
-						Namespace: component.GetNamespace(),
-						Name:      component.GetName(),
-					}},
-				}
-			})).
+		// Ensure to reconcile the component when an OCM resource or discovery changes that references this
+		// component. We want to reconcile because the component-finalizer makes sure that the component is only
+		// deleted when it is not referenced by any resource or discovery anymore. So, when the component is already
+		// marked for deletion, we want to get notified about reference changes (e.g. deletion or retargeting) to
+		// remove the component-finalizer respectively. Update events map both the old and the new reference, so
+		// retargeting releases the previously referenced Component.
+		Watches(&v1alpha1.Resource{}, handler.EnqueueRequestsFromMapFunc(r.mapToDeletingComponent)).
+		Watches(&v1alpha1.Discovery{}, handler.EnqueueRequestsFromMapFunc(r.mapToDeletingComponent)).
 		WithOptions(controller.Options{
-			RateLimiter: workqueue.NewTypedMaxOfRateLimiter(
-				workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](5*time.Millisecond, 5*time.Minute),
-				&workqueue.TypedBucketRateLimiter[reconcile.Request]{Limiter: rate.NewLimiter(10, 100)},
-			),
+			MaxConcurrentReconciles: concurrency,
+			RateLimiter:             r.RateLimit.Limiter(),
 		}).
 		Complete(r)
+}
+
+// mapToDeletingComponent maps a Resource or Discovery event to a reconcile
+// request for the Component it references, but only when that Component exists
+// and is marked for deletion. It is the reverse mapping for the Component
+// deletion guard: deleting or retargeting a reference must release the
+// previously referenced Component. Update events are mapped for both the old
+// and the new reference by controller-runtime, so retargeting releases the old
+// Component as well. Unsupported object types and lookup failures yield no
+// requests.
+func (r *Reconciler) mapToDeletingComponent(ctx context.Context, obj client.Object) []reconcile.Request {
+	var refName string
+	switch o := obj.(type) {
+	case *v1alpha1.Resource:
+		refName = o.Spec.ComponentRef.Name
+	case *v1alpha1.Discovery:
+		refName = o.Spec.ComponentRef.Name
+	default:
+		return nil
+	}
+
+	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: refName}
+	component := &v1alpha1.Component{}
+	if err := r.Get(ctx, key, component); err != nil {
+		return nil
+	}
+
+	// Only reconcile if the component is marked for deletion.
+	if component.GetDeletionTimestamp().IsZero() {
+		return nil
+	}
+
+	return []reconcile.Request{{NamespacedName: key}}
 }
 
 // +kubebuilder:rbac:groups=delivery.ocm.software,resources=components,verbs=get;list;watch;create;update;patch;delete
@@ -194,7 +207,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
 		}
 
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{Requeue: true}, nil //nolint:staticcheck // SA1019: pending replacement, see https://github.com/open-component-model/open-component-model/issues/2120
 	}
 
 	if component.Spec.Suspend {
@@ -239,25 +252,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("failed to get effective config: %w", err)
 	}
 
-	// Set effective config immediately so the deferred patch persists it
-	// even if a subsequent step fails.
-	if !equality.Semantic.DeepEqual(component.Status.EffectiveOCMConfig, configs) {
-		component.Status.EffectiveOCMConfig = configs
-		return ctrl.Result{}, fmt.Errorf("effective ocm config changed")
-	}
+	// The deferred status patch persists it, even if a later step fails.
+	component.Status.EffectiveOCMConfig = configs
 
 	repoSpec := &runtime.Raw{}
 	if err := runtime.NewScheme(runtime.WithAllowUnknown()).Decode(bytes.NewReader(repo.Spec.RepositorySpec.Raw), repoSpec); err != nil {
 		status.MarkNotReady(r.GetEventRecorder(), component, v1alpha1.GetRepositoryFailedReason, err.Error())
 
 		return ctrl.Result{}, fmt.Errorf("failed to decode repository spec: %w", err)
-	}
-
-	verifications, err := verification.GetVerifications(ctx, r.Client, component)
-	if err != nil {
-		status.MarkNotReady(r.EventRecorder, component, v1alpha1.GetComponentVersionFailedReason, err.Error())
-
-		return ctrl.Result{}, fmt.Errorf("failed to get verifications: %w", err)
 	}
 
 	cfg, err := configuration.LoadConfigurations(ctx, r.Client, component.GetNamespace(), configs)
@@ -274,44 +276,45 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("failed to create plugin manager: %w", err)
 	}
 
-	cacheBackedRepo, err := r.Resolver.NewCacheBackedRepository(ctx, &resolution.RepositoryOptions{
+	verifications, err := verification.GetVerifications(cfg)
+	if err != nil {
+		status.MarkNotReady(r.EventRecorder, component, v1alpha1.GetComponentVersionFailedReason, err.Error())
+
+		return ctrl.Result{}, fmt.Errorf("failed to get verifications: %w", err)
+	}
+
+	resolveOpts := &resolution.Options{
 		RepositorySpec: repoSpec,
 		Configuration:  cfg,
 		PluginManager:  pm,
-		Verifications:  verifications,
-		RequesterFunc: func() workerpool.RequesterInfo {
-			return workerpool.RequesterInfo{
-				NamespacedName: types.NamespacedName{
-					Namespace: component.GetNamespace(),
-					Name:      component.GetName(),
-				},
-			}
-		},
-	})
+	}
+
+	repoResolver, err := r.Resolver.RepositoryResolver(ctx, resolveOpts)
 	if err != nil {
 		status.MarkNotReady(r.GetEventRecorder(), component, v1alpha1.GetRepositoryFailedReason, err.Error())
 
-		return ctrl.Result{}, fmt.Errorf("failed to create cache-backed repository: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to create repository resolver: %w", err)
 	}
 
-	version, err := r.DetermineEffectiveVersionFromRepo(ctx, component, cacheBackedRepo)
+	cvRepo, err := repoResolver.GetComponentVersionRepositoryForComponent(ctx, component.Spec.Component, "")
+	if err != nil {
+		status.MarkNotReady(r.GetEventRecorder(), component, v1alpha1.GetRepositoryFailedReason, err.Error())
+
+		return ctrl.Result{}, fmt.Errorf("failed to get repository for component %s: %w", component.Spec.Component, err)
+	}
+
+	version, err := r.DetermineEffectiveVersionFromRepo(ctx, component, cvRepo)
 	if err != nil {
 		status.MarkNotReady(r.EventRecorder, component, v1alpha1.CheckVersionFailedReason, err.Error())
 
 		return ctrl.Result{}, fmt.Errorf("failed to determine effective version: %w", err)
 	}
 
-	desc, err := cacheBackedRepo.GetComponentVersion(ctx, component.Spec.Component, version)
+	desc, err := r.Resolver.GetComponentVersion(ctx, resolveOpts,
+		resolution.Verification{Verifications: verifications},
+		component.Spec.Component, version)
 	switch {
-	case errors.Is(err, workerpool.ErrResolutionInProgress):
-		// Resolution is in progress, the controller will be re-triggered via event source when resolution completes
-		status.MarkNotReady(r.EventRecorder, component, v1alpha1.ResolutionInProgress, err.Error())
-		logger.Info("component version resolution in progress, waiting for event notification",
-			"component", component.Spec.Component,
-			"version", version)
-
-		return ctrl.Result{}, nil
-	case errors.Is(err, workerpool.ErrNotSafelyDigestible):
+	case errors.Is(err, resolution.ErrNotSafelyDigestible):
 		// Ignore error, but log event
 		event.New(r.EventRecorder, component, nil, v1alpha1.EventSeverityError, "%s", err.Error())
 	default:
@@ -322,7 +325,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		}
 	}
 
-	digestSpec, err := signing.GenerateDigest(ctx, desc, slog.New(logr.ToSlogHandler(logger)), signing.LegacyNormalisationAlgo, crypto.SHA256.String())
+	// The status digest only detects changes (replication re-transfers on a new
+	// value), it is never a signature. It names a concrete algorithm, not the
+	// default or the jsonNormalisation/v3 alias: both can resolve differently in
+	// a later release, which would change this digest for every Component and
+	// reconcile everything watching it once.
+	digestSpec, err := signing.GenerateDigest(ctx, desc, slog.New(logr.ToSlogHandler(logger)), v4alpha3.Algorithm, crypto.SHA256.String())
 	if err != nil {
 		status.MarkNotReady(r.EventRecorder, component, v1alpha1.GetComponentVersionFailedReason, err.Error())
 
@@ -350,6 +358,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, component *v1alpha1.Co
 	// The component should only be deleted if no resource exists that references that component.
 	resourceList := &v1alpha1.ResourceList{}
 	if err := r.List(ctx, resourceList, &client.ListOptions{
+		Namespace: component.GetNamespace(),
 		FieldSelector: fields.OneTermEqualSelector(
 			resourceIndex,
 			client.ObjectKeyFromObject(component).Name,
@@ -368,6 +377,36 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, component *v1alpha1.Co
 
 		msg := fmt.Sprintf(
 			"component cannot be removed as resources are still referencing it: %s",
+			strings.Join(names, ","),
+		)
+		status.MarkNotReady(r.EventRecorder, component, v1alpha1.DeletionFailedReason, msg)
+
+		return errors.New(msg)
+	}
+
+	// The component should only be deleted if no same-namespace discovery
+	// exists that references that component.
+	discoveryList := &v1alpha1.DiscoveryList{}
+	if err := r.List(ctx, discoveryList, &client.ListOptions{
+		Namespace: component.GetNamespace(),
+		FieldSelector: fields.OneTermEqualSelector(
+			discoveryIndex,
+			client.ObjectKeyFromObject(component).Name,
+		),
+	}); err != nil {
+		status.MarkNotReady(r.EventRecorder, component, v1alpha1.DeletionFailedReason, err.Error())
+
+		return fmt.Errorf("failed to list discoveries: %w", err)
+	}
+
+	if len(discoveryList.Items) > 0 {
+		var names []string
+		for _, d := range discoveryList.Items {
+			names = append(names, fmt.Sprintf("%s/%s", d.Namespace, d.Name))
+		}
+
+		msg := fmt.Sprintf(
+			"component cannot be removed as discoveries are still referencing it: %s",
 			strings.Join(names, ","),
 		)
 		status.MarkNotReady(r.EventRecorder, component, v1alpha1.DeletionFailedReason, msg)
@@ -398,11 +437,15 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, component *v1alpha1.Co
 func (r *Reconciler) DetermineEffectiveVersionFromRepo(ctx context.Context, component *v1alpha1.Component,
 	repo repository.ComponentVersionRepository,
 ) (string, error) {
+	// The controller resolves versions with the loose-semver default; Spec.Semver
+	// is a semver constraint by CRD contract.
+	registry := versioning.Default()
+
 	// Fast path: if Spec.Semver is a single version (not a constraint),
 	// skip the ListComponentVersions call. Any not-found error will be
 	// surfaced by the subsequent GetComponentVersion call.
-	if pinned, err := semver.NewVersion(component.Spec.Semver); err == nil {
-		return ocm.ApplyDowngradePolicy(component, pinned)
+	if registry.Valid(component.Spec.Semver) {
+		return ocm.ApplyDowngradePolicy(registry, component, component.Spec.Semver)
 	}
 
 	versions, err := repo.ListComponentVersions(ctx, component.Spec.Component)
@@ -416,10 +459,10 @@ func (r *Reconciler) DetermineEffectiveVersionFromRepo(ctx context.Context, comp
 	if err != nil {
 		return "", reconcile.TerminalError(fmt.Errorf("failed to parse regexp filter: %w", err))
 	}
-	latestSemver, err := ocm.GetLatestValidVersion(ctx, versions, component.Spec.Semver, filter)
+	latestVersion, err := ocm.GetLatestValidVersion(ctx, registry, versions, component.Spec.Semver, filter)
 	if err != nil {
 		return "", reconcile.TerminalError(fmt.Errorf("failed to get valid latest version: %w", err))
 	}
 
-	return ocm.ApplyDowngradePolicy(component, latestSemver)
+	return ocm.ApplyDowngradePolicy(registry, component, latestVersion)
 }

@@ -1,9 +1,13 @@
 ---
 title: "Install the OCM CLI"
-description: "Learn how to install the OCM CLI on various platforms."
+description: "Learn how to install the OCM CLI on Linux, macOS, and Windows using package managers, the install script, GitHub Actions, or downloading the binary."
 icon: "💻"
-weight: 21
+weight: 10
 toc: true
+aliases:
+  - /docs/getting-started/run-cli-from-container-image/
+  - /docs/how-to/container-image-usage/
+  - /docs/how-to/how-to-use-the-ocm-cli-container-image/
 ---
 
 The OCM CLI is the primary tool for creating, managing, and transferring component versions.
@@ -34,6 +38,40 @@ wget -qO- https://ocm.software/install-cli.sh | {{< site-version "env" >}}bash
 ```shell
 curl -sfL https://ocm.software/install-cli.sh | {{< site-version "env" >}}bash
 ```
+
+{{< /tab >}}
+{{< tab "GitHub Actions" >}}
+
+In GitHub Actions workflows, use [`open-component-model/ocm-setup-action`](https://github.com/open-component-model/ocm-setup-action).
+It installs the CLI for the runner's OS and architecture (Linux, macOS, Windows on x64 and arm64), verifies the
+binary's SHA-256 digest and its [GitHub attestation](#verify-binary-authenticity), caches it with `actions/cache`,
+and adds `ocm` to the `PATH` of subsequent steps:
+
+```yaml
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: open-component-model/ocm-setup-action@v2
+{{< site-version "action-with" >}}      - run: ocm version
+```
+
+On the `main` docs the example installs the latest stable release; versioned docs pin `version` to that release.
+Set `cache: false` to skip the `actions/cache` restore and save — a binary already in the runner's tool
+cache is still reused when its digest matches the release asset.
+The action outputs the installed `version`, the binary `path`, and `cache-hit`.
+See the [action's README](https://github.com/open-component-model/ocm-setup-action#readme) for all inputs and outputs.
+
+{{< callout context="caution" title="Do not install unverified binaries" icon="outline/alert-triangle" >}}
+`verify-attestation: false` installs the CLI without checking its provenance — only set it on self-hosted
+runners that lack the [GitHub CLI](https://cli.github.com/), and verify the binary by another means as
+described in [Verify Binary Authenticity](#verify-binary-authenticity).
+{{< /callout >}}
 
 {{< /tab >}}
 {{< tab "OCM Component" >}}
@@ -98,6 +136,54 @@ chmod +x "$HOME/.local/bin/ocm"
 Replace `os` and `architecture` with your platform. This approach works on Linux and macOS.
 
 </details>
+
+{{< /tab >}}
+{{< tab "Run in Container" >}}
+
+Run the CLI straight from the official container image, no local install required. The image
+`ghcr.io/open-component-model/cli` ships the `ocm` binary (plus a FIPS build of `cosign` and
+`gpg`) on a minimal Garden Linux `bare-libc` base with no shell.
+
+Mount your working directory and run any `ocm` command as the container's entrypoint:
+
+```shell
+docker run --rm \
+  -v "$(pwd)":/workspace:ro \
+  -w /workspace \
+  ghcr.io/open-component-model/cli:{{< site-version "semver" >}} \
+  version
+```
+
+Pass credentials by mounting an `.ocmconfig` from the working directory (keep the mount
+writable, `:rw`, for commands that produce output such as `add cv`):
+
+```shell
+docker run --rm \
+  -v "$(pwd)":/workspace \
+  -w /workspace \
+  ghcr.io/open-component-model/cli:{{< site-version "semver" >}} \
+  get cv ghcr.io/<user>//ocm.software/<component>:1.0.0 -o yaml \
+  --config .ocmconfig
+```
+
+{{< callout title="Note" icon="outline/info-circle" >}}
+Pin a specific tag (for example `:{{< site-version "semver" >}}`) instead of `:latest` for
+reproducible runs. To let the CLI reach registries that need your system trust store, add
+`-v /etc/ssl/certs/:/etc/ssl/certs/:ro` (the certificate path may differ by OS). The image has
+no shell and does not yet bundle GnuPG, so run GPG signing where `gpg` is installed.
+{{< /callout >}}
+
+{{< callout title="Note" icon="outline/info-circle" >}}
+The image runs `ocm` as the non-root user `65532`. If the command needs to read files that only
+your user can read (for example a Docker `config.json` with mode `0600`) or write into a mounted
+directory, run the container as your own user by adding `--user "$(id -u):$(id -g)"`. For commands
+that write, also remove `:ro` from the bind mount and make sure that user can write to the mounted
+directory.
+{{< /callout >}}
+
+For a worked create-and-read walkthrough, see
+[Create Component Versions]({{< relref "create-component-version.md" >}}) and substitute the
+`docker run` invocation above for the local `ocm` command.
 
 {{< /tab >}}
 {{< tab "Build from Source" >}}
@@ -198,11 +284,18 @@ ocm version
 Expected output:
 
 ```text
-{"major":"0","minor":"1","patch":"0","gitVersion":"0.1.0","goVersion":"go1.26.0","compiler":"gc","platform":"darwin/arm64"}
+OCM CLI (Open Component Model v2)
+  Version:  {{< site-version "semver" >}}
 ```
 
+The same command in a workflow step (`- run: ocm version`) prints this into the job log.
+
+Releases before `0.17.0` print a lowercase JSON object instead, for example
+`{"major":"0","minor":"16","patch":"0","gitVersion":"0.16.0",…}`. That is still the v2 CLI.
+
 {{< callout title="If the output looks different" icon="outline/info-circle" >}}
-If the field names are **capitalised** (`Major`, `Minor`, `Patch`), you are running the legacy v1
+If the output is a JSON object with **capitalised** field names (`Major`, `Minor`, `Patch`) instead of the
+`OCM CLI (Open Component Model v2)` header, you are running the legacy v1
 CLI, not v2. A previous v1 installation is shadowing the new binary. Run `which ocm` (Linux/macOS)
 or `where.exe ocm` (Windows) to see which binary is active — then either move `~/.local/bin` earlier
 in your PATH or remove the v1 binary. Common v1 install locations are `/opt/homebrew/bin`
@@ -295,4 +388,4 @@ For detailed command documentation, see the [OCM CLI Reference]({{< relref "/doc
 
 ## Next Steps
 
-- [Tutorial: Create component versions]({{< relref "create-component-version.md" >}}) - Learn how to create and store component versions using the OCM CLI
+- [Getting Started: Create component versions]({{< relref "create-component-version.md" >}}) - Learn how to create and store component versions using the OCM CLI

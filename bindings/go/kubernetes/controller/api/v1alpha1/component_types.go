@@ -45,12 +45,6 @@ type ComponentSpec struct {
 	// +optional
 	SemverFilter string `json:"semverFilter,omitempty"`
 
-	// Verify contains a signature name specifying the component signature to be
-	// verified as well as the trusted public keys (or certificates containing
-	// the public keys) used to verify the signature.
-	// +optional
-	Verify []Verification `json:"verify,omitempty"`
-
 	// OCMConfig defines references to secrets, config maps or ocm api
 	// objects providing configuration data including credentials.
 	// +optional
@@ -94,8 +88,11 @@ type ComponentStatus struct {
 // Component is the Schema for the components API.
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].message`,description="Indicates if the Resource is Ready",priority=1
-// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Displays the Age of the Resource"
+// +kubebuilder:printcolumn:name="Component",type=string,JSONPath=`.spec.component`,description="Name of the OCM component"
+// +kubebuilder:printcolumn:name="Version",type=string,JSONPath=`.status.component.version`,description="Resolved component version"
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Indicates if the Component is Ready"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Displays the Age of the Component"
+// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].message`,description="Ready condition message"
 type Component struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -150,10 +147,6 @@ func (in *Component) GetSpecifiedOCMConfig() []OCMConfiguration {
 
 func (in *Component) GetEffectiveOCMConfig() []OCMConfiguration {
 	return in.Status.EffectiveOCMConfig
-}
-
-func (in *Component) GetVerifications() []Verification {
-	return in.Spec.Verify
 }
 
 // +kubebuilder:object:root=true

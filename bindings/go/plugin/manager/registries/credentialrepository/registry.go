@@ -2,11 +2,7 @@ package credentialrepository
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
-	"os"
-	"os/exec"
 	"sync"
 
 	"ocm.software/open-component-model/bindings/go/credentials"
@@ -26,18 +22,16 @@ func NewCredentialRepositoryRegistry(ctx context.Context) *RepositoryRegistry {
 		consumerTypeRegistrations:           make(map[runtime.Type]runtime.Type),
 		internalCredentialRepositoryPlugins: make(map[runtime.Type]credentials.RepositoryPlugin),
 		scheme:                              runtime.NewScheme(),
-		credentialTypeScheme:                runtime.NewScheme(),
 	}
 }
 
 // RepositoryRegistry holds all plugins that implement capabilities corresponding to RepositoryPlugin operations.
 type RepositoryRegistry struct {
-	ctx                  context.Context
-	mu                   sync.Mutex
-	capabilities         map[string]credentialsv1.CapabilitySpec
-	registry             map[runtime.Type]mtypes.Plugin
-	scheme               *runtime.Scheme
-	credentialTypeScheme *runtime.Scheme
+	ctx          context.Context
+	mu           sync.Mutex
+	capabilities map[string]credentialsv1.CapabilitySpec
+	registry     map[runtime.Type]mtypes.Plugin
+	scheme       *runtime.Scheme
 
 	constructedPlugins        map[string]*constructedPlugin // running plugins
 	consumerTypeRegistrations map[runtime.Type]runtime.Type
@@ -48,21 +42,6 @@ type RepositoryRegistry struct {
 // RepositoryScheme returns the scheme used for credential repository spec types.
 func (r *RepositoryRegistry) RepositoryScheme() *runtime.Scheme {
 	return r.scheme
-}
-
-// GetCredentialTypeScheme returns the runtime scheme containing all registered
-// credential types, including built-in and plugin-declared custom types.
-func (r *RepositoryRegistry) GetCredentialTypeScheme() *runtime.Scheme {
-	return r.credentialTypeScheme
-}
-
-// Register merges a pre-built scheme of built-in credential types into the registry.
-// Call this during startup to make built-in types (e.g. OCICredentials, HelmHTTPCredentials)
-// known before any plugin is loaded.
-func (r *RepositoryRegistry) Register(scheme *runtime.Scheme) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.credentialTypeScheme.MustRegisterScheme(scheme)
 }
 
 // AddPlugin takes a plugin discovered by the manager and adds it to the stored plugin registry.
@@ -89,35 +68,7 @@ func (r *RepositoryRegistry) AddPlugin(plugin mtypes.Plugin, spec runtime.Typed)
 		r.registry[typ.Type] = plugin
 	}
 
-	if err := r.registerCustomCredentialTypes(capability); err != nil {
-		return fmt.Errorf("failed to register custom credential types: %w", err)
-	}
-
 	return nil
-}
-
-func (r *RepositoryRegistry) registerCustomCredentialTypes(capability credentialsv1.CapabilitySpec) error {
-	var errs []error
-	for _, t := range capability.CustomCredentialTypes {
-		typed := &runtime.Raw{}
-		typed.SetType(t.Type)
-		allTypes := append([]runtime.Type{t.Type}, t.Aliases...)
-		conflict := false
-		for _, alias := range allTypes {
-			if r.credentialTypeScheme.IsRegistered(alias) {
-				errs = append(errs, fmt.Errorf("credential type %s already registered", alias))
-				conflict = true
-			}
-		}
-		if conflict {
-			continue
-		}
-		if err := r.credentialTypeScheme.RegisterWithAlias(typed, allTypes...); err != nil {
-			slog.ErrorContext(r.ctx, "failed to build scheme for plugin credential type", "type", t.Type, "error", err)
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
 }
 
 func (r *RepositoryRegistry) GetPlugin(ctx context.Context, spec runtime.Typed) (credentials.RepositoryPlugin, error) {
@@ -186,26 +137,20 @@ func (r *RepositoryRegistry) RegisterInternalCredentialRepositoryPlugin(
 }
 
 type constructedPlugin struct {
-	Plugin credentialsv1.CredentialRepositoryPluginContract[runtime.Typed]
-	cmd    *exec.Cmd
+	Plugin  credentialsv1.CredentialRepositoryPluginContract[runtime.Typed]
+	process plugins.Process
 }
 
-// Shutdown will loop through all _STARTED_ plugins and will send an Interrupt signal to them.
-// All plugins should handle interrupt signals gracefully. For Go, this is done automatically by
-// the plugin SDK.
+// Shutdown shuts down all _STARTED_ plugins.
 func (r *RepositoryRegistry) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var errs error
+	processes := make([]plugins.Process, 0, len(r.constructedPlugins))
 	for _, p := range r.constructedPlugins {
-		// The plugins should handle the Interrupt signal for shutdowns.
-		// TODO(Skarlso): Use context to wait for the plugin to actually shut down.
-		if perr := p.cmd.Process.Signal(os.Interrupt); perr != nil && !errors.Is(perr, os.ErrProcessDone) {
-			errs = errors.Join(errs, perr)
-		}
+		processes = append(processes, p.process)
 	}
 
-	return errs
+	return plugins.ShutdownAll(ctx, processes)
 }
 
 func startAndReturnPlugin(ctx context.Context, r *RepositoryRegistry, plugin *mtypes.Plugin) (credentialsv1.CredentialRepositoryPluginContract[runtime.Typed], error) {
@@ -224,8 +169,8 @@ func startAndReturnPlugin(ctx context.Context, r *RepositoryRegistry, plugin *mt
 
 	repoPlugin := NewCredentialRepositoryPlugin(client, plugin.ID, plugin.Path, plugin.Config, loc, r.capabilities[plugin.ID])
 	r.constructedPlugins[plugin.ID] = &constructedPlugin{
-		Plugin: repoPlugin,
-		cmd:    plugin.Cmd,
+		Plugin:  repoPlugin,
+		process: plugins.NewProcess(plugin, client, loc),
 	}
 
 	// wrap the untyped internal plugin into a typed representation.

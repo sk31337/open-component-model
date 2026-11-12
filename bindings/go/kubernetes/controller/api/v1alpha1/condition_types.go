@@ -71,9 +71,6 @@ const (
 	// ResourceNotSynced is used when the referenced resource is not yet synced.
 	ResourceNotSynced = "ResourceNotSynced"
 
-	// ResolutionInProgress is used when resolution is still in progress.
-	ResolutionInProgress = "ResolutionInProgress"
-
 	// ComponentDriftResolutionInProgress the component and the deployer are catching up.
 	ComponentDriftResolutionInProgress = "ComponentDriftResolutionInProgress"
 
@@ -82,4 +79,19 @@ const (
 
 	// TransferCompleteReason is used when no Replication transfer is done.
 	TransferCompleteReason = "TransferComplete"
+)
+
+// Discovery condition reasons.
+const (
+	// SelectorFailedReason is used when a Discovery selector fails to compile or evaluate.
+	SelectorFailedReason = "SelectorFailed"
+
+	// ExtractFailedReason is used when Discovery extraction fails to compile, evaluate, or produce a list of objects.
+	ExtractFailedReason = "ExtractFailed"
+
+	// ResolutionFailedReason is used when the transitive component graph of a Discovery cannot be fully resolved.
+	ResolutionFailedReason = "ResolutionFailed"
+
+	// PayloadTooLargeReason is used when the Discovery status payload exceeds the API server size limit.
+	PayloadTooLargeReason = "PayloadTooLarge"
 )

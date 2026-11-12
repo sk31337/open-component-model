@@ -5,25 +5,29 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common/types"
-	"github.com/google/cel-go/common/types/ref"
-	"github.com/google/cel-go/common/types/traits"
+	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/common/types"
+	"cel.dev/cel-go/common/types/ref"
+	"cel.dev/cel-go/common/types/traits"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	v2 "ocm.software/open-component-model/bindings/go/descriptor/v2"
-	helmspec "ocm.software/open-component-model/bindings/go/helm/spec/access/v1"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/api/v1alpha1"
 	"ocm.software/open-component-model/bindings/go/kubernetes/controller/internal/cel/functions"
-	ocispec "ocm.software/open-component-model/bindings/go/oci/spec/access/v1"
+	ocifunctions "ocm.software/open-component-model/bindings/go/oci/cel/functions"
 	"ocm.software/open-component-model/bindings/go/runtime"
 )
 
 // componentInfoForRepository creates a ComponentInfo with a repository spec pointing to the given registry and optional subPath.
 func componentInfoForRepository(repository string, subPath string) *v1alpha1.ComponentInfo {
-	repoSpec := fmt.Sprintf(`{"type":"OCIRepository/v1","baseUrl":"https://%s","subPath":"%s"}`, repository, subPath)
+	return componentInfoForBaseURL("https://"+repository, subPath)
+}
+
+// componentInfoForBaseURL creates a ComponentInfo with a repository spec for the given base URL, with or without a scheme.
+func componentInfoForBaseURL(baseURL string, subPath string) *v1alpha1.ComponentInfo {
+	repoSpec := fmt.Sprintf(`{"type":"OCIRepository/v1","baseUrl":"%s","subPath":"%s"}`, baseURL, subPath)
 	return &v1alpha1.ComponentInfo{
 		RepositorySpec: &apiextensionsv1.JSON{Raw: []byte(repoSpec)},
 		Component:      "test-component",
@@ -31,83 +35,7 @@ func componentInfoForRepository(repository string, subPath string) *v1alpha1.Com
 	}
 }
 
-// TODO(matthiasnbruns): we will drop support for this completely - https://github.com/open-component-model/ocm-project/issues/960
-func TestBindingToOCI_StringReference(t *testing.T) {
-	tests := []struct {
-		name      string
-		input     string
-		component *v1alpha1.ComponentInfo
-		expects   map[string]string
-		err       require.ErrorAssertionFunc
-	}{
-		{
-			name:  "string reference with a version should succeed and set tag",
-			input: "registry.io/myrepo/myapp:v1",
-			expects: map[string]string{
-				"host":       "registry.io",
-				"registry":   "registry.io",
-				"repository": "myrepo/myapp",
-				"tag":        "v1",
-				"digest":     "",
-				"reference":  "v1",
-			},
-		},
-		{
-			name:  "string reference with a digest should succeed and set digest",
-			input: "registry.io/myrepo/myapp@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			expects: map[string]string{
-				"host":       "registry.io",
-				"registry":   "registry.io",
-				"repository": "myrepo/myapp",
-				"tag":        "",
-				"digest":     "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-				"reference":  "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			},
-		},
-		{
-			name:  "string reference with a version & digest should succeed and set digest and tag",
-			input: "registry.io/myrepo/myapp:v1@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			expects: map[string]string{
-				"host":       "registry.io",
-				"registry":   "registry.io",
-				"repository": "myrepo/myapp",
-				"tag":        "v1",
-				"digest":     "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-				"reference":  "v1@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			},
-		},
-
-		{
-			name:  "full reference pointing to another repo",
-			input: "registry.io/someotherrepo/myapp:v1@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			// this is a theoretical test case that should not have any impact on the reference at all
-			component: componentInfoForRepository("registry.io", "myrepo"),
-			expects: map[string]string{
-				"host":       "registry.io",
-				"registry":   "registry.io",
-				"repository": "someotherrepo/myapp",
-				"tag":        "v1",
-				"digest":     "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-				"reference":  "v1@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			},
-		},
-		{
-			name:      "string reference with an invalid digest should fail",
-			input:     "registry.io/myrepo/myapp:v1@sha256:gibberish",
-			component: componentInfoForRepository("registry.io", "myrepo"),
-			expects:   map[string]string{},
-			err:       require.Error,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runToOCITests(t, tc.input, tc.component, tc.expects, tc.err)
-		})
-	}
-}
-
-func TestBindingToOCI_TypedAccessSpecs(t *testing.T) {
+func TestLocalBlobResolver(t *testing.T) {
 	tests := []struct {
 		name      string
 		input     map[string]any
@@ -115,53 +43,6 @@ func TestBindingToOCI_TypedAccessSpecs(t *testing.T) {
 		expects   map[string]string
 		err       require.ErrorAssertionFunc
 	}{
-		{
-			name: "OCIImage access with ociArtifact type",
-			input: typedToMap(t, &ocispec.OCIImage{
-				Type:           runtime.NewVersionedType("ociArtifact", "v1"),
-				ImageReference: "ghcr.io/open-component-model/ocm/ocm.software/ocmcli/ocmcli-image:0.24.0",
-			}),
-			expects: map[string]string{
-				"host":       "ghcr.io",
-				"registry":   "ghcr.io",
-				"repository": "open-component-model/ocm/ocm.software/ocmcli/ocmcli-image",
-				"tag":        "0.24.0",
-				"digest":     "",
-				"reference":  "0.24.0",
-			},
-		},
-		{
-			name: "OCIImage access with OCIImage/v1 type",
-			input: typedToMap(t, &ocispec.OCIImage{
-				Type:           runtime.NewVersionedType("OCIImage", "v1"),
-				ImageReference: "registry.io/myrepo/myapp:v1@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			}),
-			expects: map[string]string{
-				"host":       "registry.io",
-				"registry":   "registry.io",
-				"repository": "myrepo/myapp",
-				"tag":        "v1",
-				"digest":     "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-				"reference":  "v1@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			},
-		},
-
-		{
-			name: "OCIImage access with OCIImage/v1 type pointing to another repo",
-			input: typedToMap(t, &ocispec.OCIImage{
-				Type:           runtime.NewVersionedType("OCIImage", "v1"),
-				ImageReference: "registry.io/anotherrepo/myapp:v1@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			}),
-			component: componentInfoForRepository("registry.io", "myrepo"),
-			expects: map[string]string{
-				"host":       "registry.io",
-				"registry":   "registry.io",
-				"repository": "anotherrepo/myapp",
-				"tag":        "v1",
-				"digest":     "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-				"reference":  "v1@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-			},
-		},
 		{
 			name: "localBlob builds reference from repo spec and component info",
 			input: typedToMap(t, &v2.LocalBlob{
@@ -180,13 +61,64 @@ func TestBindingToOCI_TypedAccessSpecs(t *testing.T) {
 			},
 		},
 		{
-			name: "Helm access has no imageReference and returns error",
-			input: typedToMap(t, &helmspec.Helm{
-				Type:           runtime.NewVersionedType("Helm", "v1"),
-				HelmRepository: "oci://ghcr.io/org/charts",
-				HelmChart:      "my-chart:1.0.0",
+			name: "localBlob builds reference without subPath",
+			input: typedToMap(t, &v2.LocalBlob{
+				Type:           runtime.NewVersionedType(v2.LocalBlobAccessType, v2.LocalBlobAccessTypeVersion),
+				LocalReference: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+				MediaType:      "application/vnd.oci.image.manifest.v1+json",
 			}),
-			component: componentInfoForRepository("ghcr.io", "org/charts"),
+			component: componentInfoForRepository("ghcr.io", ""),
+			expects: map[string]string{
+				"host":       "ghcr.io",
+				"registry":   "ghcr.io",
+				"repository": "component-descriptors/test-component",
+				"tag":        "",
+				"digest":     "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+				"reference":  "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+			},
+		},
+		{
+			name: "localBlob builds reference from scheme-less host:port with path",
+			input: typedToMap(t, &v2.LocalBlob{
+				Type:           runtime.NewVersionedType(v2.LocalBlobAccessType, v2.LocalBlobAccessTypeVersion),
+				LocalReference: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+				MediaType:      "application/vnd.oci.image.manifest.v1+json",
+			}),
+			component: componentInfoForBaseURL("registry.local:5000/ocm", ""),
+			expects: map[string]string{
+				"host":       "registry.local:5000",
+				"registry":   "registry.local:5000",
+				"repository": "ocm/component-descriptors/test-component",
+				"tag":        "",
+				"digest":     "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+				"reference":  "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+			},
+		},
+		{
+			name: "localBlob builds reference from scheme-less host:port without path",
+			input: typedToMap(t, &v2.LocalBlob{
+				Type:           runtime.NewVersionedType(v2.LocalBlobAccessType, v2.LocalBlobAccessTypeVersion),
+				LocalReference: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+				MediaType:      "application/vnd.oci.image.manifest.v1+json",
+			}),
+			component: componentInfoForBaseURL("localhost:5000", ""),
+			expects: map[string]string{
+				"host":       "localhost:5000",
+				"registry":   "localhost:5000",
+				"repository": "component-descriptors/test-component",
+				"tag":        "",
+				"digest":     "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+				"reference":  "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+			},
+		},
+		{
+			name: "localBlob with nil component returns error",
+			input: typedToMap(t, &v2.LocalBlob{
+				Type:           runtime.NewVersionedType(v2.LocalBlobAccessType, v2.LocalBlobAccessTypeVersion),
+				LocalReference: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+				MediaType:      "application/vnd.oci.image.manifest.v1+json",
+			}),
+			component: nil,
 			err:       require.Error,
 		},
 	}
@@ -198,28 +130,23 @@ func TestBindingToOCI_TypedAccessSpecs(t *testing.T) {
 	}
 }
 
-// runToOCITests runs tests for a map input against the ToOCI cel binding and assets against the desired output
+// runToOCITests runs tests for a map input against the ToOCI CEL binding with the
+// LocalBlobResolver and asserts against the desired output.
 func runToOCITests(t *testing.T,
-	input any,
+	input map[string]any,
 	component *v1alpha1.ComponentInfo,
 	expects map[string]string,
 	errFunc require.ErrorAssertionFunc,
 ) {
+	t.Helper()
 	r := require.New(t)
-	bindFn := functions.BindingToOCI(component)
 
-	var val ref.Val
-	var celType *cel.Type
-	switch v := input.(type) {
-	case string:
-		val = bindFn(types.String(v))
-		celType = cel.StringType
-	case map[string]any:
-		val = bindFn(types.DefaultTypeAdapter.NativeToValue(v))
-		celType = cel.DynType
-	default:
-		r.Failf("Unsupported input", "runToOCITests does not support: %v", v)
+	opts := []ocifunctions.Option{
+		ocifunctions.WithReferenceResolver(functions.LocalBlobResolver(component)),
 	}
+	bindFn := ocifunctions.BindingToOCI(opts...)
+
+	val := bindFn(types.DefaultTypeAdapter.NativeToValue(input))
 	r.NotNil(val)
 
 	if errFunc != nil {
@@ -232,9 +159,9 @@ func runToOCITests(t *testing.T,
 
 	t.Run("cel", func(t *testing.T) {
 		r := require.New(t)
-		env, err := cel.NewEnv(functions.ToOCI(component), cel.Variable("value", celType))
+		env, err := cel.NewEnv(ocifunctions.ToOCI(opts...), cel.Variable("value", cel.DynType))
 		r.NoError(err)
-		ast, issues := env.Compile(fmt.Sprintf("value.%s()", functions.ToOCIFunctionName))
+		ast, issues := env.Compile(fmt.Sprintf("value.%s()", ocifunctions.ToOCIFunctionName))
 		r.NoError(issues.Err())
 
 		prog, err := env.Program(ast)
@@ -248,10 +175,10 @@ func runToOCITests(t *testing.T,
 	})
 }
 
-// assertCelMap checks if the evaluated cel value matches the expected test data
+// assertCelMap checks if the evaluated CEL value matches the expected test data.
 func assertCelMap(t *testing.T, val ref.Val, expects map[string]string) {
+	t.Helper()
 	r := require.New(t)
-	// Result must be a map with string keys and values
 	mapper, ok := val.(traits.Mapper)
 	r.True(ok, "expected traits.Mapper, got %T", val)
 	a := assert.New(t)
